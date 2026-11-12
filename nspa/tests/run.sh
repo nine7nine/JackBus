@@ -21,6 +21,7 @@ iters="${NSPA_ITERS:-200}"
 [ "${1:-}" = quick ] && iters=20
 
 cc -O2 -Wall -I"$root/common" -o "$out/stress64" "$here/stress.c" -L"$fork_lib" -ljack -lpthread || exit 1
+cc -O2 -Wall -I"$root/common" -o "$out/xrun_timer" "$here/xrun_timer.c" -L"$fork_lib" -ljack -lpthread || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -32,10 +33,10 @@ start_server() {
     rm -f /dev/shm/jack_${sname}_*
     if [ "$1" = fork ]; then
         LD_LIBRARY_PATH="$fork_lib" JACK_DRIVER_DIR="$JACK_BUILD" \
-            "$JACK_BUILD/jackd" -n "$sname" -R -P 70 -d dummy -r 48000 -p 128 >"$2" 2>&1 &
+            "$JACK_BUILD/jackd" -n "$sname" -R -P 70 ${SERVER_EXTRA:-} -d dummy -r 48000 -p 128 >"$2" 2>&1 &
     else
         env -u LD_LIBRARY_PATH -u JACK_DRIVER_DIR \
-            /usr/bin/jackd -n "$sname" -R -P 70 -d dummy -r 48000 -p 128 >"$2" 2>&1 &
+            /usr/bin/jackd -n "$sname" -R -P 70 ${SERVER_EXTRA:-} -d dummy -r 48000 -p 128 >"$2" 2>&1 &
     fi
     SERVER_PID=$!
     i=0
@@ -106,10 +107,29 @@ two_servers() {
     if [ $rc -eq 0 ]; then echo "PASS $name"; else echo "FAIL $name"; tail -3 "$out/$name.client.log"; fail=1; fi
 }
 
+# Frame timer across a server-side xrun (sync mode makes the driver cycle overrun).
+# xrun_timer_case <name> <server> <client-libdir|system> <gating:1|0>
+xrun_timer_case() {
+    name=$1; server=$2; lib=$3; gating=$4
+    SERVER_EXTRA=-S start_server "$server" "$out/$name.server.log" || { echo "FAIL $name: server"; fail=1; return; }
+    if [ "$lib" = system ]; then
+        env -u LD_LIBRARY_PATH timeout 60 "$out/xrun_timer" >"$out/$name.client.log" 2>&1
+    else
+        LD_LIBRARY_PATH="$lib" timeout 60 "$out/xrun_timer" >"$out/$name.client.log" 2>&1
+    fi
+    rc=$?
+    stop_server
+    if [ $rc -eq 0 ]; then echo "PASS $name: $(tail -1 "$out/$name.client.log")"
+    elif [ "$gating" = 1 ]; then echo "FAIL $name (rc=$rc): $(tail -1 "$out/$name.client.log")"; fail=1
+    else echo "INFO $name (rc=$rc, expected to fail on unfixed servers): $(tail -1 "$out/$name.client.log")"; fi
+}
+
 run_case fork-server_fork-lib       fork   "$out/stress64" "$fork_lib"
 run_case fork-server_system-lib     fork   "$out/stress64" system
 run_case system-server_fork-lib     system "$out/stress64" "$fork_lib"
 run_case fork-server_system-lib32   fork   "$out/stress32" system
 two_servers
+xrun_timer_case xrun-timer_fork-server       fork   "$fork_lib" 1
+xrun_timer_case xrun-timer_system-server     system system      0
 
 exit $fail

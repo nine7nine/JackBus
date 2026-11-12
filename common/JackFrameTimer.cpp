@@ -62,6 +62,13 @@ jack_nframes_t JackTimer::Time2Frames(jack_time_t usecs, jack_nframes_t buffer_s
         */
         int64_t du = usecs - fCurrentWakeup;
         int64_t dp = fNextWakeUp - fCurrentWakeup;
+        if (dp <= 0) {
+            // Inconsistent state published by an older server after an xrun.
+            dp = (fPeriodUsecs >= 1.f) ? (int64_t)fPeriodUsecs : 0;
+            if (dp == 0) {
+                return fFrames;
+            }
+        }
         return fFrames + (int32_t)rint((double)du / (double)dp * buffer_size);
     } else {
         return 0;
@@ -83,6 +90,10 @@ jack_time_t JackTimer::Frames2Time(jack_nframes_t frames, jack_nframes_t buffer_
         */
         int32_t df = frames - fFrames;
         int64_t dp = fNextWakeUp - fCurrentWakeup;
+        if (dp <= 0) {
+            // Inconsistent state published by an older server after an xrun.
+            dp = (fPeriodUsecs >= 1.f) ? (int64_t)fPeriodUsecs : 0;
+        }
         return fCurrentWakeup + (int64_t)rint((double) df * (double) dp / buffer_size);
     } else {
         return 0;
@@ -96,6 +107,10 @@ int JackTimer::GetCycleTimes(jack_nframes_t* current_frames, jack_time_t* curren
         *current_usecs = fCurrentWakeup;
         *next_usecs = fNextWakeUp;
         *period_usecs = fPeriodUsecs;
+        if (*next_usecs <= *current_usecs) {
+            // Inconsistent state published by an older server after an xrun.
+            *next_usecs = *current_usecs + (jack_time_t)(fPeriodUsecs >= 1.f ? fPeriodUsecs : 1.f);
+        }
         return 0;
     } else {
         return -1;
@@ -125,11 +140,23 @@ void JackFrameTimer::IncFrameTime(jack_nframes_t buffer_size, jack_time_t callba
 void JackFrameTimer::ResetFrameTime(jack_time_t callback_usecs)
 {
     if (!fFirstWakeUp) { // ResetFrameTime may be called by a xrun/delayed wakeup on the first cycle
+        /*
+        After an xrun the DLL's prediction (fNextWakeUp) is stale, possibly
+        earlier than callback_usecs. Previously only fCurrentWakeup was moved,
+        so until the next cycle readers saw next <= current (Time2Frames()
+        dividing by zero or running backwards), and the following cycles kept
+        filtering from the stale prediction, lagging real time for hundreds of
+        cycles. Publish a consistent state now, and re-seed the DLL from the
+        next real callback time (the "post-xrun" case InitFrameTimeAux() was
+        written for).
+        */
         JackTimer* timer = WriteNextStateStart();
         timer->fCurrentWakeup = callback_usecs;
         timer->fCurrentCallback = callback_usecs;
+        timer->fNextWakeUp = callback_usecs + (jack_time_t)(timer->fPeriodUsecs > 0.f ? timer->fPeriodUsecs : 1.f);
         WriteNextStateStop();
         TrySwitchState(); // always succeed since there is only one writer
+        fFirstWakeUp = true;
     }
 }
 
