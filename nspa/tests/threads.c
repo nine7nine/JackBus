@@ -83,8 +83,8 @@ static int test_api_concurrency(void)
     pthread_create(&b, NULL, api_connect_thread, NULL);
     pthread_join(a, NULL);
     pthread_join(b, NULL);
-    jack_client_close(api_client);
     printf("%s api-concurrency: %d errors in 2x400 iterations\n", atomic_load(&api_errors) ? "FAIL" : "PASS", atomic_load(&api_errors));
+    jack_client_close(api_client);
     return atomic_load(&api_errors) != 0;
 }
 
@@ -107,9 +107,9 @@ static int test_activate_init(void)
     jack_activate(b);
     usleep(300000);
     int x = atomic_load(&xruns_seen);
+    printf("%s activate-init: %d xruns after activating a client with a 60 ms buffer-size callback\n", x ? "FAIL" : "PASS", x);
     jack_client_close(b);
     jack_client_close(a);
-    printf("%s activate-init: %d xruns after activating a client with a 60 ms buffer-size callback\n", x ? "FAIL" : "PASS", x);
     return x != 0;
 }
 
@@ -189,8 +189,8 @@ static int test_sync_callback(void)
     jack_set_sync_callback(c, sync_cb, &magic_sync);
     usleep(100000);
     int calls = atomic_load(&sync_calls);
-    jack_client_close(c);
     printf("%s sync-callback: invoked %d times within 100 ms of being set on an active client\n", calls ? "PASS" : "FAIL", calls);
+    jack_client_close(c);
     return calls == 0;
 }
 
@@ -209,10 +209,10 @@ static int test_transport_churn(void)
         jack_set_sync_callback(c, NULL, NULL);
     }
     jack_transport_stop(c);
-    jack_client_close(c);
     int bad = atomic_load(&arg_mismatch);
     printf("%s transport-churn: 2000 set/release rounds, %d timebase calls, %d wrong-argument calls\n",
            bad ? "FAIL" : "PASS", atomic_load(&timebase_calls), bad);
+    jack_client_close(c);
     return bad != 0;
 }
 
@@ -264,10 +264,10 @@ static int test_rt_helper_thread(void)
     atomic_store(&helper_stop, 1);
     pthread_join(tid, NULL);
     float period_us = 1e6f * jack_get_buffer_size(c) / jack_get_sample_rate(c);
-    jack_client_close(c);
     int bad = helper_worst_us > period_us / 2;
     printf("%s rt-helper-thread: longest jack_port_get_latency_range() call %.0f us (period %.0f us)\n",
            bad ? "FAIL" : "PASS", helper_worst_us, period_us);
+    jack_client_close(c);
     return bad;
 }
 
@@ -279,6 +279,9 @@ int main(int argc, char **argv)
         {"transport-churn", test_transport_churn}, {"rt-helper-thread", test_rt_helper_thread},
     };
     int fail = 0;
+    /* verdicts are printed before jack_client_close(): under TSan, JACK's
+       asynchronous thread cancellation at close aborts the process */
+    setvbuf(stdout, NULL, _IOLBF, 0);
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; i++) {
         int run = argc < 2;
         for (int a = 1; a < argc; a++)
