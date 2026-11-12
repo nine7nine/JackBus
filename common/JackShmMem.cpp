@@ -21,6 +21,9 @@
 #include "JackShmMem.h"
 #include <stdio.h>
 #include <mutex>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/mman.h>
 
 namespace Jack
 {
@@ -173,12 +176,43 @@ void JackShmMem::operator delete(void* obj)
     }
 }
 
+#ifdef __linux__
+#ifndef MADV_POPULATE_READ
+#define MADV_POPULATE_READ 22
+#endif
+#ifndef MADV_POPULATE_WRITE
+#define MADV_POPULATE_WRITE 23
+#endif
+
+/*
+ When mlock() is refused (RLIMIT_MEMLOCK, e.g. users without realtime
+ privileges, sandboxed clients), at least fault the pages in now instead of
+ on first access from a realtime thread (port buffers, connection tables).
+ MADV_POPULATE_* (Linux 5.14) do not count against the limit; the server keeps
+ the shared pages locked, so the mappings stay valid.
+*/
+static void PopulateMemory(void* ptr, size_t size)
+{
+    uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    uintptr_t start = (uintptr_t)ptr & ~(page - 1);
+    size_t len = size + ((uintptr_t)ptr - start);
+    if (madvise((void*)start, len, MADV_POPULATE_WRITE) != 0) {
+        // read-only mapping (EFAULT) or older kernel (EINVAL)
+        madvise((void*)start, len, MADV_POPULATE_READ);
+    }
+}
+#else
+static void PopulateMemory(void* ptr, size_t size)
+{}
+#endif
+
 void LockMemoryImp(void* ptr, size_t size)
 {
     if (CHECK_MLOCK((char*)ptr, size)) {
         jack_log("Succeeded in locking %u byte memory area", size);
     } else {
-        jack_error("Cannot lock down %u byte memory area (%s)", size, strerror(errno));
+        jack_error("Cannot lock down %u byte memory area (%s), prefaulting it instead", size, strerror(errno));
+        PopulateMemory(ptr, size);
     }
 }
 
@@ -188,7 +222,8 @@ void InitLockMemoryImp(void* ptr, size_t size)
         memset(ptr, 0, size);
         jack_log("Succeeded in locking %u byte memory area", size);
     } else {
-        jack_error("Cannot lock down %u byte memory area (%s)", size, strerror(errno));
+        jack_error("Cannot lock down %u byte memory area (%s), prefaulting it instead", size, strerror(errno));
+        PopulateMemory(ptr, size);
     }
 }
 

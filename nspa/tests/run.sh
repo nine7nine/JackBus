@@ -35,6 +35,7 @@ c++ -std=gnu++11 -O2 -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$ro
     -o "$out/pi_mutex" "$here/pi_mutex.cpp" -L"$fork_lib" -ljackserver || exit 1
 c++ -std=gnu++11 -O2 -w -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" -I"$JACK_BUILD" \
     -include "$JACK_BUILD/config.h" -o "$out/connection_copy" "$here/connection_copy.cpp" -L"$fork_lib" -ljackserver || exit 1
+cc -O2 -Wall -I"$root/common" -o "$out/rt_faults" "$here/rt_faults.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -161,6 +162,17 @@ two_servers
 xrun_timer_case xrun-timer_fork-server       fork   "$fork_lib" 1
 xrun_timer_case xrun-timer_system-server     system system      0
 wrap_case
+# page faults in process callbacks when the client cannot mlock (small RLIMIT_MEMLOCK)
+if start_server fork "$out/rt_faults.server.log"; then
+    if (ulimit -l 64; LD_LIBRARY_PATH="$fork_lib" timeout 60 "$out/rt_faults" 300 >"$out/rt_faults.log" 2>/dev/null); then
+        echo "PASS rt-faults (memlock 64 KB): $(tail -1 "$out/rt_faults.log" | sed 's/^PASS: //')"
+    else
+        echo "FAIL rt-faults (memlock 64 KB): $(tail -1 "$out/rt_faults.log")"; fail=1
+    fi
+    stop_server || fail=1
+else
+    echo "FAIL rt-faults: server"; fail=1
+fi
 # libjack threading (fork server + fork libjack)
 if start_server fork "$out/threads.server.log"; then
     LD_LIBRARY_PATH="$fork_lib" timeout 120 "$out/threads" >"$out/threads.log" 2>&1 || { [ $? -eq 124 ] && echo "TIMEOUT threads (hang)" >>"$out/threads.log"; fail=1; }

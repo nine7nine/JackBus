@@ -527,6 +527,20 @@ void JackClient::InitAux()
 /*!
 \brief Called once when the thread starts.
 */
+/*
+ Touch the first 64 KB of the RT thread's stack before the first cycle, so the
+ page faults happen here and not in the process callback (the thread stack is
+ not locked when the process is not mlockall()ed; e.g. port mixdown puts
+ several KB on it).
+*/
+static void __attribute__((noinline)) PrefaultStack()
+{
+    volatile char stack[64 * 1024];
+    for (size_t i = 0; i < sizeof(stack); i += 1024) {
+        stack[i] = 0;
+    }
+}
+
 bool JackClient::Init()
 {
     /*
@@ -555,6 +569,7 @@ bool JackClient::Init()
         SetupRealTime();
     }
 
+    PrefaultStack();
     return true;
 }
 
