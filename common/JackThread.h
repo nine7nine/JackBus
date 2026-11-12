@@ -34,6 +34,13 @@ namespace Jack
  thread cancelled while holding a mutex leaves it locked forever, so declare
  one of these *before* taking a lock that such a thread can hold; it is
  destroyed after the lock is released, and a pending cancel then takes effect.
+
+ With asynchronous cancellation glibc acts on a pending cancel inside
+ pthread_setcancelstate(), so the forced unwind starts in the destructor. A
+ destructor is noexcept by default, and unwinding out of a noexcept function
+ calls std::terminate(): the application would abort in jack_client_close().
+ Hence noexcept(false). (An exception already propagating through the scope
+ was fatal anyway: it would leave the thread's start routine.)
  */
 class JackNoCancelScope
 {
@@ -41,7 +48,7 @@ class JackNoCancelScope
         int fOldState;
     public:
         JackNoCancelScope() { pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &fOldState); }
-        ~JackNoCancelScope() { pthread_setcancelstate(fOldState, NULL); }
+        ~JackNoCancelScope() noexcept(false) { pthread_setcancelstate(fOldState, NULL); }
 #endif
 };
 

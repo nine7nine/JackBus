@@ -36,6 +36,8 @@ c++ -std=gnu++11 -O2 $tcf -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -
     -o "$out/pi_mutex" "$here/pi_mutex.cpp" -L"$fork_lib" -ljackserver || exit 1
 c++ -std=gnu++11 -O2 $tcf -w -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" -I"$JACK_BUILD" \
     -include "$JACK_BUILD/config.h" -o "$out/connection_copy" "$here/connection_copy.cpp" -L"$fork_lib" -ljackserver || exit 1
+c++ -std=gnu++11 -O2 $tcf -Wall -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" -I"$JACK_BUILD" \
+    -include "$JACK_BUILD/config.h" -o "$out/nocancel" "$here/nocancel.cpp" -lpthread || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/rt_faults" "$here/rt_faults.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/stale_client" "$here/stale_client.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/mixdown" "$here/mixdown.c" -L"$fork_lib" -ljack || exit 1
@@ -262,6 +264,8 @@ if LD_LIBRARY_PATH="$fork_lib" "$out/pi_mutex" >"$out/pi_mutex.log" 2>&1; then e
 else echo "FAIL pi-mutex: $(tail -1 "$out/pi_mutex.log")"; fail=1; fi
 if LD_LIBRARY_PATH="$fork_lib" "$out/connection_copy" >"$out/connection_copy.log" 2>/dev/null; then echo "PASS connection-copy: $(tail -1 "$out/connection_copy.log" | sed 's/^PASS: //')"
 else echo "FAIL connection-copy: $(tail -1 "$out/connection_copy.log")"; fail=1; fi
+if "$out/nocancel" >"$out/nocancel.log" 2>&1; then echo "PASS nocancel: $(tail -1 "$out/nocancel.log" | sed 's/^PASS: //')"
+else echo "FAIL nocancel: $(tail -2 "$out/nocancel.log" | tr '\n' ' ')"; fail=1; fi
 if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(tail -1 "$out/memops.log")"
 else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
 
