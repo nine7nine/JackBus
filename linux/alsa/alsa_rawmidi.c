@@ -23,6 +23,7 @@
 
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
 #include <time.h>
@@ -218,7 +219,11 @@ int stream_init(midi_stream_t *s, alsa_rawmidi_t *midi, const char *name)
 {
 	s->owner = midi;
 	s->name = name;
-	if (pipe(s->wake_pipe)==-1) {
+	/* Written by the realtime process callback every cycle: must never block
+	 * (a blocking pipe fills when the MIDI thread stalls, e.g. in
+	 * snd_rawmidi_drain(), and then blocks the whole audio graph). A full pipe
+	 * already means a wakeup is pending, so a failed write is harmless. */
+	if (pipe2(s->wake_pipe, O_NONBLOCK | O_CLOEXEC)==-1) {
 		s->wake_pipe[0] = -1;
 		error_log("pipe() in stream_init(%s) failed: %s", name, strerror(errno));
 		return -errno;
@@ -903,8 +908,9 @@ void *midi_thread(void *arg)
 		if (pfds[0].revents & ~POLLIN)
 			break;
 		if (pfds[0].revents & POLLIN) {
-			char c;
-			read(pfds[0].fd, &c, 1);
+			char c[64];
+			while (read(pfds[0].fd, c, sizeof(c)) == (ssize_t)sizeof(c))
+				;  /* non-blocking: drain all pending wakeups */
 		}
 
 		// add new ports
