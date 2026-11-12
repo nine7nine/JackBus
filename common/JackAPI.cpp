@@ -1746,6 +1746,30 @@ LIB_EXPORT int jack_acquire_real_time_scheduling(jack_native_thread_t thread, in
         : -1);
 }
 
+/*
+ Realtime threads created through jack_client_create_thread() are marked like
+ the client's own process thread, so API calls made from them never sleep in
+ WaitGraphChange() (up to 1.1 periods while a graph change is pending, e.g.
+ jack_port_get_latency_range() or jack_port_connected()).
+*/
+namespace {
+
+struct JackClientThreadStart
+{
+    thread_routine fRoutine;
+    void* fArg;
+};
+
+void* JackClientRealTimeThreadStart(void* data)
+{
+    JackClientThreadStart start = *static_cast<JackClientThreadStart*>(data);
+    delete static_cast<JackClientThreadStart*>(data);
+    jack_tls_set(JackGlobals::fRealTimeThread, (void*)1);  // only tested for NULL
+    return start.fRoutine(start.fArg);
+}
+
+}
+
 LIB_EXPORT int jack_client_create_thread(jack_client_t* client,
                                      jack_native_thread_t *thread,
                                      int priority,
@@ -1756,10 +1780,20 @@ LIB_EXPORT int jack_client_create_thread(jack_client_t* client,
     JackGlobals::CheckContext("jack_client_create_thread");
 
     JackEngineControl* control = GetEngineControl();
+    JackClientThreadStart* start = NULL;
+    if (realtime) {
+        start = new JackClientThreadStart;
+        start->fRoutine = routine;
+        start->fArg = arg;
+        routine = JackClientRealTimeThreadStart;
+        arg = start;
+    }
     int res = JackThread::StartImp(thread, priority, realtime, routine, arg);
-    return (res == 0)
-        ? ((realtime ? JackThread::AcquireRealTimeImp(*thread, priority, control->fPeriod, control->fComputation, control->fConstraint) : res))
-        : res;
+    if (res != 0) {
+        delete start;
+        return res;
+    }
+    return realtime ? JackThread::AcquireRealTimeImp(*thread, priority, control->fPeriod, control->fComputation, control->fConstraint) : res;
 }
 
 LIB_EXPORT int jack_drop_real_time_scheduling(jack_native_thread_t thread)
