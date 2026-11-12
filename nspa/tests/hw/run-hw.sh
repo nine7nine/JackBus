@@ -64,13 +64,21 @@ loud_controls() {  # prints the playback controls that are not at 0 and muted
             if ((l ~ /\[on\]/ || l ~ /Playback [1-9]/) && (name in want) && !(name in seen)) { seen[name] = 1; printf "[%s] ", name }
         }'
 }
-# ensure_muted <who>: mute if anything is audible; non-zero if that failed
+# ensure_muted <who>: mute if anything is audible; non-zero if that still
+# fails after 10 tries 50 ms apart (PipeWire may be setting its volumes at
+# the same moment)
 ensure_muted() {
     l=$(loud_controls)
     [ -z "$l" ] && return 0
-    mute_all
-    echo "$(date +%T.%N | cut -c1-12) $1: re-muted $l" >>"$out/mute-watchdog.log"
-    [ -z "$(loud_controls)" ]
+    tries=0
+    while [ -n "$l" ] && [ $tries -lt 10 ]; do
+        mute_all
+        echo "$(date +%T.%N | cut -c1-12) $1: re-muted $l" >>"$out/mute-watchdog.log"
+        tries=$((tries + 1))
+        sleep 0.05
+        l=$(loud_controls)
+    done
+    [ -z "$l" ]
 }
 
 # Mute watchdog (own session, killed with its process group). PipeWire takes
@@ -191,11 +199,12 @@ device_free() {
 # start_server <fork|system> <log> <jackd driver args...>; sets SERVER_PID
 start_server() {
     which=$1 log=$2; shift 2
-    # PipeWire may hold the card between test servers (it closes it after its
-    # idle timeout; jackd's device reservation also asks it to release)
+    # PipeWire takes the card between test servers and keeps it open while a
+    # stream is connected; jackd's device reservation request makes it release
+    # the card (as when jackdbus starts), so after a short wait start anyway
     i=0
-    while ! device_free && [ $i -lt 150 ]; do sleep 0.1; i=$((i + 1)); done
-    if ! device_free; then echo "  $dev is busy" >&2; return 1; fi
+    while ! device_free && [ $i -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
+    device_free || echo "  $dev is open (PipeWire?); jackd will request it through the device reservation" >&2
     if ! ensure_muted "before $which server"; then
         echo "ABORT: cannot mute the playback outputs of $card" >&2; exit 1
     fi
