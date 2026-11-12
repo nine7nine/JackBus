@@ -516,7 +516,7 @@ class SERVER_EXPORT JackConnectionManager
         }
 
         // Graph
-        void ResetGraph(JackClientTiming* timing);
+        void ResetGraph(JackClientTiming* timing, int refnum_bound = CLIENT_NUM);
         int ResumeRefNum(JackClientControl* control, JackSynchro* table, JackClientTiming* timing);
         int SuspendRefNum(JackClientControl* control, JackSynchro* table, JackClientTiming* timing, long time_out_usec);
         void TopologicalSort(std::vector<jack_int_t>& sorted);

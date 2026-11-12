@@ -36,7 +36,8 @@ static inline jack_time_t JACK_MAX(jack_time_t a, jack_time_t b)
 void JackEngineControl::CalcCPULoad(JackClientInterface** table,
                                     JackGraphManager* manager,
                                     jack_time_t cur_cycle_begin,
-                                    jack_time_t prev_cycle_end)
+                                    jack_time_t prev_cycle_end,
+                                    int refnum_bound)
 {
     fPrevCycleTime = fCurCycleTime;
     fCurCycleTime = cur_cycle_begin;
@@ -44,7 +45,7 @@ void JackEngineControl::CalcCPULoad(JackClientInterface** table,
 
     // In Asynchronous mode, last cycle end is the max of client end dates
     if (!fSyncMode) {
-        for (int i = fDriverNum; i < CLIENT_NUM; i++) {
+        for (int i = fDriverNum; i < refnum_bound; i++) {
             JackClientInterface* client = table[i];
             JackClientTiming* timing = manager->GetClientTiming(i);
             if (client && client->GetClientControl()->fActive && timing->fStatus == Finished) {

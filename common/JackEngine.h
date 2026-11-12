@@ -101,6 +101,10 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         JackEngineNotifier fNotifier;                  /*! RT thread -> fChannel, without system calls */
         JackCycleSignal fSignal;                       /*! "a cycle has passed", signalled by the RT thread */
         jack_time_t fLastSwitchUsecs;
+        // 1 + highest refnum in fClientTable (written by the server thread,
+        // read by the RT thread): per-cycle loops over clients stop there
+        int fRefNumBound;
+        void UpdateRefNumBound();
         JackMetadata fMetadata;
 
         int fSessionPendingReplies;

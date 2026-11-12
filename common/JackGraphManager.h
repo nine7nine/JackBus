@@ -117,8 +117,8 @@ class SERVER_EXPORT JackGraphManager : public JackShmMem, public JackAtomicState
         void* GetBuffer(jack_port_id_t port_index, jack_nframes_t frames);
 
         // Activation management
-        void RunCurrentGraph();
-        bool RunNextGraph();
+        void RunCurrentGraph(int refnum_bound = CLIENT_NUM);
+        bool RunNextGraph(int refnum_bound = CLIENT_NUM);
         bool IsFinishedGraph();
 
         void InitRefNum(int refnum);

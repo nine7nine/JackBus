@@ -56,6 +56,7 @@ JackEngine::JackEngine(JackGraphManager* manager,
     for (int i = 0; i < CLIENT_NUM; i++) {
         fClientTable[i] = NULL;
     }
+    fRefNumBound = 0;
     fLastSwitchUsecs = 0;
     fSessionPendingReplies = 0;
     fSessionTransaction = NULL;
@@ -106,6 +107,7 @@ int JackEngine::Close()
             delete external_client;
         }
     }
+    UpdateRefNumBound();
 
     return 0;
 }
@@ -179,9 +181,23 @@ int JackEngine::AllocateRefnum()
     return -1;
 }
 
+void JackEngine::UpdateRefNumBound()
+{
+    int bound = 0;
+    for (int i = 0; i < CLIENT_NUM; i++) {
+        if (fClientTable[i]) {
+            bound = i + 1;
+        }
+    }
+    // a new client is entered before it can be activated, so the RT thread
+    // sees the raised bound before the client is in the graph
+    __atomic_store_n(&fRefNumBound, bound, __ATOMIC_RELEASE);
+}
+
 void JackEngine::ReleaseRefnum(int refnum)
 {
     fClientTable[refnum] = NULL;
+    UpdateRefNumBound();
 
     if (fEngineControl->fTemporary) {
         int i;
@@ -206,7 +222,7 @@ void JackEngine::ReleaseRefnum(int refnum)
 void JackEngine::ProcessNext(jack_time_t cur_cycle_begin)
 {
     __atomic_store_n(&fLastSwitchUsecs, cur_cycle_begin, __ATOMIC_RELAXED);
-    if (fGraphManager->RunNextGraph())  {   // True if the graph actually switched to a new state
+    if (fGraphManager->RunNextGraph(__atomic_load_n(&fRefNumBound, __ATOMIC_ACQUIRE)))  {   // True if the graph actually switched to a new state
         fNotifier.Notify(ALL_CLIENTS, kGraphOrderCallback, 0);
     }
     fSignal.Signal();                       // Signal for threads waiting for next cycle
@@ -217,7 +233,7 @@ void JackEngine::ProcessCurrent(jack_time_t cur_cycle_begin)
     if (cur_cycle_begin < __atomic_load_n(&fLastSwitchUsecs, __ATOMIC_RELAXED) + 2 * fEngineControl->fPeriodUsecs) { // Signal XRun only for the first failing cycle
         CheckXRun(cur_cycle_begin);
     }
-    fGraphManager->RunCurrentGraph();
+    fGraphManager->RunCurrentGraph(__atomic_load_n(&fRefNumBound, __ATOMIC_ACQUIRE));
 }
 
 bool JackEngine::Process(jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end)
@@ -225,7 +241,8 @@ bool JackEngine::Process(jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end
     bool res = true;
 
     // Cycle  begin
-    fEngineControl->CycleBegin(fClientTable, fGraphManager, cur_cycle_begin, prev_cycle_end);
+    fEngineControl->CycleBegin(fClientTable, fGraphManager, cur_cycle_begin, prev_cycle_end,
+                               __atomic_load_n(&fRefNumBound, __ATOMIC_ACQUIRE));
 
     // Graph
     if (fGraphManager->IsFinishedGraph()) {
@@ -273,7 +290,8 @@ static const char* State2String(jack_client_state_t state)
 
 void JackEngine::CheckXRun(jack_time_t callback_usecs)  // REVOIR les conditions de fin
 {
-    for (int i = fEngineControl->fDriverNum; i < CLIENT_NUM; i++) {
+    const int bound = __atomic_load_n(&fRefNumBound, __ATOMIC_ACQUIRE);
+    for (int i = fEngineControl->fDriverNum; i < bound; i++) {
         JackClientInterface* client = fClientTable[i];
         if (client && client->GetClientControl()->fActive) {
             JackClientTiming* timing = fGraphManager->GetClientTiming(i);
@@ -711,6 +729,7 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
     }
 
     fClientTable[refnum] = client;
+    UpdateRefNumBound();
 
     if (NotifyAddClient(client, real_name, refnum) < 0) {
         jack_error("Cannot notify add client");
@@ -728,6 +747,7 @@ error:
     // Cleanup...
     fSynchroTable[refnum].Destroy();
     fClientTable[refnum] = 0;
+    UpdateRefNumBound();
     client->Close();
     delete client;
     return -1;
@@ -756,6 +776,7 @@ int JackEngine::ClientInternalOpen(const char* name, int* ref, JackEngineControl
     }
 
     fClientTable[refnum] = client;
+    UpdateRefNumBound();
 
     if (NotifyAddClient(client, name, refnum) < 0) {
         jack_error("Cannot notify add client");
@@ -773,6 +794,7 @@ error:
     // Cleanup...
     fSynchroTable[refnum].Destroy();
     fClientTable[refnum] = 0;
+    UpdateRefNumBound();
     return -1;
 }
 

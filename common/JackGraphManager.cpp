@@ -94,18 +94,18 @@ void JackGraphManager::InitRefNum(int refnum)
 }
 
 // RT
-void JackGraphManager::RunCurrentGraph()
+void JackGraphManager::RunCurrentGraph(int refnum_bound)
 {
     JackConnectionManager* manager = ReadCurrentState();
-    manager->ResetGraph(fClientTiming);
+    manager->ResetGraph(fClientTiming, refnum_bound);
 }
 
 // RT
-bool JackGraphManager::RunNextGraph()
+bool JackGraphManager::RunNextGraph(int refnum_bound)
 {
     bool res;
     JackConnectionManager* manager = TrySwitchState(&res);
-    manager->ResetGraph(fClientTiming);
+    manager->ResetGraph(fClientTiming, refnum_bound);
     return res;
 }
 

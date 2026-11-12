@@ -25,6 +25,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <set>
 #include <iostream>
 #include <assert.h>
+#include <stdint.h>
+#include <string.h>
 
 namespace Jack
 {
@@ -242,10 +244,13 @@ void JackConnectionManager::InitRefNum(int refnum)
 /*!
 \brief Reset all clients activation.
 */
-void JackConnectionManager::ResetGraph(JackClientTiming* timing)
+void JackConnectionManager::ResetGraph(JackClientTiming* timing, int refnum_bound)
 {
-    // Reset activation counter : must be done *before* starting to resume clients
-    for (int i = 0; i < CLIENT_NUM; i++) {
+    // Reset activation counter : must be done *before* starting to resume clients.
+    // refnum_bound (server): every refnum in use is below it (refnums are
+    // allocated lowest first), so the RT thread doesn't touch the shared
+    // counters and timings of all CLIENT_NUM slots every cycle.
+    for (int i = 0; i < refnum_bound; i++) {
         fInputCounter[i].Reset();
         timing[i].fStatus = NotTriggered;
     }
@@ -277,18 +282,34 @@ int JackConnectionManager::ResumeRefNum(JackClientControl* control, JackSynchro*
     timing[control->fRefNum].fStatus = Finished;
     timing[control->fRefNum].fFinishedAt = current_date;
 
-    for (int i = 0; i < CLIENT_NUM; i++) {
+    /*
+    Runs at the end of every client's (and the driver's) cycle. Almost all of
+    the CLIENT_NUM entries are 0: skip 32 bytes of them per test, then look at
+    the entries of a non-zero chunk one by one, in the same order as before.
+    */
+    const int chunk = 32 / sizeof(jack_int_t);
+    for (int base = 0; base < CLIENT_NUM; base += chunk) {
+        const int end = (base + chunk <= CLIENT_NUM) ? base + chunk : CLIENT_NUM;
+        if (end - base == chunk) {
+            uint64_t words[4];
+            memcpy(words, output_ref + base, sizeof(words));
+            if ((words[0] | words[1] | words[2] | words[3]) == 0) {
+                continue;
+            }
+        }
+        for (int i = base; i < end; i++) {
 
-        // Signal connected clients or drivers
-        if (output_ref[i] > 0) {
+            // Signal connected clients or drivers
+            if (output_ref[i] > 0) {
 
-            // Update state and timestamp of destination clients
-            timing[i].fStatus = Triggered;
-            timing[i].fSignaledAt = current_date;
+                // Update state and timestamp of destination clients
+                timing[i].fStatus = Triggered;
+                timing[i].fSignaledAt = current_date;
 
-            if (!fInputCounter[i].Signal(table + i, control)) {
-                jack_log("JackConnectionManager::ResumeRefNum error: ref = %ld output = %ld ", control->fRefNum, i);
-                res = -1;
+                if (!fInputCounter[i].Signal(table + i, control)) {
+                    jack_log("JackConnectionManager::ResumeRefNum error: ref = %ld output = %ld ", control->fRefNum, i);
+                    res = -1;
+                }
             }
         }
     }
