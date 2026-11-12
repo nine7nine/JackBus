@@ -108,6 +108,20 @@ class JackAtomicState
         alignas(UInt32) alignas(AtomicCounter) volatile AtomicCounter fCounter;
         SInt32 fCallWriteCounter;
 
+        // Atomic snapshot of fCounter (written with CAS by other threads and
+        // processes; a plain read of the volatile is a data race).
+        UInt32 LoadCounter() const
+        {
+            return __atomic_load_n((const volatile UInt32*)&fCounter, __ATOMIC_ACQUIRE);
+        }
+
+        UInt16 LoadCurIndex() const
+        {
+            AtomicCounter counter;
+            Counter(counter) = LoadCounter();
+            return CurIndex(counter);
+        }
+
         UInt32 WriteNextStateStartAux()
         {
             AtomicCounter old_val;
@@ -116,7 +130,7 @@ class JackAtomicState
             UInt32 next_index;
             bool need_copy;
             do {
-                old_val = fCounter;
+                Counter(old_val) = LoadCounter();
                 new_val = old_val;
                 cur_index = CurArrayIndex(new_val);
                 next_index = NextArrayIndex(new_val);
@@ -133,7 +147,7 @@ class JackAtomicState
             AtomicCounter old_val;
             AtomicCounter new_val;
             do {
-                old_val = fCounter;
+                Counter(old_val) = LoadCounter();
                 new_val = old_val;
                 NextIndex(new_val)++; // Set next index
             } while (!CAS(Counter(old_val), Counter(new_val), (UInt32*)&fCounter));
@@ -157,7 +171,7 @@ class JackAtomicState
         */
         T* ReadCurrentState()
         {
-            return &fState[CurArrayIndex(fCounter)];
+            return &fState[(LoadCurIndex() & 0x0001)];
         }
 
         /*!
@@ -165,7 +179,7 @@ class JackAtomicState
         */
         UInt16 GetCurrentIndex()
         {
-            return CurIndex(fCounter);
+            return LoadCurIndex();
         }
 
         /*!
@@ -176,11 +190,11 @@ class JackAtomicState
             AtomicCounter old_val;
             AtomicCounter new_val;
             do {
-                old_val = fCounter;
+                Counter(old_val) = LoadCounter();
                 new_val = old_val;
                 CurIndex(new_val) = NextIndex(new_val);	// Prepare switch
             } while (!CAS(Counter(old_val), Counter(new_val), (UInt32*)&fCounter));
-            return &fState[CurArrayIndex(fCounter)];	// Read the counter again
+            return &fState[(LoadCurIndex() & 0x0001)];	// Read the counter again
         }
 
         /*!
@@ -191,12 +205,12 @@ class JackAtomicState
             AtomicCounter old_val;
             AtomicCounter new_val;
             do {
-                old_val = fCounter;
+                Counter(old_val) = LoadCounter();
                 new_val = old_val;
                 *result = (CurIndex(new_val) != NextIndex(new_val));
                 CurIndex(new_val) = NextIndex(new_val);  // Prepare switch
             } while (!CAS(Counter(old_val), Counter(new_val), (UInt32*)&fCounter));
-            return &fState[CurArrayIndex(fCounter)];	// Read the counter again
+            return &fState[(LoadCurIndex() & 0x0001)];	// Read the counter again
         }
 
         /*!
@@ -206,7 +220,7 @@ class JackAtomicState
         {
             UInt32 next_index = (fCallWriteCounter++ == 0)
                                 ? WriteNextStateStartAux()
-                                : NextArrayIndex(fCounter); // We are inside a wrapping WriteNextStateStart call, NextArrayIndex can be read safely
+                                : ((LoadCurIndex() + 1) & 0x0001); // We are inside a wrapping WriteNextStateStart call, NextArrayIndex can be read safely
             return &fState[next_index];
         }
 
@@ -221,7 +235,9 @@ class JackAtomicState
 
         bool IsPendingChange()
         {
-            return CurIndex(fCounter) != NextIndex(fCounter);
+            AtomicCounter counter;
+            Counter(counter) = LoadCounter();
+            return CurIndex(counter) != NextIndex(counter);
         }
 
         /*

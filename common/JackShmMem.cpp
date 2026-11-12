@@ -22,8 +22,10 @@
 #include <stdio.h>
 #include <mutex>
 #include <stdint.h>
+#ifndef WIN32
 #include <unistd.h>
 #include <sys/mman.h>
+#endif
 
 namespace Jack
 {

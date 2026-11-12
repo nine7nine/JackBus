@@ -132,7 +132,7 @@ int JackLibClient::Open(const char* server_name, const char* name, jack_uuid_t u
         JackLibGlobals::fGlobals->fEngineControl.SetShmIndex(shared_engine, fServerName);
         JackLibGlobals::fGlobals->fGraphManager.SetShmIndex(shared_graph, fServerName);
         fClientControl.SetShmIndex(shared_client, fServerName);
-        JackGlobals::fVerbose = GetEngineControl()->fVerbose;
+        __atomic_store_n(&JackGlobals::fVerbose, GetEngineControl()->fVerbose, __ATOMIC_RELAXED);
     } catch (...) {
         jack_error("Map shared memory segments exception");
         goto error;

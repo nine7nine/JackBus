@@ -62,6 +62,13 @@ class JackActivationCount
             fCount = val;
         }
 
+        // Graph property only: fValue is per-cycle state, reset from fCount
+        // (Reset()) before a state is used, and concurrently updated by RT threads.
+        inline void CopyCount(const JackActivationCount& src)
+        {
+            fCount = src.fCount;
+        }
+
         inline void IncValue()
         {
             fCount++;

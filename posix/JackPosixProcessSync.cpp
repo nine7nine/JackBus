@@ -27,7 +27,11 @@ namespace Jack
 // Absolute CLOCK_MONOTONIC deadline usec from now (the condition variable uses that clock).
 static void MonotonicDeadline(long usec, struct timespec* deadline)
 {
+#ifdef __APPLE__
+    clock_gettime(CLOCK_REALTIME, deadline);  // no pthread_condattr_setclock
+#else
     clock_gettime(CLOCK_MONOTONIC, deadline);
+#endif
     long long nsec = (long long)deadline->tv_nsec + (long long)usec * 1000;
     deadline->tv_sec += (time_t)(nsec / 1000000000LL);
     deadline->tv_nsec = (long)(nsec % 1000000000LL);
@@ -85,14 +89,14 @@ void JackPosixProcessSync::LockedSignalAll()
 
 void JackPosixProcessSync::Wait()
 {
-    ThrowIf(!pthread_equal(pthread_self(), fOwner), JackException("JackPosixProcessSync::Wait: a thread has to have locked a mutex before it can wait"));
-    fOwner = 0;
+    ThrowIf(!pthread_equal(pthread_self(), __atomic_load_n(&fOwner, __ATOMIC_RELAXED)), JackException("JackPosixProcessSync::Wait: a thread has to have locked a mutex before it can wait"));
+    __atomic_store_n(&fOwner, (pthread_t)0, __ATOMIC_RELAXED);
 
     int res = pthread_cond_wait(&fCond, &fMutex);
     if (res != 0) {
         jack_error("JackPosixProcessSync::Wait error err = %s", strerror(res));
     } else {
-        fOwner = pthread_self();
+        __atomic_store_n(&fOwner, pthread_self(), __ATOMIC_RELAXED);
     }
 }
 
@@ -115,8 +119,8 @@ void JackPosixProcessSync::LockedWait()
 
 bool JackPosixProcessSync::TimedWait(long usec)
 {
-    ThrowIf(!pthread_equal(pthread_self(), fOwner), JackException("JackPosixProcessSync::TimedWait: a thread has to have locked a mutex before it can wait"));
-    fOwner = 0;
+    ThrowIf(!pthread_equal(pthread_self(), __atomic_load_n(&fOwner, __ATOMIC_RELAXED)), JackException("JackPosixProcessSync::TimedWait: a thread has to have locked a mutex before it can wait"));
+    __atomic_store_n(&fOwner, (pthread_t)0, __ATOMIC_RELAXED);
 
     timespec time;
     int res;
@@ -127,7 +131,7 @@ bool JackPosixProcessSync::TimedWait(long usec)
     if (res != 0 && res != ETIMEDOUT) {
         jack_error("JackPosixProcessSync::TimedWait error usec = %ld err = %s", usec, strerror(res));
     } else {
-        fOwner = pthread_self();
+        __atomic_store_n(&fOwner, pthread_self(), __ATOMIC_RELAXED);
     }
 
     return (res == 0);

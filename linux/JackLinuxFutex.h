@@ -75,6 +75,7 @@ class SERVER_EXPORT JackLinuxFutex : public detail::JackSynchro
         bool ConnectOutput(const char* name, const char* server_name);
         bool Disconnect();
         void Destroy();
+        void DestroyKeepMapped();  // unlink the name, leave the mapping (see JackEngine::ClientCloseAux)
 
         void MakePrivate(bool priv);
 };

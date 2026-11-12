@@ -47,7 +47,10 @@ void* JackPosixThread::ThreadHandler(void* arg)
 
     // Signal creation thread when started with StartSync
     jack_log("JackPosixThread::ThreadHandler : start");
-    obj->fStatus = kIniting;
+    // Not if Stop()/Kill() was already called (it set kIdle): exit at once.
+    if (!obj->SetStatusIf(kStarting, kIniting)) {
+        return 0;
+    }
 
     // Call Init method
     if (!runnable->Init()) {
@@ -55,11 +58,13 @@ void* JackPosixThread::ThreadHandler(void* arg)
         return 0;
     }
 
-    obj->fStatus = kRunning;
+    if (!obj->SetStatusIf(kIniting, kRunning)) {
+        return 0;  // stopped during Init()
+    }
 
     // If Init succeed, start the thread loop
     bool res = true;
-    while (obj->fStatus == kRunning && res) {
+    while (obj->GetStatus() == kRunning && res) {
         res = runnable->Execute();
     }
 
@@ -70,11 +75,11 @@ void* JackPosixThread::ThreadHandler(void* arg)
 
 int JackPosixThread::Start()
 {
-    fStatus = kStarting;
+    SetStatus(kStarting);
 
     // Check if the thread was correctly started
     if (StartImp(&fThread, fPriority, fRealTime, ThreadHandler, this) < 0) {
-        fStatus = kIdle;
+        SetStatus(kIdle);
         return -1;
     } else {
         return 0;
@@ -83,14 +88,14 @@ int JackPosixThread::Start()
 
 int JackPosixThread::StartSync()
 {
-    fStatus = kStarting;
+    SetStatus(kStarting);
 
     if (StartImp(&fThread, fPriority, fRealTime, ThreadHandler, this) < 0) {
-        fStatus = kIdle;
+        SetStatus(kIdle);
         return -1;
     } else {
         int count = 0;
-        while (fStatus == kStarting && ++count < 1000) {
+        while (GetStatus() == kStarting && ++count < 1000) {
             JackSleep(1000);
         }
         return (count == 1000) ? -1 : 0;
@@ -164,7 +169,7 @@ int JackPosixThread::Kill()
         void* status;
         pthread_cancel(fThread);
         pthread_join(fThread, &status);
-        fStatus = kIdle;
+        SetStatus(kIdle);
         fThread = (jack_native_thread_t)NULL;
         return 0;
     } else {
@@ -177,7 +182,7 @@ int JackPosixThread::Stop()
     if (fThread != (jack_native_thread_t)NULL) { // If thread has been started
         jack_log("JackPosixThread::Stop");
         void* status;
-        fStatus = kIdle; // Request for the thread to stop
+        SetStatus(kIdle); // Request for the thread to stop
         pthread_join(fThread, &status);
         fThread = (jack_native_thread_t)NULL;
         return 0;

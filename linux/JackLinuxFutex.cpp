@@ -34,6 +34,27 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #define SYS_futex SYS_futex_time64
 #endif
 
+/*
+ ThreadSanitizer does not model raw futex system calls as synchronization:
+ tell it that Signal()s happen-before later Wait() returns, so the graph's
+ ordering of clients in one process (e.g. a client reading the output buffer
+ of the client it follows) is not reported as a race. No-op in normal builds.
+*/
+#if defined(__SANITIZE_THREAD__)
+extern "C" void __tsan_acquire(void* addr);
+extern "C" void __tsan_release(void* addr);
+/* One address for all futexes: a cycle's order is client -> server -> next
+   client, and the server is another process. Pairing every Signal() with every
+   later Wait() return in this process captures that order (over-approximates
+   synchronization slightly; TSan builds only). */
+static char gJackTsanCycleOrder;
+#define JACK_TSAN_RELEASE(addr) __tsan_release(&gJackTsanCycleOrder)
+#define JACK_TSAN_ACQUIRE(addr) __tsan_acquire(&gJackTsanCycleOrder)
+#else
+#define JACK_TSAN_RELEASE(addr)
+#define JACK_TSAN_ACQUIRE(addr)
+#endif
+
 namespace Jack
 {
 
@@ -62,7 +83,11 @@ bool JackLinuxFutex::Signal()
         return false;
     }
 
-    if (fFlush) {
+    // before the flush check: a flushed signal (to the driver, end of graph)
+    // still orders this client's buffer accesses before the next cycle
+    JACK_TSAN_RELEASE(fFutex);
+
+    if (__atomic_load_n(&fFlush, __ATOMIC_RELAXED)) {
         return true;
     }
 
@@ -98,8 +123,10 @@ bool JackLinuxFutex::Wait()
 
     for (;;)
     {
-        if (__sync_bool_compare_and_swap(&fFutex->futex, 1, 0))
+        if (__sync_bool_compare_and_swap(&fFutex->futex, 1, 0)) {
+            JACK_TSAN_ACQUIRE(fFutex);
             return true;
+        }
 
         if (::syscall(SYS_futex, fFutex, wait_mode, 0, NULL, NULL, 0) != 0)
             if (errno != EAGAIN && errno != EINTR)
@@ -131,8 +158,10 @@ bool JackLinuxFutex::TimedWait(long usec)
 
     for (;;)
     {
-        if (__sync_bool_compare_and_swap(&fFutex->futex, 1, 0))
+        if (__sync_bool_compare_and_swap(&fFutex->futex, 1, 0)) {
+            JACK_TSAN_ACQUIRE(fFutex);
             return true;
+        }
 
         if (::syscall(SYS_futex, fFutex, wait_mode, 0, &timeout, NULL, 0) != 0)
             if (errno != EAGAIN && errno != EINTR)
@@ -258,6 +287,20 @@ bool JackLinuxFutex::Disconnect()
     close(fSharedMem);
     fSharedMem = -1;
     return true;
+}
+
+// Server side: remove the futex name, but keep the mapping valid for a
+// realtime thread that may still signal it. The mapping (one page) is
+// dropped, not unmapped: this only happens on an error path.
+void JackLinuxFutex::DestroyKeepMapped()
+{
+    if (!fFutex) {
+        return;
+    }
+    close(fSharedMem);
+    fSharedMem = -1;
+    shm_unlink(fName);
+    // fFutex stays valid; a later Allocate() maps a new futex for the refnum.
 }
 
 // Server side : destroy the futex

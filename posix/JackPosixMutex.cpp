@@ -46,6 +46,12 @@ namespace Jack
         }
 #endif
         res = pthread_mutex_init(mutex, &attr);
+        if (res != 0) {
+            // e.g. no PI futex support (kernel config, qemu-user, seccomp):
+            // glibc returns ENOTSUP. Use a normal mutex instead.
+            pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_NONE);
+            res = pthread_mutex_init(mutex, &attr);
+        }
         pthread_mutexattr_destroy(&attr);
         ThrowIf(res != 0, JackException("JackPosixMutex: could not init the mutex"));
     }
@@ -65,10 +71,10 @@ namespace Jack
     {
         pthread_t current_thread = pthread_self();
 
-        if (!pthread_equal(current_thread, fOwner)) {
+        if (!pthread_equal(current_thread, __atomic_load_n(&fOwner, __ATOMIC_RELAXED))) {
             int res = pthread_mutex_lock(&fMutex);
             if (res == 0) {
-                fOwner = current_thread;
+                __atomic_store_n(&fOwner, current_thread, __ATOMIC_RELAXED);
                 return true;
             } else {
                 jack_error("JackBasePosixMutex::Lock res = %d", res);
@@ -83,10 +89,10 @@ namespace Jack
     {
         pthread_t current_thread = pthread_self();
 
-        if (!pthread_equal(current_thread, fOwner)) {
+        if (!pthread_equal(current_thread, __atomic_load_n(&fOwner, __ATOMIC_RELAXED))) {
             int res = pthread_mutex_trylock(&fMutex);
             if (res == 0) {
-                fOwner = current_thread;
+                __atomic_store_n(&fOwner, current_thread, __ATOMIC_RELAXED);
                 return true;
             } else {
                 return false;
@@ -98,8 +104,8 @@ namespace Jack
 
     bool JackBasePosixMutex::Unlock()
     {
-        if (pthread_equal(pthread_self(), fOwner)) {
-            fOwner = 0;
+        if (pthread_equal(pthread_self(), __atomic_load_n(&fOwner, __ATOMIC_RELAXED))) {
+            __atomic_store_n(&fOwner, (pthread_t)0, __ATOMIC_RELAXED);
             int res = pthread_mutex_unlock(&fMutex);
             if (res == 0) {
                 return true;

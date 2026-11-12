@@ -88,7 +88,7 @@ class JackSynchro
 
         void SetFlush(bool mode)
         {
-            fFlush = mode;
+            __atomic_store_n(&fFlush, mode, __ATOMIC_RELAXED);
         }
 
 };

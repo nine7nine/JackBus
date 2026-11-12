@@ -28,7 +28,7 @@ namespace Jack
 
 bool JackActivationCount::Signal(JackSynchro* synchro, JackClientControl* control)
 {
-    if (fValue == 0) {
+    if (__atomic_load_n(&fValue, __ATOMIC_RELAXED) == 0) {
         // Transfer activation to next clients
         jack_log("JackActivationCount::Signal value = 0 ref = %ld", control->fRefNum);
         return synchro->Signal();

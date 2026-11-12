@@ -181,15 +181,15 @@ void SetClockSource(jack_timer_type_t source)
 	{
         case JACK_TIMER_HPET:
             if (jack_hpet_init () == 0) {
-                _jack_get_microseconds = jack_get_microseconds_from_hpet;
+                __atomic_store_n(&_jack_get_microseconds, jack_get_microseconds_from_hpet, __ATOMIC_RELAXED);
             } else {
-                _jack_get_microseconds = jack_get_microseconds_from_system;
+                __atomic_store_n(&_jack_get_microseconds, jack_get_microseconds_from_system, __ATOMIC_RELAXED);
             }
             break;
 
         case JACK_TIMER_SYSTEM_CLOCK:
             default:
-            _jack_get_microseconds = jack_get_microseconds_from_system;
+            __atomic_store_n(&_jack_get_microseconds, jack_get_microseconds_from_system, __ATOMIC_RELAXED);
             break;
 	}
 }
@@ -213,11 +213,14 @@ const char* ClockSourceName(jack_timer_type_t source)
 
 SERVER_EXPORT jack_time_t GetMicroSeconds()
 {
-	return _jack_get_microseconds();
+	/* SetClockSource() may rewrite the pointer while other threads read it */
+	jack_time_t (*get_microseconds)(void) = __atomic_load_n(&_jack_get_microseconds, __ATOMIC_RELAXED);
+	return get_microseconds();
 }
 
 SERVER_EXPORT jack_time_t jack_get_microseconds()
 {
-	return _jack_get_microseconds();
+	jack_time_t (*get_microseconds)(void) = __atomic_load_n(&_jack_get_microseconds, __ATOMIC_RELAXED);
+	return get_microseconds();
 }
 

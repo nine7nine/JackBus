@@ -48,7 +48,9 @@ class JackPosixProcessSync : public JackBasePosixMutex
             pthread_condattr_t attr;
             int res = pthread_condattr_init(&attr);
             ThrowIf(res != 0, JackException("JackPosixProcessSync: could not init the cond attribute"));
+#ifndef __APPLE__
             pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+#endif
             res = pthread_cond_init(&fCond, &attr);
             pthread_condattr_destroy(&attr);
             ThrowIf(res != 0, JackException("JackPosixProcessSync: could not init the cond variable"));

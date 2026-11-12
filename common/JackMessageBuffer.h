@@ -42,7 +42,7 @@ namespace Jack
 #define MB_BUFFERS  128
 #define MB_NEXT(index) ((index+1) & (MB_BUFFERS-1))
 #define MB_BUFFERSIZE   256     /* message length limit */
-#define MB_FLUSH_INTERVAL_USEC 20000  /* the consumer polls: producers never wake it */
+#define MB_FLUSH_INTERVAL_USEC 50000  /* the consumer polls: producers never wake it */
 
 struct JackMessage
 {

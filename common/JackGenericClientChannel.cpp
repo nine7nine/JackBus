@@ -26,6 +26,15 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 namespace Jack
 {
 
+namespace {
+struct RequestLock
+{
+    JackPosixMutex& fMutex;
+    RequestLock(JackPosixMutex& mutex): fMutex(mutex) { fMutex.Lock(); }
+    ~RequestLock() { fMutex.Unlock(); }
+};
+}
+
 JackGenericClientChannel::JackGenericClientChannel()
 {}
 
@@ -61,7 +70,7 @@ void JackGenericClientChannel::ServerSyncCall(JackRequest* req, JackResult* res,
     }
     
     JackNoCancelScope no_cancel;  // the RT thread may call in here (End/Error) and be cancelled
-    std::lock_guard<std::mutex> lock(fRequestLock);
+    RequestLock lock(fRequestLock);
 
     if (req->Write(fRequest) < 0) {
         jack_error("Could not write request type = %ld", req->fType);
@@ -94,7 +103,7 @@ void JackGenericClientChannel::ServerAsyncCall(JackRequest* req, JackResult* res
     }
     
     JackNoCancelScope no_cancel;  // the RT thread may call in here (End/Error) and be cancelled
-    std::lock_guard<std::mutex> lock(fRequestLock);
+    RequestLock lock(fRequestLock);
 
     if (req->Write(fRequest) < 0) {
         jack_error("Could not write request type = %ld", req->fType);

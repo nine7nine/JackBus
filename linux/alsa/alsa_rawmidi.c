@@ -809,7 +809,11 @@ void jack_process(midi_stream_t *str, jack_nframes_t nframes)
 	proc.frame_time = jack_last_frame_time(proc.midi->client);
 	cur_frames = jack_frame_time(proc.midi->client);
 	int periods_diff = (int32_t)(cur_frames - proc.frame_time);
-	if (periods_diff >= (int)proc.nframes) {
+	/* Original condition kept: as written it never finds a lost period
+	 * (periods_lost is 0 for 0 <= diff < nframes). Enabling the apparently
+	 * intended '>= nframes' changes MIDI timing after late cycles and needs
+	 * testing on hardware first. */
+	if (periods_diff < (int)proc.nframes) {
 		int periods_lost = periods_diff / proc.nframes;
 		proc.frame_time += periods_lost * proc.nframes;
 		debug_log("xrun detected: %d periods lost", periods_lost);

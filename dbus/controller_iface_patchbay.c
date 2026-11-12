@@ -1537,7 +1537,16 @@ jack_controller_graph_order_callback(
     int i;
     jack_port_t *port_ptr;
     
-    if (patchbay_ptr->graph.version > 1)
+    bool catchup;
+
+    /* graph.version is changed under the lock by the other callbacks, which
+     * run in other threads; jack_get_ports() below must not be called with
+     * the lock held (see jack_controller_dbus_connect_ports_by_name()) */
+    pthread_mutex_lock(&patchbay_ptr->lock);
+    catchup = (patchbay_ptr->graph.version <= 1);
+    pthread_mutex_unlock(&patchbay_ptr->lock);
+
+    if (!catchup)
     {
         /* we use this only for initial catchup */
         return 0;
@@ -1556,6 +1565,7 @@ jack_controller_graph_order_callback(
         free(ports);
     }
 
+    pthread_mutex_lock(&patchbay_ptr->lock);
     if (patchbay_ptr->graph.version == 1)
     {
         /* we have empty initial graph, increment graph version,
@@ -1563,6 +1573,7 @@ jack_controller_graph_order_callback(
            on next next graph change */
         patchbay_ptr->graph.version++;
     }
+    pthread_mutex_unlock(&patchbay_ptr->lock);
 
     return 0;
 }

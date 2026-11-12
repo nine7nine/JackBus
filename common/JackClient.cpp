@@ -603,12 +603,17 @@ int JackClient::StartThread()
     cycle would be late (an xrun on every activation), and the buffer-size
     callback could run concurrently with one from the notification thread.
     */
-    for (int i = 0; i < 10000 && fThread.GetStatus() == JackThread::kIniting; i++) {
+    /*
+    Bounded and never failing: an application may hold a lock across
+    jack_activate() that its buffer-size or thread-init callback also takes;
+    then Init() cannot finish before we return, and activation proceeds as it
+    always did.
+    */
+    for (int i = 0; i < 200 && fThread.GetStatus() == JackThread::kIniting; i++) {
         JackSleep(1000);
     }
-    if (fThread.GetStatus() != JackThread::kRunning) {
-        jack_error("JackClient::StartThread: thread initialization did not complete");
-        return -1;
+    if (fThread.GetStatus() == JackThread::kIniting) {
+        jack_log("JackClient::StartThread: thread initialization still running, activating anyway");
     }
 
     return 0;

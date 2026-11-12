@@ -87,6 +87,8 @@ class SERVER_EXPORT JackThreadInterface
         JackRunnableInterface* fRunnable;
         int fPriority;
         bool fRealTime;
+        // Written by the thread itself and by the thread controlling it: use
+        // GetStatus()/SetStatus() (atomic; volatile alone is a data race).
         volatile kThreadState fStatus;
         int fCancellation;
 
@@ -98,11 +100,19 @@ class SERVER_EXPORT JackThreadInterface
 
         kThreadState GetStatus()
         {
-            return fStatus;
+            return __atomic_load_n(&fStatus, __ATOMIC_ACQUIRE);
         }
+        // Changes the status only if it is still 'from' (a concurrent Stop()
+        // setting kIdle wins). Returns true if changed.
+        bool SetStatusIf(kThreadState from, kThreadState to)
+        {
+            kThreadState expected = from;
+            return __atomic_compare_exchange_n(&fStatus, &expected, to, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+        }
+
         void SetStatus(kThreadState status)
         {
-            fStatus = status;
+            __atomic_store_n(&fStatus, status, __ATOMIC_RELEASE);
         }
 
         void SetParams(UInt64 period, UInt64 computation, UInt64 constraint) // Empty implementation, will only make sense on OSX...

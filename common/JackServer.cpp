@@ -72,7 +72,7 @@ JackServer::JackServer(bool sync, bool temporary, int timeout, bool rt, int prio
     fAudioDriverClosed = false;
     JackServerGlobals::fInstance = this;   // Unique instance
     JackServerGlobals::fUserCount = 1;     // One user
-    JackGlobals::fVerbose = verbose;
+    __atomic_store_n(&JackGlobals::fVerbose, verbose, __ATOMIC_RELAXED);
 }
 
 JackServer::~JackServer()

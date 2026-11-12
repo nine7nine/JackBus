@@ -33,6 +33,13 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #if !defined(SYS_futex) && defined(SYS_futex_time64)
 #define SYS_futex SYS_futex_time64
 #endif
+/* the timeout is a libc struct timespec: 32-bit builds with a 64-bit time_t
+   (_TIME_BITS=64) must use the time64 system call */
+#if defined(SYS_futex_time64) && !defined(__LP64__)
+#define JACK_SYS_FUTEX_TIMED (sizeof(time_t) == 8 ? SYS_futex_time64 : SYS_futex)
+#else
+#define JACK_SYS_FUTEX_TIMED SYS_futex
+#endif
 #endif
 
 namespace Jack
@@ -90,7 +97,7 @@ class JackCycleSignal
                     break;
                 }
                 // absolute CLOCK_MONOTONIC deadline: no recomputation on EINTR
-                long res = ::syscall(SYS_futex, &fSequence, FUTEX_WAIT_BITSET_PRIVATE, seq,
+                long res = ::syscall(JACK_SYS_FUTEX_TIMED, &fSequence, FUTEX_WAIT_BITSET_PRIVATE, seq,
                                      &deadline, NULL, FUTEX_BITSET_MATCH_ANY);
                 if (res == -1 && errno == ETIMEDOUT) {
                     signalled = (__atomic_load_n(&fSequence, __ATOMIC_SEQ_CST) != seq);

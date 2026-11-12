@@ -154,8 +154,8 @@ void JackEngineNotifier::Drain()
 bool JackEngineNotifier::Execute()
 {
     // The realtime side never wakes us: poll. Notifications are asynchronous
-    // (graph order, xrun callbacks), 10 ms of extra delay is harmless.
-    JackSleep(10000);
+    // (graph order, xrun callbacks), 20 ms of extra delay is harmless.
+    JackSleep(20000);
     Drain();
     return true;
 }
@@ -201,7 +201,7 @@ void JackEngine::ReleaseRefnum(int refnum)
 
 void JackEngine::ProcessNext(jack_time_t cur_cycle_begin)
 {
-    fLastSwitchUsecs = cur_cycle_begin;
+    __atomic_store_n(&fLastSwitchUsecs, cur_cycle_begin, __ATOMIC_RELAXED);
     if (fGraphManager->RunNextGraph())  {   // True if the graph actually switched to a new state
         fNotifier.Notify(ALL_CLIENTS, kGraphOrderCallback, 0);
     }
@@ -210,7 +210,7 @@ void JackEngine::ProcessNext(jack_time_t cur_cycle_begin)
 
 void JackEngine::ProcessCurrent(jack_time_t cur_cycle_begin)
 {
-    if (cur_cycle_begin < fLastSwitchUsecs + 2 * fEngineControl->fPeriodUsecs) { // Signal XRun only for the first failing cycle
+    if (cur_cycle_begin < __atomic_load_n(&fLastSwitchUsecs, __ATOMIC_RELAXED) + 2 * fEngineControl->fPeriodUsecs) { // Signal XRun only for the first failing cycle
         CheckXRun(cur_cycle_begin);
     }
     fGraphManager->RunCurrentGraph();
@@ -229,12 +229,13 @@ bool JackEngine::Process(jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end
         res = true;
     } else {
         jack_log("Process: graph not finished!");
-        if (cur_cycle_begin > fLastSwitchUsecs + fEngineControl->fTimeOutUsecs) {
-            jack_log("Process: switch to next state delta = %ld", long(cur_cycle_begin - fLastSwitchUsecs));
+        jack_time_t last_switch = __atomic_load_n(&fLastSwitchUsecs, __ATOMIC_RELAXED);  // also reset by the request thread
+        if (cur_cycle_begin > last_switch + fEngineControl->fTimeOutUsecs) {
+            jack_log("Process: switch to next state delta = %ld", long(cur_cycle_begin - last_switch));
             ProcessNext(cur_cycle_begin);
             res = true;
         } else {
-            jack_log("Process: waiting to switch delta = %ld", long(cur_cycle_begin - fLastSwitchUsecs));
+            jack_log("Process: waiting to switch delta = %ld", long(cur_cycle_begin - last_switch));
             ProcessCurrent(cur_cycle_begin);
             res = false;
         }
@@ -821,8 +822,10 @@ int JackEngine::ClientCloseAux(int refnum, bool wait)
     fGraphManager->RemoveAllPorts(refnum);
 
     // Wait until next cycle to be sure client is not used anymore
+    bool graph_switched = true;
     if (wait) {
         if (!fSignal.TimedWait(fEngineControl->fTimeOutUsecs * 2)) { // Must wait at least until a switch occurs in Process, even in case of graph end failure
+            graph_switched = false;
             jack_error("JackEngine::ClientCloseAux wait error ref = %ld", refnum);
         }
     }
@@ -838,6 +841,17 @@ int JackEngine::ClientCloseAux(int refnum, bool wait)
     NotifyRemoveClient(client->GetClientControl()->fName, refnum);
 
     // Cleanup...
+#ifdef __linux__
+    if (!graph_switched) {
+        /* The graph that still activates this client may be running: the
+           realtime thread can signal its futex any time. Unmapping it now
+           (Destroy) could make the realtime thread write to an unmapped page
+           and crash the server; this happens precisely when a client dies in
+           the middle of a cycle and the graph does not finish. Remove the
+           name but keep the (one page) mapping. Found with ThreadSanitizer. */
+        fSynchroTable[refnum].DestroyKeepMapped();
+    } else
+#endif
     fSynchroTable[refnum].Destroy();
     fEngineControl->ResetRollingUsecs();
     return 0;
@@ -905,7 +919,7 @@ int JackEngine::ClientDeactivate(int refnum, bool wait)
     }
 
     fGraphManager->Deactivate(refnum);
-    fLastSwitchUsecs = 0; // Force switch to occur next cycle, even when called with "dead" clients
+    __atomic_store_n(&fLastSwitchUsecs, (jack_time_t)0, __ATOMIC_RELAXED); // Force switch to occur next cycle, even when called with "dead" clients
 
     // Wait for graph state change to be effective
     if (wait && !fSignal.TimedWait(fEngineControl->fTimeOutUsecs * 10)) {

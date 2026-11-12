@@ -63,7 +63,11 @@ void JackConnectionManager::CopyFrom(const JackConnectionManager& src)
     }
     // small or dense: copy whole
     memcpy((void*)&fConnectionRef, (const void*)&src.fConnectionRef, sizeof(fConnectionRef));
-    memcpy((void*)fInputCounter, (const void*)src.fInputCounter, sizeof(fInputCounter));
+    // activation counts only: the per-cycle values are updated by RT threads
+    // and reset from the counts when this state becomes current
+    for (int i = 0; i < CLIENT_NUM; i++) {
+        fInputCounter[i].CopyCount(src.fInputCounter[i]);
+    }
     memcpy((void*)&fLoopFeedback, (const void*)&src.fLoopFeedback, sizeof(fLoopFeedback));
 }
 
