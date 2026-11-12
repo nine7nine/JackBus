@@ -20,12 +20,70 @@
 #include "JackError.h"
 #include "JackShmMem.h"
 #include <stdio.h>
+#include <mutex>
 
 namespace Jack
 {
 
 static unsigned int fSegmentNum = 0;
-static jack_shm_info_t gInfo;
+
+/*
+ Process-local record of the shared memory segments this process allocated
+ with JackShmMem::operator new, keyed by attach address.
+
+ The segment info used to be handed from operator new to the constructor
+ through a process-global variable, and read back by operator delete from
+ the (already destroyed) object. Both are unsafe:
+ - the global races when two threads allocate concurrently (jackdbus: D-Bus
+   thread and server request thread);
+ - stores into the object made before its constructor runs, or reads made
+   after its destructor ran, are dead/undefined under C++ object lifetime
+   rules, and GCC (-flifetime-dse) removes them once the code is visible
+   across translation units (LTO). The server then published a garbage
+   segment index for each client's JackClientControl; the client attached
+   that segment (another object, possibly of another JACK server) and
+   unlinked it (upstream jack2 issue #485, LTO crash at first connection).
+ Looking the info up by address avoids both.
+*/
+namespace {
+
+struct ShmAllocation {
+    void* fAddress;
+    jack_shm_info_t fInfo;
+};
+
+ShmAllocation gAllocations[MAX_SHM_ID];
+std::mutex gAllocationsLock;
+
+void RecordAllocation(void* address, const jack_shm_info_t& info)
+{
+    std::lock_guard<std::mutex> lock(gAllocationsLock);
+    for (int i = 0; i < MAX_SHM_ID; i++) {
+        if (gAllocations[i].fAddress == NULL) {
+            gAllocations[i].fAddress = address;
+            gAllocations[i].fInfo = info;
+            return;
+        }
+    }
+    jack_error("JackShmMem: allocation table full");
+}
+
+bool LookupAllocation(const void* address, jack_shm_info_t* info, bool remove)
+{
+    std::lock_guard<std::mutex> lock(gAllocationsLock);
+    for (int i = 0; i < MAX_SHM_ID; i++) {
+        if (gAllocations[i].fAddress == address) {
+            *info = gAllocations[i].fInfo;
+            if (remove) {
+                gAllocations[i].fAddress = NULL;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
 
 JackShmMem::JackShmMem()
 {
@@ -40,9 +98,18 @@ JackShmMem::~JackShmMem()
 
 void JackShmMemAble::Init()
 {
-    fInfo.index = gInfo.index;
-    fInfo.ptr.attached_at = gInfo.ptr.attached_at;
-    fInfo.size = gInfo.size;
+    // Must be called on a live object (from or after its constructor), see above.
+    jack_shm_info_t info;
+    if (LookupAllocation(this, &info, false)) {
+        fInfo.index = info.index;
+        fInfo.ptr.attached_at = info.ptr.attached_at;
+        fInfo.size = info.size;
+    } else {
+        jack_error("JackShmMemAble::Init: %p was not allocated by JackShmMem::operator new", this);
+        fInfo.index = JACK_SHM_NULL_INDEX;
+        fInfo.ptr.attached_at = NULL;
+        fInfo.size = 0;
+    }
 }
 
 void* JackShmMem::operator new(size_t size, void* memory)
@@ -71,11 +138,10 @@ void* JackShmMem::operator new(size_t size)
     }
 
     obj = (JackShmMem*)jack_shm_addr(&info);
-    // It is unsafe to set object fields directly (may be overwritten during object initialization),
-    // so use an intermediate global data
-    gInfo.index = info.index;
-    gInfo.size = size;
-    gInfo.ptr.attached_at = info.ptr.attached_at;
+    // Never store into the object here: its constructor has not run yet.
+    // JackShmMemAble::Init() fetches this record by address once it has.
+    info.size = size;
+    RecordAllocation(obj, info);
 
     jack_log("JackShmMem::new index = %ld attached = %x size = %ld ", info.index, info.ptr.attached_at, size);
     return obj;
@@ -87,10 +153,12 @@ error:
 
 void JackShmMem::operator delete(void* p, size_t size)
 {
+    // The object has already been destroyed: don't read it, look it up.
     jack_shm_info_t info;
-    JackShmMem* obj = (JackShmMem*)p;
-    info.index = obj->fInfo.index;
-    info.ptr.attached_at = obj->fInfo.ptr.attached_at;
+    if (!LookupAllocation(p, &info, true)) {
+        jack_error("JackShmMem::delete: %p was not allocated by JackShmMem::operator new", p);
+        return;
+    }
 
     jack_log("JackShmMem::delete size = %ld index = %ld", size, info.index);
 

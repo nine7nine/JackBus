@@ -217,9 +217,12 @@ class JackShmReadWritePtr1
                 GetShmAddress()->LockMemory();
                 fInitDone = true;
                 /*
-                nobody else needs to access this shared memory any more, so
-                destroy it. because we have our own attachment to it, it won't
-                vanish till we exit (and release it).
+                Historically the client unlinked its own client-control segment
+                here. jack_destroy_shm() now only removes segments allocated by
+                the calling process, so this is a no-op for clients: the server
+                (the allocator) unlinks the segment when the client closes, and
+                a bad index can no longer make a client delete another
+                process's segment. Kept for in-process (server-side) use.
                 */
                 jack_destroy_shm(&fInfo);
             }

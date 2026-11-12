@@ -16,7 +16,7 @@ fi
 
 mount -t tmpfs -o size=1g,mode=1777 nspa-shm /dev/shm
 unset DBUS_SESSION_BUS_ADDRESS NOTIFY_SOCKET JACK_DEFAULT_SERVER JACK_PROMISCUOUS_SERVER
-export JACK_BUILD="$here/build"
+export JACK_BUILD="${NSPA_BUILD_DIR:-$here/build}"
 export JACK_DRIVER_DIR="$JACK_BUILD"
 if [ "${NSPA_SYSTEM_LIBJACK:-0}" != 1 ]; then
     export LD_LIBRARY_PATH="$JACK_BUILD/common${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

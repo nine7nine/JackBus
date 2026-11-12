@@ -50,18 +50,24 @@ int JackExternalClient::Open(const char* name, int pid, int refnum, jack_uuid_t 
             return -1;
         }
 
-        // Use "placement new" to allocate object in shared memory
-        JackShmMemAble* shared_mem = static_cast<JackShmMemAble*>(JackShmMem::operator new(sizeof(JackClientControl)));
-        shared_mem->Init();
+        // Use "placement new" to allocate object in shared memory.
+        // The shm info must be set *after* construction: stores made before the
+        // object's lifetime starts may be discarded by the compiler (with LTO this
+        // published a garbage segment index to the client, upstream issue #485).
+        void* shared_mem = JackShmMem::operator new(sizeof(JackClientControl));
         fClientControl = new(shared_mem) JackClientControl(name, pid, refnum, uuid);
+        fClientControl->JackShmMemAble::Init();
 
-        if (!fClientControl) {
+        if (fClientControl->GetShmIndex() < 0) {
             jack_error("Cannot allocate client shared memory segment");
+            fClientControl->~JackClientControl();
+            JackShmMem::operator delete(shared_mem);
+            fClientControl = NULL;
             return -1;
         }
 
-        *shared_client = shared_mem->GetShmIndex();
-        jack_log("JackExternalClient::Open name = %s index = %ld base = %x", name, shared_mem->GetShmIndex(), shared_mem->GetShmAddress());
+        *shared_client = fClientControl->GetShmIndex();
+        jack_log("JackExternalClient::Open name = %s index = %ld base = %x", name, fClientControl->GetShmIndex(), fClientControl->GetShmAddress());
         return 0;
 
     } catch (std::exception&) {

@@ -432,11 +432,36 @@ char* jack_shm_addr (jack_shm_info_t* si)
 void
 jack_destroy_shm (jack_shm_info_t* si)
 {
+	jack_shm_id_t id;
+	int owner;
+
 	/* must NOT have the registry locked */
 	if (si->index == JACK_SHM_NULL_INDEX)
 		return;			/* segment not allocated */
 
-	jack_remove_shm (jack_shm_registry[si->index].id);
+	if (si->index < 0 || si->index >= MAX_SHM_ID) {
+		jack_error ("jack_destroy_shm: invalid segment index %d", si->index);
+		return;
+	}
+
+	/* Only the process that allocated a segment may remove it. The
+	 * registry is shared by every JACK server and client of this user,
+	 * so a wrong index (bug, miscompile, or a client handed a bad index)
+	 * would otherwise unlink a live segment of another server. Segments
+	 * of dead allocators are reclaimed by jack_cleanup_shm(). */
+	if (jack_shm_lock_registry () < 0) {
+		jack_error ("jack_shm_lock_registry fails...");
+		return;
+	}
+	owner = (jack_shm_registry[si->index].allocator == GetPID());
+	if (owner)
+		memcpy (&id, &jack_shm_registry[si->index].id, sizeof (id));
+	jack_shm_unlock_registry ();
+
+	if (!owner)
+		return;
+
+	jack_remove_shm (id);
 	jack_release_shm_info (si->index);
 }
 

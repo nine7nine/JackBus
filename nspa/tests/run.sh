@@ -26,20 +26,21 @@ cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/li
 
 fail=0
 
-# start_server <fork|system> <logfile>; sets SERVER_PID
+# start_server <fork|system> <logfile> [server-name]; sets SERVER_PID
 start_server() {
-    rm -f /dev/shm/jack_default_*
+    sname=${3:-default}
+    rm -f /dev/shm/jack_${sname}_*
     if [ "$1" = fork ]; then
         LD_LIBRARY_PATH="$fork_lib" JACK_DRIVER_DIR="$JACK_BUILD" \
-            "$JACK_BUILD/jackd" -R -P 70 -d dummy -r 48000 -p 128 >"$2" 2>&1 &
+            "$JACK_BUILD/jackd" -n "$sname" -R -P 70 -d dummy -r 48000 -p 128 >"$2" 2>&1 &
     else
         env -u LD_LIBRARY_PATH -u JACK_DRIVER_DIR \
-            /usr/bin/jackd -R -P 70 -d dummy -r 48000 -p 128 >"$2" 2>&1 &
+            /usr/bin/jackd -n "$sname" -R -P 70 -d dummy -r 48000 -p 128 >"$2" 2>&1 &
     fi
     SERVER_PID=$!
     i=0
     while [ $i -lt 50 ]; do
-        ls /dev/shm/jack_default_*_0 >/dev/null 2>&1 && return 0
+        ls /dev/shm/jack_${sname}_*_0 >/dev/null 2>&1 && return 0
         kill -0 "$SERVER_PID" 2>/dev/null || return 1
         sleep 0.1; i=$((i + 1))
     done
@@ -71,6 +72,13 @@ run_case() {
     fi
     rc=$?
     stop_server || rc=1
+    leaked=$(ls /dev/shm | grep -E '^jack-[0-9]+-[0-9]+$' | tr '\n' ' ')
+    if [ -n "$leaked" ]; then
+        if [ "$server" = fork ]; then
+            echo "  leaked shm segments after server exit: $leaked"; rc=1
+        fi
+        for f in $leaked; do rm -f "/dev/shm/$f"; done
+    fi
     if [ $rc -eq 0 ]; then
         echo "PASS $name: $(tail -1 "$out/$name.client.log")"
     else
@@ -78,9 +86,30 @@ run_case() {
     fi
 }
 
+# Two servers share one registry: stress the second, the first must survive.
+two_servers() {
+    name=two-servers
+    start_server fork "$out/$name.A.log" default || { echo "FAIL $name: server A"; fail=1; return; }
+    A_PID=$SERVER_PID
+    segsA=$(ls /dev/shm | grep -E '^jack-[0-9]+-[0-9]+$' | sort | tr '\n' ' ')
+    start_server fork "$out/$name.B.log" nspa2 || { echo "FAIL $name: server B"; kill $A_PID; fail=1; return; }
+    B_PID=$SERVER_PID
+    JACK_DEFAULT_SERVER=nspa2 LD_LIBRARY_PATH="$fork_lib" timeout 120 "$out/stress64" 4 "$iters" >"$out/$name.client.log" 2>&1
+    rc=$?
+    SERVER_PID=$B_PID; stop_server || rc=1
+    for f in $segsA; do
+        [ -e "/dev/shm/$f" ] || { echo "  server A segment $f was removed"; rc=1; }
+    done
+    LD_LIBRARY_PATH="$fork_lib" timeout 60 "$out/stress64" 2 4 >"$out/$name.clientA.log" 2>&1 \
+        || { echo "  new client cannot use server A"; rc=1; }
+    SERVER_PID=$A_PID; stop_server || rc=1
+    if [ $rc -eq 0 ]; then echo "PASS $name"; else echo "FAIL $name"; tail -3 "$out/$name.client.log"; fail=1; fi
+}
+
 run_case fork-server_fork-lib       fork   "$out/stress64" "$fork_lib"
 run_case fork-server_system-lib     fork   "$out/stress64" system
 run_case system-server_fork-lib     system "$out/stress64" "$fork_lib"
 run_case fork-server_system-lib32   fork   "$out/stress32" system
+two_servers
 
 exit $fail
