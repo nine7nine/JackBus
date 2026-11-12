@@ -263,6 +263,10 @@ def configure(conf):
     conf.env.append_unique('CFLAGS', '-Wall')
     conf.env.append_unique('CXXFLAGS', ['-Wall', '-Wno-invalid-offsetof'])
     conf.env.append_unique('CXXFLAGS', '-std=gnu++11')
+    # C++17 aligned new in C++11 mode: JackBoundedQueue (message ring, engine
+    # notification queue) is alignas(64), and plain new only guarantees 16.
+    if conf.check_cxx(cxxflags='-faligned-new', msg='Checking for -faligned-new', mandatory=False):
+        conf.env.append_unique('CXXFLAGS', '-faligned-new')
 
     # x86/x86_64: TLS descriptors for the __thread state in JackGlobals. In a
     # shared library the default dialect calls __tls_get_addr (which may
