@@ -1,0 +1,80 @@
+# jack2dbus-nspa: JACK2 1.9.22 with the jack2-nspa RT / correctness / performance
+# fixes (branch nspa, see RT-AUDIT.md). One package replacing Arch's jack2 and
+# jack2-dbus (same files, same paths, same configure options; no docs, no
+# lib32). Client API/ABI, shared memory layout and protocol are unchanged:
+# applications linked against jack2 keep working, and Arch's lib32-jack2
+# 1.9.22 still works against this server.
+#
+# Build from the local repository: _repo defaults to the repository this file
+# is in; NSPA_REPO=/path/to/jack2 overrides it.
+
+pkgname=jack2dbus-nspa
+pkgver=1.9.22.r0.g0
+pkgrel=1
+pkgdesc="The JACK low-latency audio server, with D-Bus (jackdbus), jack2-nspa RT fixes"
+arch=(x86_64)
+url="https://github.com/jackaudio/jack2"
+license=(GPL-2.0-or-later LGPL-2.1-or-later)
+depends=(
+  alsa-lib libasound.so
+  db5.3
+  dbus libdbus-1.so
+  expat libexpat.so
+  glibc
+  libgcc
+  libsamplerate libsamplerate.so
+  libstdc++
+  opus libopus.so
+  python-dbus
+  systemd-libs libsystemd.so
+)
+makedepends=(alsa-lib db5.3 dbus expat git libffado libsamplerate opus python systemd)
+optdepends=(
+  'a2jmidid: for ALSA MIDI to JACK MIDI bridging'
+  'libffado: for firewire support using FFADO'
+  'jack-example-tools: for official JACK example-clients and tools'
+  'realtime-privileges: for realtime privileges'
+)
+# jack2 1.9.22 provides; the version keeps dependents such as lib32-jack2
+# (depends on jack2=1.9.22) installable
+provides=(jack jack2=1.9.22 jack2-dbus=1.9.22 libjack.so libjacknet.so libjackserver.so)
+conflicts=(jack jack2 jack2-dbus)
+# LTO on (makepkg's default LTOFLAGS=-flto=auto). Arch builds jack2 with !lto
+# because of upstream #485, whose cause the fork fixed (C1, shm index/ownership);
+# the LTO build passes the whole test suite. Measured in the engine against the
+# same commit without LTO (16 clients, 32 frames, 12 interleaved runs): critical
+# path median 214.8 vs 224.0 us, p99 438.7 vs 444.0 us, DSP load 16.6 vs 17.9%;
+# server instructions per cycle -1..-5%.
+_repo="${NSPA_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+source=("jack2::git+file://$_repo#branch=nspa")
+sha512sums=('SKIP')
+
+pkgver() {
+  cd jack2
+  git describe --long --tags --match 'v1.9.22' | sed 's/^v//; s/\([^-]*-g\)/r\1/; s/-/./g'
+}
+
+build() {
+  local waf_options=(
+    --prefix=/usr
+    --htmldir=/usr/share/doc/jack2/html
+    --autostart=none
+    --doxygen=no
+    --systemd-unit
+    --classic
+    --dbus
+  )
+
+  cd jack2
+  # wscript prefers Berkeley DB 5.3 (/usr/include/db5.3, libdb-5.3) like
+  # Arch's jack2: the metadata DB in /dev/shm is shared with every client
+  python3 ./waf configure "${waf_options[@]}"
+  python3 ./waf build
+}
+
+package() {
+  cd jack2
+  python3 ./waf install --destdir="$pkgdir"
+}
+
+# vim:set ts=2 sw=2 et:
