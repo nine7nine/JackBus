@@ -21,15 +21,39 @@
 
 #include "JackPosixMutex.h"
 #include "JackError.h"
+#include <unistd.h>  // _POSIX_THREAD_PRIO_INHERIT
 
 namespace Jack
 {
 
+    /*
+     Priority inheritance: when a realtime thread blocks on a JACK mutex held
+     by a lower-priority thread, the holder is boosted (FUTEX_LOCK_PI) instead
+     of being preempted by everything in between. glibc PI mutexes keep the
+     uncontended fast path in userspace, so this costs nothing otherwise.
+     All JACK mutexes are unlocked by their owner, as PI requires.
+    */
+    static void InitMutex(pthread_mutex_t* mutex, int type)
+    {
+        pthread_mutexattr_t attr;
+        int res = pthread_mutexattr_init(&attr);
+        ThrowIf(res != 0, JackException("JackPosixMutex: could not init the mutex attribute"));
+        res = pthread_mutexattr_settype(&attr, type);
+        ThrowIf(res != 0, JackException("JackPosixMutex: could not settype the mutex"));
+#ifdef _POSIX_THREAD_PRIO_INHERIT
+        if (pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT) != 0) {
+            jack_log("JackPosixMutex: priority inheritance not available");
+        }
+#endif
+        res = pthread_mutex_init(mutex, &attr);
+        pthread_mutexattr_destroy(&attr);
+        ThrowIf(res != 0, JackException("JackPosixMutex: could not init the mutex"));
+    }
+
     JackBasePosixMutex::JackBasePosixMutex(const char* name)
         :fOwner(0)
     {
-        int res = pthread_mutex_init(&fMutex, NULL);
-        ThrowIf(res != 0, JackException("JackBasePosixMutex: could not init the mutex"));
+        InitMutex(&fMutex, PTHREAD_MUTEX_DEFAULT);
     }
 
     JackBasePosixMutex::~JackBasePosixMutex()
@@ -91,15 +115,7 @@ namespace Jack
     JackPosixMutex::JackPosixMutex(const char* name)
     {
         // Use recursive mutex
-        pthread_mutexattr_t mutex_attr;
-        int res;
-        res = pthread_mutexattr_init(&mutex_attr);
-        ThrowIf(res != 0, JackException("JackBasePosixMutex: could not init the mutex attribute"));
-        res = pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
-        ThrowIf(res != 0, JackException("JackBasePosixMutex: could not settype the mutex"));
-        res = pthread_mutex_init(&fMutex, &mutex_attr);
-        ThrowIf(res != 0, JackException("JackBasePosixMutex: could not init the mutex"));
-        pthread_mutexattr_destroy(&mutex_attr);
+        InitMutex(&fMutex, PTHREAD_MUTEX_RECURSIVE);
     }
 
     JackPosixMutex::~JackPosixMutex()

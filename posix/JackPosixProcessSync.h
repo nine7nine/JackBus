@@ -43,8 +43,15 @@ class JackPosixProcessSync : public JackBasePosixMutex
 
         JackPosixProcessSync(const char* name = NULL):JackBasePosixMutex()
         {
-            int res = pthread_cond_init(&fCond, NULL);
-            ThrowIf(res != 0, JackException("JackBasePosixMutex: could not init the cond variable"));
+            // Timed waits measure against CLOCK_MONOTONIC: a wall-clock step
+            // (NTP, manual change) must not cut them short or stretch them.
+            pthread_condattr_t attr;
+            int res = pthread_condattr_init(&attr);
+            ThrowIf(res != 0, JackException("JackPosixProcessSync: could not init the cond attribute"));
+            pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+            res = pthread_cond_init(&fCond, &attr);
+            pthread_condattr_destroy(&attr);
+            ThrowIf(res != 0, JackException("JackPosixProcessSync: could not init the cond variable"));
         }
 
         virtual ~JackPosixProcessSync()

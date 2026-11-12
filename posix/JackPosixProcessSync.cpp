@@ -19,9 +19,19 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
 #include "JackPosixProcessSync.h"
 #include "JackError.h"
+#include <time.h>
 
 namespace Jack
 {
+
+// Absolute CLOCK_MONOTONIC deadline usec from now (the condition variable uses that clock).
+static void MonotonicDeadline(long usec, struct timespec* deadline)
+{
+    clock_gettime(CLOCK_MONOTONIC, deadline);
+    long long nsec = (long long)deadline->tv_nsec + (long long)usec * 1000;
+    deadline->tv_sec += (time_t)(nsec / 1000000000LL);
+    deadline->tv_nsec = (long)(nsec % 1000000000LL);
+}
 
 void JackPosixProcessSync::Signal()
 {
@@ -110,16 +120,12 @@ bool JackPosixProcessSync::TimedWait(long usec)
 
     struct timeval T0, T1;
     timespec time;
-    struct timeval now;
     int res;
 
     jack_log("JackPosixProcessSync::TimedWait time out = %ld", usec);
     gettimeofday(&T0, 0);
 
-    gettimeofday(&now, 0);
-    unsigned int next_date_usec = now.tv_usec + usec;
-    time.tv_sec = now.tv_sec + (next_date_usec / 1000000);
-    time.tv_nsec = (next_date_usec % 1000000) * 1000;
+    MonotonicDeadline(usec, &time);
 
     res = pthread_cond_timedwait(&fCond, &fMutex, &time);
     if (res != 0 && res != ETIMEDOUT) {
@@ -140,21 +146,17 @@ bool JackPosixProcessSync::LockedTimedWait(long usec)
 {
     struct timeval T0, T1;
     timespec time;
-    struct timeval now;
     int res1, res2;
 
     res1 = pthread_mutex_lock(&fMutex);
     if (res1 != 0) {
-        jack_error("JackPosixProcessSync::LockedTimedWait error err = %s", usec, strerror(res1));
+        jack_error("JackPosixProcessSync::LockedTimedWait error err = %s", strerror(res1));
     }
 
     jack_log("JackPosixProcessSync::TimedWait time out = %ld", usec);
     gettimeofday(&T0, 0);
 
-    gettimeofday(&now, 0);
-    unsigned int next_date_usec = now.tv_usec + usec;
-    time.tv_sec = now.tv_sec + (next_date_usec / 1000000);
-    time.tv_nsec = (next_date_usec % 1000000) * 1000;
+    MonotonicDeadline(usec, &time);
     res2 = pthread_cond_timedwait(&fCond, &fMutex, &time);
     if (res2 != 0) {
         jack_error("JackPosixProcessSync::LockedTimedWait error usec = %ld err = %s", usec, strerror(res2));
@@ -163,7 +165,7 @@ bool JackPosixProcessSync::LockedTimedWait(long usec)
     gettimeofday(&T1, 0);
     res1 = pthread_mutex_unlock(&fMutex);
     if (res1 != 0) {
-        jack_error("JackPosixProcessSync::LockedTimedWait error err = %s", usec, strerror(res1));
+        jack_error("JackPosixProcessSync::LockedTimedWait error err = %s", strerror(res1));
     }
 
     jack_log("JackPosixProcessSync::TimedWait finished delta = %5.1lf",
