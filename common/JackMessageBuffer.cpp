@@ -81,19 +81,31 @@ bool JackMessageBuffer::Stop()
 
 void JackMessageBuffer::Flush()
 {
-    while (fOutBuffer != fInBuffer) {
-        jack_log_function(fBuffers[fOutBuffer].level, fBuffers[fOutBuffer].message);
-        fOutBuffer = MB_NEXT(fOutBuffer);
+    unsigned int out = __atomic_load_n(&fOutBuffer, __ATOMIC_RELAXED);
+    while (out != __atomic_load_n(&fInBuffer, __ATOMIC_ACQUIRE)) {
+        jack_log_function(fBuffers[out].level, fBuffers[out].message);
+        out = MB_NEXT(out);
+        // releases the slot to the producers
+        __atomic_store_n(&fOutBuffer, out, __ATOMIC_RELEASE);
     }
 }
 
 void JackMessageBuffer::AddMessage(int level, const char *message)
 {
     if (fGuard.Trylock()) {
-        fBuffers[fInBuffer].level = level;
-        strncpy(fBuffers[fInBuffer].message, message, MB_BUFFERSIZE);
-        fInBuffer = MB_NEXT(fInBuffer);
-        fGuard.Signal();
+        unsigned int in = __atomic_load_n(&fInBuffer, __ATOMIC_RELAXED);
+        unsigned int next = MB_NEXT(in);
+        if (next == __atomic_load_n(&fOutBuffer, __ATOMIC_ACQUIRE)) {
+            /* Ring full: drop. Writing anyway (as before) overwrote the
+             * message being printed and made the ring appear empty. */
+            INC_ATOMIC(&fOverruns);
+        } else {
+            fBuffers[in].level = level;
+            strncpy(fBuffers[in].message, message, MB_BUFFERSIZE - 1);
+            fBuffers[in].message[MB_BUFFERSIZE - 1] = 0;
+            __atomic_store_n(&fInBuffer, next, __ATOMIC_RELEASE);
+            fGuard.Signal();
+        }
         fGuard.Unlock();
     } else {            /* lock collision */
         INC_ATOMIC(&fOverruns);

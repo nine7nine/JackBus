@@ -149,6 +149,10 @@ namespace Jack
 
     bool JackAlsaAdapter::Init()
     {
+        // This thread runs SCHED_FIFO: log through the RT-safe message buffer
+        // (jack_error would otherwise do file I/O, e.g. jackdbus's log file).
+        set_threaded_log_function();
+
         //fill the hardware buffers
         for ( unsigned int i = 0; i < fAudioInterface.fPeriod; i++ )
             fAudioInterface.write();

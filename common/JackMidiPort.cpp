@@ -54,8 +54,14 @@ SERVER_EXPORT jack_midi_data_t* JackMidiBuffer::ReserveEvent(jack_nframes_t time
 {
     jack_shmsize_t space = MaxEventSize();
     if (space == 0 || size > space) {
-        jack_error("JackMidiBuffer::ReserveEvent - the buffer does not have "
-                   "enough room to enqueue a %lu byte event", size);
+        /* Runs in realtime threads (client process callbacks, port mixdown,
+         * MIDI drivers): log only the first drop of the process. Drops are
+         * counted in lost_events (jack_midi_get_lost_event_count). */
+        static int reported = 0;
+        if (!__atomic_exchange_n(&reported, 1, __ATOMIC_RELAXED)) {
+            jack_error("JackMidiBuffer::ReserveEvent - MIDI buffer full, dropping a %u byte event "
+                       "(further drops are counted, not logged)", (unsigned)size);
+        }
         lost_events++;
         return 0;
     }
@@ -138,7 +144,11 @@ static void MidiBufferMixdown(void* mixbuffer, void** src_buffers, int src_count
 
         // write the event
         jack_midi_data_t* dest = mix->ReserveEvent(next_event->time, next_event->size);
-        if (!dest) break;
+        if (!dest) {
+            // ReserveEvent() counted this event as lost; it is counted again below.
+            mix->lost_events--;
+            break;
+        }
 
         memcpy(dest, next_event->GetData(next_buf), next_event->size);
         mix_index[next_buf_index]++;
