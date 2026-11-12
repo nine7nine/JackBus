@@ -58,6 +58,11 @@
 
 enum {
 	MAX_PORTS = 64,
+	/* Capacity of the port hand-over rings (new_ports, port_add, port_del).
+	 * Was MAX_PORTS (~63 usable): more exportable ALSA sequencer ports than
+	 * that at startup, or a burst of announcements in one period, tripped
+	 * an assert() and aborted the server. */
+	PORT_RING_ENTRIES = 1024,
 	MAX_EVENT_SIZE = 1024,
 };
 
@@ -171,7 +176,7 @@ void stream_init(alsa_seqmidi_t *self, int dir)
 {
 	stream_t *str = &self->stream[dir];
 
-	str->new_ports = jack_ringbuffer_create(MAX_PORTS*sizeof(port_t*));
+	str->new_ports = jack_ringbuffer_create(PORT_RING_ENTRIES*sizeof(port_t*));
 	snd_midi_event_new(MAX_EVENT_SIZE, &str->codec);
 }
 
@@ -225,8 +230,8 @@ alsa_midi_t* alsa_seqmidi_new(jack_client_t *client, const char* alsa_name)
 		alsa_name = "jack_midi";
 	snprintf(self->alsa_name, sizeof(self->alsa_name), "%s", alsa_name);
 
-	self->port_add = jack_ringbuffer_create(2*MAX_PORTS*sizeof(snd_seq_addr_t));
-	self->port_del = jack_ringbuffer_create(2*MAX_PORTS*sizeof(port_t*));
+	self->port_add = jack_ringbuffer_create(PORT_RING_ENTRIES*sizeof(snd_seq_addr_t));
+	self->port_del = jack_ringbuffer_create(PORT_RING_ENTRIES*sizeof(port_t*));
 	sem_init(&self->port_sem, 0, 0);
 
 	stream_init(self, PORT_INPUT);
@@ -571,10 +576,26 @@ void update_port_type(alsa_seqmidi_t *self, int type, snd_seq_addr_t addr, int c
 	}
 
 	if (!port && (caps & alsa_mask)==alsa_mask) {
-		assert (jack_ringbuffer_write_space(str->new_ports) >= sizeof(port));
 		port = port_create(self, type, addr, info);
-		if (port)
+		if (!port)
+			return;
+		if (jack_ringbuffer_write_space(str->new_ports) < sizeof(port)) {
+			if (!self->keep_walking) {
+				/* startup: the process callback is not running yet */
+				add_ports(str);
+			} else {
+				/* port thread: give the process callback time to take them */
+				int i;
+				for (i = 0; i < 100 && jack_ringbuffer_write_space(str->new_ports) < sizeof(port); ++i)
+					usleep(10000);
+			}
+		}
+		if (jack_ringbuffer_write_space(str->new_ports) >= sizeof(port)) {
 			jack_ringbuffer_write(str->new_ports, (char*)&port, sizeof(port));
+		} else {
+			error_log("alsa_seqmidi: too many new ports, dropping %s", port->name);
+			port_free(self, port);
+		}
 	}
 }
 
@@ -772,7 +793,11 @@ void port_event(alsa_seqmidi_t *self, snd_seq_event_t *ev)
 		return;
 
 	if (ev->type == SND_SEQ_EVENT_PORT_START || ev->type == SND_SEQ_EVENT_PORT_CHANGE) {
-		assert (jack_ringbuffer_write_space(self->port_add) >= sizeof(addr));
+		/* realtime context: never block or abort here */
+		if (jack_ringbuffer_write_space(self->port_add) < sizeof(addr)) {
+			error_log("alsa_seqmidi: port announcement queue full, ignoring %d:%d", addr.client, addr.port);
+			return;
+		}
 
 		debug_log("port_event: add/change %d:%d", addr.client, addr.port);
 		jack_ringbuffer_write(self->port_add, (char*)&addr, sizeof(addr));
