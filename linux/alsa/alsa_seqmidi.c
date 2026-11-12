@@ -133,6 +133,7 @@ struct process_info {
 	jack_nframes_t sample_rate;
 	jack_nframes_t cur_frames;
 	int64_t alsa_time;
+	int have_alsa_time;	/* alsa_time and cur_frames sampled together (need_alsa_time) */
 };
 
 enum PortType { PORT_INPUT = 0, PORT_OUTPUT = 1 };
@@ -720,11 +721,6 @@ void add_existing_ports(alsa_seqmidi_t *self)
 static
 void set_process_info(struct process_info *info, alsa_seqmidi_t *self, int dir, jack_nframes_t nframes)
 {
-	const snd_seq_real_time_t* alsa_time;
-	snd_seq_queue_status_t *status;
-
-	snd_seq_queue_status_alloca(&status);
-
 	info->dir = dir;
 
 	info->period_start = jack_last_frame_time(self->jack);
@@ -732,17 +728,38 @@ void set_process_info(struct process_info *info, alsa_seqmidi_t *self, int dir, 
 	info->sample_rate = jack_get_sample_rate(self->jack);
 
 	info->cur_frames = jack_frame_time(self->jack);
-
-	// immediately get alsa'a real time (uhh, why everybody has their own 'real' time)
-	snd_seq_get_queue_status(self->seq, self->queue, status);
-	alsa_time = snd_seq_queue_status_get_real_time(status);
-	info->alsa_time = alsa_time->tv_sec * NSEC_PER_SEC + alsa_time->tv_nsec;
+	info->have_alsa_time = 0;
 
 	if (info->period_start + info->nframes < info->cur_frames) {
 		int periods_lost = (info->cur_frames - info->period_start) / info->nframes;
 		info->period_start += periods_lost * info->nframes;
 		debug_log("xrun detected: %d periods lost\n", periods_lost);
 	}
+}
+
+/*
+ * ALSA's queue real time and JACK's frame time, sampled together; events are
+ * placed by the difference of the two clocks. Only needed when there is an
+ * event to place, so cycles without MIDI make no queue-status ioctl (it takes
+ * the queue lock, an rt_mutex on PREEMPT_RT). Sampling the pair later in the
+ * cycle moves both clocks alike, so event positions are unchanged.
+ */
+static
+void need_alsa_time(alsa_seqmidi_t *self, struct process_info *info)
+{
+	const snd_seq_real_time_t* alsa_time;
+	snd_seq_queue_status_t *status;
+
+	if (info->have_alsa_time)
+		return;
+	snd_seq_queue_status_alloca(&status);
+
+	info->cur_frames = jack_frame_time(self->jack);
+	// immediately get alsa'a real time (uhh, why everybody has their own 'real' time)
+	snd_seq_get_queue_status(self->seq, self->queue, status);
+	alsa_time = snd_seq_queue_status_get_real_time(status);
+	info->alsa_time = alsa_time->tv_sec * NSEC_PER_SEC + alsa_time->tv_nsec;
+	info->have_alsa_time = 1;
 }
 
 static
@@ -868,6 +885,7 @@ void input_event(alsa_seqmidi_t *self, snd_seq_event_t *alsa_event, struct proce
 		data[2] = 0x40;
 	}
 
+	need_alsa_time(self, info);
 	alsa_time = alsa_event->time.time.tv_sec * NSEC_PER_SEC + alsa_event->time.time.tv_nsec;
 	time_offset = info->alsa_time - alsa_time;
 	frame_offset = (info->sample_rate * time_offset) / NSEC_PER_SEC;
@@ -926,6 +944,8 @@ void do_jack_output(alsa_seqmidi_t *self, port_t *port, struct process_info* inf
 	stream_t *str = &self->stream[info->dir];
 	int nevents = jack_midi_get_event_count(port->jack_buf);
 	int i, err;
+	if (nevents > 0)
+		need_alsa_time(self, info);
 	for (i=0; i<nevents; ++i) {
 		jack_midi_event_t jack_event;
 		snd_seq_event_t alsa_event;
