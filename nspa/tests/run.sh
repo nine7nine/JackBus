@@ -22,6 +22,8 @@ iters="${NSPA_ITERS:-200}"
 
 cc -O2 -Wall -I"$root/common" -o "$out/stress64" "$here/stress.c" -L"$fork_lib" -ljack -lpthread || exit 1
 cc -O2 -Wall -I"$root/common" -o "$out/xrun_timer" "$here/xrun_timer.c" -L"$fork_lib" -ljack -lpthread || exit 1
+c++ -std=gnu++11 -O2 -Wall -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
+    -o "$out/midi_wrap" "$here/midi_wrap.cpp" -L"$fork_lib" -ljackserver || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -32,10 +34,10 @@ start_server() {
     sname=${3:-default}
     rm -f /dev/shm/jack_${sname}_*
     if [ "$1" = fork ]; then
-        LD_LIBRARY_PATH="$fork_lib" JACK_DRIVER_DIR="$JACK_BUILD" \
+        env LD_LIBRARY_PATH="$fork_lib" JACK_DRIVER_DIR="$JACK_BUILD" ${SERVER_ENV:-} \
             "$JACK_BUILD/jackd" -n "$sname" -R -P 70 ${SERVER_EXTRA:-} -d dummy -r 48000 -p 128 >"$2" 2>&1 &
     else
-        env -u LD_LIBRARY_PATH -u JACK_DRIVER_DIR \
+        env -u LD_LIBRARY_PATH -u JACK_DRIVER_DIR ${SERVER_ENV:-} \
             /usr/bin/jackd -n "$sname" -R -P 70 ${SERVER_EXTRA:-} -d dummy -r 48000 -p 128 >"$2" 2>&1 &
     fi
     SERVER_PID=$!
@@ -111,7 +113,9 @@ two_servers() {
 # xrun_timer_case <name> <server> <client-libdir|system> <gating:1|0>
 xrun_timer_case() {
     name=$1; server=$2; lib=$3; gating=$4
-    SERVER_EXTRA=-S start_server "$server" "$out/$name.server.log" || { echo "FAIL $name: server"; fail=1; return; }
+    SERVER_EXTRA=-S
+    start_server "$server" "$out/$name.server.log" || { echo "FAIL $name: server"; SERVER_EXTRA=; fail=1; return; }
+    SERVER_EXTRA=
     if [ "$lib" = system ]; then
         env -u LD_LIBRARY_PATH timeout 60 "$out/xrun_timer" >"$out/$name.client.log" 2>&1
     else
@@ -124,6 +128,20 @@ xrun_timer_case() {
     else echo "INFO $name (rc=$rc, expected to fail on unfixed servers): $(tail -1 "$out/$name.client.log")"; fi
 }
 
+# Frame counter wrap: start the server 0.25 s before 2^32 frames.
+wrap_case() {
+    name=frame-wrap
+    SERVER_ENV="JACK_NSPA_TEST_INITIAL_FRAMES=$((4294967296 - 12000))"
+    start_server fork "$out/$name.server.log" || { echo "FAIL $name: server"; SERVER_ENV=; fail=1; return; }
+    SERVER_ENV=
+    LD_LIBRARY_PATH="$fork_lib" timeout 120 "$out/stress64" 4 "$iters" 1000 >"$out/$name.client.log" 2>&1
+    rc=$?
+    stop_server || rc=1
+    grep -q '(wrapped)' "$out/$name.client.log" || { echo "  frame counter did not wrap during the test"; rc=1; }
+    if [ $rc -eq 0 ]; then echo "PASS $name: $(tail -1 "$out/$name.client.log")"
+    else echo "FAIL $name (rc=$rc): $(tail -1 "$out/$name.client.log")"; fail=1; fi
+}
+
 run_case fork-server_fork-lib       fork   "$out/stress64" "$fork_lib"
 run_case fork-server_system-lib     fork   "$out/stress64" system
 run_case system-server_fork-lib     system "$out/stress64" "$fork_lib"
@@ -131,5 +149,8 @@ run_case fork-server_system-lib32   fork   "$out/stress32" system
 two_servers
 xrun_timer_case xrun-timer_fork-server       fork   "$fork_lib" 1
 xrun_timer_case xrun-timer_system-server     system system      0
+wrap_case
+if LD_LIBRARY_PATH="$fork_lib" "$out/midi_wrap" >"$out/midi_wrap.log" 2>&1; then echo "PASS midi-wrap: $(tail -1 "$out/midi_wrap.log")"
+else echo "FAIL midi-wrap:"; sed 's/^/  /' "$out/midi_wrap.log"; fail=1; fi
 
 exit $fail

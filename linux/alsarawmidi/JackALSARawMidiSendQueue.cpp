@@ -40,7 +40,7 @@ JackALSARawMidiSendQueue::EnqueueEvent(jack_nframes_t time, size_t size,
                                        jack_midi_data_t *buffer)
 {
     assert(size == 1);
-    if (time > GetCurrentFrame()) {
+    if (FrameAfter(time, GetCurrentFrame())) {
         return EVENT_EARLY;
     }
     if (! bytes_available) {

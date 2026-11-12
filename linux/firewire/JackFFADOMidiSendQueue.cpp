@@ -34,7 +34,7 @@ JackFFADOMidiSendQueue::EnqueueEvent(jack_nframes_t time, size_t size,
                                      jack_midi_data_t *buffer)
 {
     assert(size == 1);
-    jack_nframes_t relative_time = (time < last_frame) ? 0 : time - last_frame;
+    jack_nframes_t relative_time = FrameBefore(time, last_frame) ? 0 : time - last_frame;
     if (index < relative_time) {
         index = (relative_time % 8) ?
             (relative_time & (~ ((jack_nframes_t) 7))) + 8 : relative_time;

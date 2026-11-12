@@ -32,10 +32,10 @@ Jack::JackMidiWriteQueue::EnqueueResult
 JackMidiBufferWriteQueue::EnqueueEvent(jack_nframes_t time, size_t size,
                                        jack_midi_data_t *data)
 {
-    if (time >= next_frame_time) {
+    if (! FrameBefore(time, next_frame_time)) {
         return EVENT_EARLY;
     }
-    if (time < last_frame_time) {
+    if (FrameBefore(time, last_frame_time)) {
         time = last_frame_time;
     }
     jack_midi_data_t *dst = buffer->ReserveEvent(time - last_frame_time, size);

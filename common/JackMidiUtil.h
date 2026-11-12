@@ -97,6 +97,25 @@ namespace Jack {
     SERVER_EXPORT jack_time_t
     GetTimeFromFrames(jack_nframes_t frames);
 
+    /**
+     * Wrap-safe ordering of absolute frame times. jack_nframes_t wraps every
+     * 2^32 frames (~24.9 h at 48 kHz); plain '<' on such times breaks at the
+     * wrap (events stuck "early" forever, timeouts never firing). Valid while
+     * the two times are less than 2^31 frames apart.
+     */
+
+    inline bool
+    FrameBefore(jack_nframes_t a, jack_nframes_t b)
+    {
+        return (int32_t) (a - b) < 0;
+    }
+
+    inline bool
+    FrameAfter(jack_nframes_t a, jack_nframes_t b)
+    {
+        return (int32_t) (a - b) > 0;
+    }
+
 };
 
 #endif

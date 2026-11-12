@@ -198,6 +198,10 @@ JackALSARawMidiDriver::Execute()
                        strerror(errno));
             break;
         }
+        // Timeouts are absolute frame times; 0 means "no timeout". Compare
+        // them wrap-safely (FrameBefore/FrameAfter): with plain '<' the
+        // timeouts never fired again after the frame counter wrapped, and
+        // the output thread busy-spun on a zero ppoll() timeout.
         jack_nframes_t port_timeout;
         timeout_frame = 0;
         if (! poll_result) {
@@ -207,7 +211,7 @@ JackALSARawMidiDriver::Execute()
 
             for (int i = 0; i < fPlaybackChannels; i++) {
                 port_timeout = output_port_timeouts[i];
-                if (port_timeout && (port_timeout <= current_frame)) {
+                if (port_timeout && (! FrameAfter(port_timeout, current_frame))) {
                     if (! output_ports[i]->ProcessPollEvents(false, true,
                                                              &port_timeout)) {
                         jack_error("JackALSARawMidiDriver::Execute - a fatal "
@@ -218,7 +222,7 @@ JackALSARawMidiDriver::Execute()
                     output_port_timeouts[i] = port_timeout;
                 }
                 if (port_timeout && ((! timeout_frame) ||
-                                     (port_timeout < timeout_frame))) {
+                                     FrameBefore(port_timeout, timeout_frame))) {
                     timeout_frame = port_timeout;
                 }
             }
@@ -240,7 +244,7 @@ JackALSARawMidiDriver::Execute()
 
         for (int i = 0; i < fPlaybackChannels; i++) {
             port_timeout = output_port_timeouts[i];
-            bool timeout = port_timeout && (port_timeout <= current_frame);
+            bool timeout = port_timeout && (! FrameAfter(port_timeout, current_frame));
             if (! output_ports[i]->ProcessPollEvents(true, timeout,
                                                      &port_timeout)) {
                 jack_error("JackALSARawMidiDriver::Execute - a fatal error "
@@ -249,7 +253,7 @@ JackALSARawMidiDriver::Execute()
             }
             output_port_timeouts[i] = port_timeout;
             if (port_timeout && ((! timeout_frame) ||
-                                 (port_timeout < timeout_frame))) {
+                                 FrameBefore(port_timeout, timeout_frame))) {
                 timeout_frame = port_timeout;
             }
         }

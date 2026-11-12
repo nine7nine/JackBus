@@ -25,8 +25,9 @@
 struct client {
     jack_client_t *c;
     jack_port_t *in[NPORTS], *out[NPORTS];
-    jack_nframes_t last_frames;
+    jack_nframes_t last_frames, first_frames;
     int have_last;
+    atomic_int wrapped;
     atomic_ulong cycles, bad_times, bad_continuity, bad_frame_time;
     atomic_int xrun_pending;
 };
@@ -57,6 +58,10 @@ static int process(jack_nframes_t n, void *arg)
         if (s->have_last && !atomic_exchange(&s->xrun_pending, 0)
             && (jack_nframes_t)(cf - s->last_frames) != n)
             atomic_fetch_add(&s->bad_continuity, 1);
+        if (!s->have_last)
+            s->first_frames = cf;
+        else if (cf < s->last_frames)
+            atomic_store(&s->wrapped, 1);
         jack_nframes_t ft = jack_frame_time(s->c);
         if ((jack_nframes_t)(ft - cf) >= 2 * n)
             atomic_fetch_add(&s->bad_frame_time, 1);
@@ -140,8 +145,9 @@ int main(int argc, char **argv)
             failures++;
         }
     }
-    printf("clients=%d iters=%d cycles=%lu xruns=%lu timing_violations=%lu api_failures=%d\n",
-           nclients, iters, tot_cycles, atomic_load(&xruns), tot_bad, failures);
+    printf("clients=%d iters=%d cycles=%lu xruns=%lu timing_violations=%lu api_failures=%d frames=%u..%u%s\n",
+           nclients, iters, tot_cycles, atomic_load(&xruns), tot_bad, failures,
+           cl[0].first_frames, cl[0].last_frames, atomic_load(&cl[0].wrapped) ? " (wrapped)" : "");
 
     for (int k = nclients - 1; k >= 0; k--)
         jack_client_close(cl[k].c);

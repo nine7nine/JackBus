@@ -22,6 +22,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackError.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 namespace Jack
 {
@@ -120,6 +121,22 @@ int JackTimer::GetCycleTimes(jack_nframes_t* current_frames, jack_time_t* curren
 jack_nframes_t JackTimer::FramesSinceCycleStart(jack_time_t cur_time, jack_nframes_t frames_rate)
 {
     return (jack_nframes_t) floor((((float)frames_rate) / 1000000.0f) * (cur_time - fCurrentCallback));
+}
+
+JackFrameTimer::JackFrameTimer(): fFirstWakeUp(true)
+{
+    /*
+    Test hook: start the frame counter at a given value, e.g. just below 2^32,
+    so that wrap-around handling can be exercised in seconds instead of after
+    ~24.9 hours (at 48 kHz). Server-side only; never set in normal use.
+    */
+    const char* initial = getenv("JACK_NSPA_TEST_INITIAL_FRAMES");
+    if (initial) {
+        jack_nframes_t frames = (jack_nframes_t)strtoul(initial, NULL, 0);
+        fState[0].fFrames = frames;
+        fState[1].fFrames = frames;
+        jack_info("JackFrameTimer: test hook, initial frame counter = %u", frames);
+    }
 }
 
 void JackFrameTimer::InitFrameTime()

@@ -43,7 +43,22 @@ enum {
 	NANOSLEEP_RESOLUTION = 7000
 };
 
-#define NFRAMES_INF ULLONG_MAX
+/*
+ * Frame times are jack_nframes_t and wrap every 2^32 frames (~24.9 h at
+ * 48 kHz). They used to be kept in 64-bit jack_time_t fields and compared
+ * with plain '<' against 32-bit jack_frame_time() values, so once an output
+ * timestamp crossed 2^32 the port never sent again. Keep them 32-bit and
+ * order them with signed differences.
+ */
+static inline int frame_before(jack_nframes_t a, jack_nframes_t b)
+{
+	return (int32_t)(a - b) < 0;
+}
+
+static inline int frame_after(jack_nframes_t a, jack_nframes_t b)
+{
+	return (int32_t)(a - b) > 0;
+}
 
 enum {
 #ifndef JACK_MIDI_DEBUG
@@ -76,7 +91,7 @@ typedef struct {
 } alsa_id_t;
 
 typedef struct {
-	jack_time_t time;
+	jack_nframes_t time;
 	int size;
 	int overruns;
 } event_head_t;
@@ -120,6 +135,7 @@ typedef struct output_port_t {
 
 	// midi
 	event_head_t next_event;
+	int has_next_event;
 	int todo;
 } output_port_t;
 
@@ -129,7 +145,7 @@ typedef struct {
 	alsa_rawmidi_t *midi;
 	midi_port_t *port;
 	void *buffer;
-	jack_time_t frame_time;
+	jack_nframes_t frame_time;
 	jack_nframes_t nframes;
 } process_jack_t;
 
@@ -141,8 +157,9 @@ typedef struct {
 	struct pollfd *wpfds;
 	int max_pfds;
 	jack_nframes_t cur_frames;
-	jack_time_t cur_time;
-	jack_time_t next_time;
+	jack_nframes_t cur_time;
+	jack_nframes_t next_time;
+	int has_next_time;
 } process_midi_t;
 
 typedef struct midi_stream_t {
@@ -786,8 +803,8 @@ void jack_process(midi_stream_t *str, jack_nframes_t nframes)
 	proc.nframes = nframes;
 	proc.frame_time = jack_last_frame_time(proc.midi->client);
 	cur_frames = jack_frame_time(proc.midi->client);
-	int periods_diff = cur_frames - proc.frame_time;
-	if (periods_diff < proc.nframes) {
+	int periods_diff = (int32_t)(cur_frames - proc.frame_time);
+	if (periods_diff >= (int)proc.nframes) {
 		int periods_lost = periods_diff / proc.nframes;
 		proc.frame_time += periods_lost * proc.nframes;
 		debug_log("xrun detected: %d periods lost", periods_lost);
@@ -903,7 +920,8 @@ void *midi_thread(void *arg)
 
 		// process ports
 		proc.cur_time = 0; //jack_frame_time(midi->client);
-		proc.next_time = NFRAMES_INF;
+		proc.next_time = 0;
+		proc.has_next_time = 0;
 
 		for (rp = 0; rp < str->midi.nports; ++rp) {
 			midi_port_t *port = str->midi.ports[rp];
@@ -936,11 +954,11 @@ void *midi_thread(void *arg)
 		 * Output: port sets proc.next_time ONLY if it does not have queued data.
 		 * So, zero timeout will not cause busy-looping.
 		 */
-		if (proc.next_time < proc.cur_time) {
+		if (proc.has_next_time && frame_before(proc.next_time, proc.cur_time)) {
 			debug_log("%s: late: next_time = %d, cur_time = %d", str->name, (int)proc.next_time, (int)proc.cur_time);
 			wait_nsec = 0; // we are late
-		} else if (proc.next_time != NFRAMES_INF) {
-			jack_time_t wait_frames = proc.next_time - proc.cur_time;
+		} else if (proc.has_next_time) {
+			uint64_t wait_frames = (jack_nframes_t)(proc.next_time - proc.cur_time);
 			jack_nframes_t rate = jack_get_sample_rate(midi->client);
 			wait_nsec = (wait_frames * (1000*1000*1000)) / rate;
 			debug_log("midi_%s: timeout = %d", str->name, (int)wait_frames);
@@ -1023,13 +1041,14 @@ void do_jack_input(process_jack_t *p)
 		int i, todo;
 
 		jack_ringbuffer_read(port->base.event_ring, (char*)&event, sizeof(event));
-		// TODO: take into account possible warping
-		if ((event.time + p->nframes) < p->frame_time)
+		// delta of the arrival time to the start of this cycle (wrap-safe)
+		int32_t delta = (int32_t)(event.time - p->frame_time);
+		if (delta < -(int32_t)p->nframes)
 			time = 0;
-		else if (event.time >= p->frame_time)
+		else if (delta >= 0)
 			time = p->nframes -1;
 		else
-			time = event.time + p->nframes - p->frame_time;
+			time = p->nframes + delta;
 
 		jack_ringbuffer_get_read_vector(port->base.data_ring, vec);
 		assert ((vec[0].len + vec[1].len) >= event.size);
@@ -1108,6 +1127,7 @@ static int output_port_init(alsa_rawmidi_t *midi, midi_port_t *port)
 	midi_pack_reset(&out->packer);
 	out->next_event.time = 0;
 	out->next_event.size = 0;
+	out->has_next_event = 0;
 	out->todo = 0;
 	return 0;
 }
@@ -1155,16 +1175,18 @@ int do_midi_output(process_midi_t *proc)
 	if (!midi_is_ready(proc))
 		return 0;
 
-	// eat events
-	while (port->next_event.time <= proc->cur_time) {
-		port->todo += port->next_event.size;
-		if (jack_ringbuffer_read(port->base.event_ring, (char*)&port->next_event, sizeof(port->next_event))!=sizeof(port->next_event)) {
-			port->next_event.time = 0;
-			port->next_event.size = 0;
-			break;
-		} else {
-			debug_log("midi_out: at %ld got %d bytes for %ld", (long)proc->cur_time, (int)port->next_event.size, (long)port->next_event.time);
+	// eat events that are due
+	for (;;) {
+		if (port->has_next_event) {
+			if (frame_after(port->next_event.time, proc->cur_time))
+				break;
+			port->todo += port->next_event.size;
+			port->has_next_event = 0;
 		}
+		if (jack_ringbuffer_read(port->base.event_ring, (char*)&port->next_event, sizeof(port->next_event))!=sizeof(port->next_event))
+			break;
+		port->has_next_event = 1;
+		debug_log("midi_out: at %ld got %d bytes for %ld", (long)proc->cur_time, (int)port->next_event.size, (long)port->next_event.time);
 	}
 
 	if (port->todo) {
@@ -1172,8 +1194,9 @@ int do_midi_output(process_midi_t *proc)
 	}
 
 	// calc next wakeup time
-	if (!port->todo && port->next_event.time && port->next_event.time < proc->next_time) {
+	if (!port->todo && port->has_next_event && (!proc->has_next_time || frame_before(port->next_event.time, proc->next_time))) {
 		proc->next_time = port->next_event.time;
+		proc->has_next_time = 1;
 		debug_log("midi_out: next_time = %ld", (long)proc->next_time);
 	}
 

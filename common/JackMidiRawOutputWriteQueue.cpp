@@ -26,7 +26,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
 using Jack::JackMidiRawOutputWriteQueue;
 
-#define STILL_TIME(c, b) ((! (b)) || ((c) < (b)))
+#define STILL_TIME(c, b) ((! (b)) || FrameBefore((c), (b)))
 
 JackMidiRawOutputWriteQueue::
 JackMidiRawOutputWriteQueue(JackMidiSendQueue *send_queue, size_t non_rt_size,
@@ -99,9 +99,9 @@ JackMidiRawOutputWriteQueue::Process(jack_nframes_t boundary_frame)
     }
     while (rt_event) {
         jack_nframes_t current_frame = send_queue->GetNextScheduleFrame();
-        if ((rt_event_time > current_frame) && non_rt_event &&
-            (non_rt_event_time < rt_event_time)) {
-            if (! SendNonRTBytes(rt_event_time < boundary_frame ?
+        if (FrameAfter(rt_event_time, current_frame) && non_rt_event &&
+            FrameBefore(non_rt_event_time, rt_event_time)) {
+            if (! SendNonRTBytes(FrameBefore(rt_event_time, boundary_frame) ?
                                  rt_event_time : boundary_frame)) {
                 return non_rt_event_time;
             }
@@ -109,7 +109,7 @@ JackMidiRawOutputWriteQueue::Process(jack_nframes_t boundary_frame)
         }
         if (! STILL_TIME(current_frame, boundary_frame)) {
             return (! non_rt_event) ? rt_event_time :
-                non_rt_event_time < rt_event_time ? non_rt_event_time :
+                FrameBefore(non_rt_event_time, rt_event_time) ? non_rt_event_time :
                 rt_event_time;
         }
         if (! SendByte(rt_event_time, *(rt_event->buffer))) {

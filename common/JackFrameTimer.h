@@ -87,8 +87,7 @@ class SERVER_EXPORT JackFrameTimer : public JackAtomicState<JackTimer>
 
     public:
 
-        JackFrameTimer(): fFirstWakeUp(true)
-        {}
+        JackFrameTimer();
         ~JackFrameTimer()
         {}
 

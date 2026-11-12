@@ -23,6 +23,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
 #include "JackMidiRawInputWriteQueue.h"
 #include "JackError.h"
+#include "JackMidiUtil.h"
 
 using Jack::JackMidiRawInputWriteQueue;
 
@@ -282,7 +283,7 @@ JackMidiRawInputWriteQueue::RecordByte(jack_midi_data_t byte)
 bool
 JackMidiRawInputWriteQueue::WriteEvent(jack_nframes_t boundary_frame)
 {
-    if ((! boundary_frame) || (event.time < boundary_frame)) {
+    if ((! boundary_frame) || FrameBefore(event.time, boundary_frame)) {
         switch (write_queue->EnqueueEvent(&event)) {
         case BUFFER_TOO_SMALL:
             HandleEventLoss(&event);
