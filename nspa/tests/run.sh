@@ -17,29 +17,52 @@ root="$(cd "$here/../.." && pwd)"
 out="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}"
 mkdir -p "$out"
 fork_lib="$JACK_BUILD/common"
+tcf="${NSPA_TEST_CFLAGS:-}"   # extra flags for test programs (e.g. -fsanitize=thread)
 iters="${NSPA_ITERS:-200}"
 [ "${1:-}" = quick ] && iters=20
 
-cc -O2 -Wall -I"$root/common" -o "$out/stress64" "$here/stress.c" -L"$fork_lib" -ljack -lpthread || exit 1
-cc -O2 -Wall -I"$root/common" -o "$out/xrun_timer" "$here/xrun_timer.c" -L"$fork_lib" -ljack -lpthread || exit 1
-c++ -std=gnu++11 -O2 -Wall -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/stress64" "$here/stress.c" -L"$fork_lib" -ljack -lpthread || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/xrun_timer" "$here/xrun_timer.c" -L"$fork_lib" -ljack -lpthread || exit 1
+c++ -std=gnu++11 -O2 $tcf -Wall -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
     -o "$out/midi_wrap" "$here/midi_wrap.cpp" -L"$fork_lib" -ljackserver || exit 1
 # reference: memops.c's portable C paths (no SSE), symbols renamed ref_*
 cc -march=x86-64 -mtune=generic -O2 -U__SSE2__ -U__SSE4_1__ -I"$root/common" -I"$root/common/jack" \
     -c -o "$out/memops_ref.o" "$root/common/memops.c" || exit 1
 objcopy $(nm --defined-only -g "$out/memops_ref.o" | awk '{print "--redefine-sym " $3 "=ref_" $3}') "$out/memops_ref.o" || exit 1
-cc -march=x86-64 -mtune=generic -O2 -DWITH_REFERENCE -I"$root/common" -I"$root/common/jack" -o "$out/memops_consistency" \
+cc -march=x86-64 -mtune=generic -O2 $tcf -DWITH_REFERENCE -I"$root/common" -I"$root/common/jack" -o "$out/memops_consistency" \
     "$here/memops_consistency.c" "$root/common/memops.c" "$out/memops_ref.o" -lm || exit 1
-cc -O2 -Wall -I"$root/common" -o "$out/threads" "$here/threads.c" -L"$fork_lib" -ljack -lpthread || exit 1
-c++ -std=gnu++11 -O2 -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/threads" "$here/threads.c" -L"$fork_lib" -ljack -lpthread || exit 1
+c++ -std=gnu++11 -O2 $tcf -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
     -o "$out/pi_mutex" "$here/pi_mutex.cpp" -L"$fork_lib" -ljackserver || exit 1
-c++ -std=gnu++11 -O2 -w -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" -I"$JACK_BUILD" \
+c++ -std=gnu++11 -O2 $tcf -w -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" -I"$JACK_BUILD" \
     -include "$JACK_BUILD/config.h" -o "$out/connection_copy" "$here/connection_copy.cpp" -L"$fork_lib" -ljackserver || exit 1
-cc -O2 -Wall -I"$root/common" -o "$out/rt_faults" "$here/rt_faults.c" -L"$fork_lib" -ljack || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/rt_faults" "$here/rt_faults.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
 fail=0
+
+# Sanitizer runs (NSPA_SANITIZER=asan|tsan, with a matching build and
+# NSPA_TEST_CFLAGS): no mlockall (huge shadow mappings), no uninstrumented
+# Arch binaries (false positives), no strace. Reports go to $out/<san>.*
+san="${NSPA_SANITIZER:-}"
+if [ -n "$san" ]; then
+    export JACK_NO_MLOCK=1
+    # TSan slows clients down so much that 128-frame cycles overrun; after a
+    # timeout the server deliberately lets late clients overlap the next
+    # cycle, which TSan reports. Large periods keep the graph in order.
+    [ "$san" = tsan ] && SERVER_PERIOD=2048
+    export ASAN_OPTIONS="log_path=$out/asan:detect_leaks=0:abort_on_error=0"
+    export UBSAN_OPTIONS="log_path=$out/ubsan:print_stacktrace=1"
+    export TSAN_OPTIONS="log_path=$out/tsan:halt_on_error=0:report_signal_unsafe=0:second_deadlock_stack=1:handle_segv=0:suppressions=$here/tsan.supp"
+    rm -f "$out"/asan.* "$out"/ubsan.* "$out"/tsan.*
+fi
+skip_system() {  # skip_system <name> <server> <lib>
+    if [ -n "$san" ] && { [ "$2" = system ] || [ "$3" = system ]; }; then
+        echo "SKIP $1 (sanitizer run)"; return 0
+    fi
+    return 1
+}
 
 # start_server <fork|system> <logfile> [server-name]; sets SERVER_PID
 start_server() {
@@ -47,10 +70,10 @@ start_server() {
     rm -f /dev/shm/jack_${sname}_*
     if [ "$1" = fork ]; then
         env LD_LIBRARY_PATH="$fork_lib" JACK_DRIVER_DIR="$JACK_BUILD" ${SERVER_ENV:-} \
-            "$JACK_BUILD/jackd" -n "$sname" -R -P 70 ${SERVER_EXTRA:-} -d dummy -r 48000 -p 128 >"$2" 2>&1 &
+            "$JACK_BUILD/jackd" -n "$sname" -R -P 70 ${SERVER_EXTRA:-} -d dummy -r 48000 -p ${SERVER_PERIOD:-128} >"$2" 2>&1 &
     else
         env -u LD_LIBRARY_PATH -u JACK_DRIVER_DIR ${SERVER_ENV:-} \
-            /usr/bin/jackd -n "$sname" -R -P 70 ${SERVER_EXTRA:-} -d dummy -r 48000 -p 128 >"$2" 2>&1 &
+            /usr/bin/jackd -n "$sname" -R -P 70 ${SERVER_EXTRA:-} -d dummy -r 48000 -p ${SERVER_PERIOD:-128} >"$2" 2>&1 &
     fi
     SERVER_PID=$!
     i=0
@@ -77,6 +100,7 @@ stop_server() {
 run_case() {
     name=$1; server=$2; bin=$3; lib=$4
     [ -x "$bin" ] || { echo "SKIP $name"; return; }
+    skip_system "$name" "$server" "$lib" && return
     if ! start_server "$server" "$out/$name.server.log"; then
         echo "FAIL $name: server did not start"; tail -5 "$out/$name.server.log"; fail=1; return
     fi
@@ -125,6 +149,7 @@ two_servers() {
 # xrun_timer_case <name> <server> <client-libdir|system> <gating:1|0>
 xrun_timer_case() {
     name=$1; server=$2; lib=$3; gating=$4
+    skip_system "$name" "$server" "$lib" && return
     SERVER_EXTRA=-S
     start_server "$server" "$out/$name.server.log" || { echo "FAIL $name: server"; SERVER_EXTRA=; fail=1; return; }
     SERVER_EXTRA=
@@ -169,7 +194,9 @@ xrun_timer_case xrun-timer_fork-server       fork   "$fork_lib" 1
 xrun_timer_case xrun-timer_system-server     system system      0
 wrap_case
 # page faults in process callbacks when the client cannot mlock (small RLIMIT_MEMLOCK)
-if start_server fork "$out/rt_faults.server.log"; then
+if [ -n "$san" ]; then
+    echo "SKIP rt-faults (sanitizer run: shadow memory faults)"
+elif start_server fork "$out/rt_faults.server.log"; then
     if (ulimit -l 64; LD_LIBRARY_PATH="$fork_lib" timeout 60 "$out/rt_faults" 300 >"$out/rt_faults.log" 2>/dev/null); then
         echo "PASS rt-faults (memlock 64 KB): $(tail -1 "$out/rt_faults.log" | sed 's/^PASS: //')"
     else
@@ -181,7 +208,16 @@ else
 fi
 # libjack threading (fork server + fork libjack)
 if start_server fork "$out/threads.server.log"; then
-    LD_LIBRARY_PATH="$fork_lib" timeout 120 "$out/threads" >"$out/threads.log" 2>&1 || { [ $? -eq 124 ] && echo "TIMEOUT threads (hang)" >>"$out/threads.log"; fail=1; }
+    if [ "$san" = tsan ]; then
+        # one process per subtest: under TSan the async thread cancellation at
+        # jack_client_close() aborts the process (TSan limitation)
+        : >"$out/threads.log"
+        for t in api-concurrency activate-init port-churn sync-callback transport-churn rt-helper-thread; do
+            LD_LIBRARY_PATH="$fork_lib" timeout 120 "$out/threads" $t 2>/dev/null | grep -E '^(PASS|FAIL)' >>"$out/threads.log"
+        done
+    else
+        LD_LIBRARY_PATH="$fork_lib" timeout 120 "$out/threads" >"$out/threads.log" 2>&1 || { [ $? -eq 124 ] && echo "TIMEOUT threads (hang)" >>"$out/threads.log"; fail=1; }
+    fi
     stop_server || fail=1
     sed 's/^/  /' "$out/threads.log" | sed 's/^  \(PASS\|FAIL\|TIMEOUT\)/\1/'
 else
@@ -196,7 +232,9 @@ else echo "FAIL connection-copy: $(tail -1 "$out/connection_copy.log")"; fail=1;
 if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(tail -1 "$out/memops.log")"
 else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
 
-if command -v strace >/dev/null 2>&1; then
+if [ -n "$san" ]; then
+    echo "SKIP rt-syscalls (sanitizer run)"
+elif command -v strace >/dev/null 2>&1; then
     "$here/rt_syscalls.sh" fork || fail=1
 else
     echo "SKIP rt-syscalls: strace not installed"
@@ -205,6 +243,25 @@ fi
 if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then
     "$here/jackdbus.sh" "$JACK_BUILD/dbus/jackdbus" 2>&1 | grep -v 'Segmentation fault' || true
     "$here/jackdbus.sh" "$JACK_BUILD/dbus/jackdbus" >/dev/null 2>&1 || fail=1
+fi
+
+if [ "$san" = tsan ]; then
+    # Under TSan, JACK's asynchronous thread cancellation aborts clients at
+    # close and timing checks are meaningless: only the reports gate the run.
+    fail=0
+fi
+if [ -n "$san" ]; then
+    reports=$(cat "$out"/asan.* "$out"/ubsan.* "$out"/tsan.* 2>/dev/null | grep -c -E '^(==[0-9]+==ERROR|WARNING: ThreadSanitizer|.*runtime error:)')
+    echo "SANITIZER $san: $reports report(s) in $out"
+    if [ "$reports" -gt 0 ]; then
+        # distinct reports by their two top frames
+        cat "$out"/asan.* "$out"/ubsan.* "$out"/tsan.* 2>/dev/null | awk '
+            /^(==[0-9]+==ERROR|WARNING: ThreadSanitizer)/ { kind=$0; sub(/ \(pid=.*/, "", kind); n=0; key=""; next }
+            /runtime error:/ { print "  " $0; next }
+            /^ *#0 / && kind != "" { f=$0; sub(/^ *#0 /, "", f); sub(/ \(.*$/, "", f); key = key (n ? " | " : "") f; n++
+                                     if (n == 2) { print "  " kind ": " key; kind="" } }' | sort | uniq -c | sort -rn | head -20
+        fail=1
+    fi
 fi
 
 exit $fail

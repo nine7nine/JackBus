@@ -25,7 +25,7 @@
 struct client {
     jack_client_t *c;
     jack_port_t *in[NPORTS], *out[NPORTS];
-    jack_nframes_t last_frames, first_frames;
+    _Atomic jack_nframes_t last_frames, first_frames;
     int have_last;
     atomic_int wrapped;
     atomic_ulong cycles, bad_times, bad_continuity, bad_frame_time;

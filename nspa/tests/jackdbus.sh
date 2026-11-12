@@ -22,12 +22,27 @@ mkdir -p "$HOME"
 log="$HOME/.log/jack/jackdbus.log"
 fail=0
 
-eval "$(dbus-launch --sh-syntax 2>/dev/null)" 2>/dev/null || true
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
-    addr_file="$work/bus.addr"
-    dbus-daemon --session --fork --print-address=3 --print-pid=4 3>"$addr_file" 4>"$work/bus.pid" || { echo "SKIP jackdbus: no dbus-daemon"; exit 0; }
-    DBUS_SESSION_BUS_ADDRESS=$(cat "$addr_file")
-fi
+# Private bus WITHOUT service directories: nothing can be auto-activated (the
+# standard session config would start /usr/bin/jackdbus, i.e. the installed
+# build, if ours is not answering).
+cat >"$work/bus.conf" <<'CONF'
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>
+CONF
+addr_file="$work/bus.addr"
+dbus-daemon --config-file="$work/bus.conf" --fork --print-address=3 --print-pid=4 3>"$addr_file" 4>"$work/bus.pid" \
+    || { echo "SKIP jackdbus: no dbus-daemon"; exit 0; }
+DBUS_SESSION_BUS_ADDRESS=$(cat "$addr_file")
 export DBUS_SESSION_BUS_ADDRESS
 
 call() {
@@ -35,7 +50,7 @@ call() {
 }
 
 start_jackdbus() {
-    "$jackdbus" auto >/dev/null 2>&1 &
+    "$jackdbus" auto >>"$work/jackdbus.stderr" 2>&1 &
     JD_PID=$!
     i=0
     while ! call org.jackaudio.JackControl.IsStarted; do
@@ -168,6 +183,5 @@ else
 fi
 
 [ -f "$work/bus.pid" ] && kill "$(cat "$work/bus.pid")" 2>/dev/null
-[ -n "${DBUS_SESSION_BUS_PID:-}" ] && kill "$DBUS_SESSION_BUS_PID" 2>/dev/null
-rm -rf "$work"
+[ "${NSPA_KEEP_WORK:-0}" = 1 ] && echo "work dir kept: $work" || rm -rf "$work"
 exit $fail

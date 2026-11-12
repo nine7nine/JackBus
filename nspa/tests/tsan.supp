@@ -1,0 +1,46 @@
+# ThreadSanitizer suppressions for jack2-nspa test runs.
+#
+# Only pre-existing accesses that are racy by design are listed: mostly
+# fields in shared memory that several threads/processes read and write with
+# plain accesses, synchronized (if at all) through futexes in shared memory
+# or the lock-free state switching, which TSan cannot see. Do not add
+# entries for code introduced by this fork; fix those races instead.
+
+# Per-client timing records (status, timestamps) written by the threads
+# that activate and run each client; informational (xrun detection, load).
+race:Jack::JackConnectionManager::ResumeRefNum
+race:Jack::JackConnectionManager::SuspendRefNum
+race:Jack::JackConnectionManager::ResetGraph
+race:Jack::JackEngine::CheckXRun
+
+# CPU load statistics: computed by the RT thread, reset by the request
+# thread when clients come and go, read by clients (jack_cpu_load).
+race:Jack::JackEngineControl::CalcCPULoad
+race:Jack::JackEngineControl::ResetRollingUsecs
+
+# Client control flags in shared memory (fActive, fTransportSync/State/
+# Timebase, fCallback[]) written by API/notification threads and read by
+# the RT thread and the server.
+race:Jack::JackClient::CallSyncCallbackAux
+race:Jack::JackClient::Activate
+race:Jack::JackClient::Deactivate
+race:Jack::JackClient::IsActive
+race:Jack::JackTransportEngine::CycleEnd
+race:Jack::JackTransportEngine::MakeAllStartingLocating
+race:Jack::JackTransportEngine::CheckAllRolling
+
+# Callbacks set by the application while notifications can already arrive
+# (the API requires the client to be inactive, not the notification thread
+# to be idle); pre-existing API-level race.
+race:Jack::JackClient::Set*Callback
+race:Jack::JackClient::ClientNotify
+
+# fTransportTimebase (client control flag in shared memory) is cleared both
+# by jack_release_timebase() and by the process thread after the "new
+# position" call. Matched on the API side only, so other races in
+# CallTimebaseCallbackAux() are still reported.
+race:Jack::JackClient::ReleaseTimebase
+
+# Port fields in shared memory: a latency callback can write the latency of
+# a port that is being released; the slot is reinitialized when reused.
+race:Jack::JackPort::Release

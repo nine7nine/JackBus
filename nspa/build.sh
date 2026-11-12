@@ -5,6 +5,7 @@
 # Usage: nspa/build.sh [extra waf configure args]
 #   NSPA_LTO=1    add -flto=auto (Arch builds jack2 with !lto, upstream #485)
 #   NSPA_DEBUG=1  add -g
+#   NSPA_SANITIZE=address,undefined | thread   sanitizer build (adds -g -O1)
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -19,6 +20,11 @@ if [ "${NSPA_LTO:-0}" = 1 ]; then
 fi
 if [ "${NSPA_DEBUG:-0}" = 1 ]; then
     CFLAGS="$CFLAGS -g"; CXXFLAGS="$CXXFLAGS -g"
+fi
+if [ -n "${NSPA_SANITIZE:-}" ]; then
+    # _FORTIFY_SOURCE does not mix well with sanitizers; -O1 keeps reports readable
+    SAN="-fsanitize=$NSPA_SANITIZE -fno-omit-frame-pointer -g -O1 -Wp,-U_FORTIFY_SOURCE"
+    CFLAGS="$CFLAGS $SAN"; CXXFLAGS="$CXXFLAGS $SAN"; LDFLAGS="$LDFLAGS -fsanitize=$NSPA_SANITIZE"
 fi
 export CFLAGS CXXFLAGS LDFLAGS LINKFLAGS="$LDFLAGS"
 
