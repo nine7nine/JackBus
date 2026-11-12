@@ -33,6 +33,7 @@
 #include "JackPlatformPlug.h"
 #include "JackMutex.h"
 #include "JackAtomic.h"
+#include "JackBoundedQueue.h"
 
 namespace Jack
 {
@@ -41,6 +42,7 @@ namespace Jack
 #define MB_BUFFERS  128
 #define MB_NEXT(index) ((index+1) & (MB_BUFFERS-1))
 #define MB_BUFFERSIZE   256     /* message length limit */
+#define MB_FLUSH_INTERVAL_USEC 20000  /* the consumer polls: producers never wake it */
 
 struct JackMessage
 {
@@ -59,11 +61,11 @@ class JackMessageBuffer : public JackRunnableInterface
 
         volatile JackThreadInitCallback fInit;
         void* fInitArg;
-        JackMessage fBuffers[MB_BUFFERS];
+        /* Realtime threads push without lock or system call; the consumer
+           thread drains every MB_FLUSH_INTERVAL_USEC. */
+        JackBoundedQueue<JackMessage, MB_BUFFERS> fQueue;
         JackThread fThread;
-        JackProcessSync fGuard;
-        volatile unsigned int fInBuffer;
-        volatile unsigned int fOutBuffer;
+        JackProcessSync fGuard;  /* consumer sleep/stop and init callback only */
         alignas(SInt32) SInt32 fOverruns;
         bool fRunning;
 

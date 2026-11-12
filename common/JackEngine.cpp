@@ -33,6 +33,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackGlobals.h"
 #include "JackChannel.h"
 #include "JackError.h"
+#include "JackAtomic.h"
 
 extern const char* JACK_METADATA_HARDWARE;
 extern const char* JACK_METADATA_PRETTY_NAME;
@@ -45,7 +46,7 @@ JackEngine::JackEngine(JackGraphManager* manager,
                        JackEngineControl* control,
                        char self_connect_mode)
                     : JackLockAble(control->fServerName),
-                    fSignal(control->fServerName),
+                    fNotifier(&fChannel),
                     fMetadata(true)
 {
     fGraphManager = manager;
@@ -72,14 +73,19 @@ int JackEngine::Open()
     if (fChannel.Open(fEngineControl->fServerName) < 0) {
         jack_error("Cannot connect to server");
         return -1;
-    } else {
-        return 0;
     }
+    if (fNotifier.Start() < 0) {
+        jack_error("Cannot start the engine notification thread");
+        fChannel.Close();
+        return -1;
+    }
+    return 0;
 }
 
 int JackEngine::Close()
 {
     jack_log("JackEngine::Close");
+    fNotifier.Stop();
     fChannel.Close();
 
     // Close remaining clients (RT is stopped)
@@ -105,6 +111,54 @@ void JackEngine::NotifyQuit()
     fChannel.NotifyQuit();
 }
 
+
+//-----------------------------
+// RT notifications
+//-----------------------------
+
+JackEngineNotifier::JackEngineNotifier(JackServerNotifyChannel* channel)
+    : fChannel(channel), fThread(this), fDropped(0)
+{}
+
+int JackEngineNotifier::Start()
+{
+    return fThread.Start();
+}
+
+void JackEngineNotifier::Stop()
+{
+    fThread.Stop();
+    Drain();
+    if (fDropped > 0) {
+        jack_error("JackEngineNotifier: %d notifications dropped (queue full)", fDropped);
+    }
+}
+
+void JackEngineNotifier::Notify(int refnum, int notify, int value)
+{
+    bool queued = fQueue.TryPush([&](Notification& n) {
+        n.fRefNum = refnum;
+        n.fNotify = notify;
+        n.fValue = value;
+    });
+    if (!queued) {
+        INC_ATOMIC(&fDropped);
+    }
+}
+
+void JackEngineNotifier::Drain()
+{
+    while (fQueue.TryPop([this](Notification& n) { fChannel->Notify(n.fRefNum, n.fNotify, n.fValue); })) {}
+}
+
+bool JackEngineNotifier::Execute()
+{
+    // The realtime side never wakes us: poll. Notifications are asynchronous
+    // (graph order, xrun callbacks), 10 ms of extra delay is harmless.
+    JackSleep(10000);
+    Drain();
+    return true;
+}
 
 //-----------------------------
 // Client resource management
@@ -149,7 +203,7 @@ void JackEngine::ProcessNext(jack_time_t cur_cycle_begin)
 {
     fLastSwitchUsecs = cur_cycle_begin;
     if (fGraphManager->RunNextGraph())  {   // True if the graph actually switched to a new state
-        fChannel.Notify(ALL_CLIENTS, kGraphOrderCallback, 0);
+        fNotifier.Notify(ALL_CLIENTS, kGraphOrderCallback, 0);
     }
     fSignal.Signal();                       // Signal for threads waiting for next cycle
 }
@@ -223,12 +277,12 @@ void JackEngine::CheckXRun(jack_time_t callback_usecs)  // REVOIR les conditions
 
             if (status != NotTriggered && status != Finished) {
                 jack_error("JackEngine::XRun: client = %s was not finished, state = %s", client->GetClientControl()->fName, State2String(status));
-                fChannel.Notify(ALL_CLIENTS, kXRunCallback, 0);  // Notify all clients
+                fNotifier.Notify(ALL_CLIENTS, kXRunCallback, 0);  // Notify all clients
             }
 
             if (status == Finished && (long)(finished_date - callback_usecs) > 0) {
                 jack_error("JackEngine::XRun: client %s finished after current callback", client->GetClientControl()->fName);
-                fChannel.Notify(ALL_CLIENTS, kXRunCallback, 0);  // Notify all clients
+                fNotifier.Notify(ALL_CLIENTS, kXRunCallback, 0);  // Notify all clients
             }
         }
     }
@@ -364,7 +418,7 @@ void JackEngine::NotifyRemoveClient(const char* name, int refnum)
 void JackEngine::NotifyDriverXRun()
 {
     // Use the audio thread => request thread communication channel
-    fChannel.Notify(ALL_CLIENTS, kXRunCallback, 0);
+    fNotifier.Notify(ALL_CLIENTS, kXRunCallback, 0);
 }
 
 void JackEngine::NotifyClientXRun(int refnum)
@@ -645,7 +699,7 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
         goto error;
     }
 
-    if (!fSignal.LockedTimedWait(DRIVER_OPEN_TIMEOUT * 1000000)) {
+    if (!fSignal.TimedWait(DRIVER_OPEN_TIMEOUT * 1000000)) {
         // Failure if RT thread is not running (problem with the driver...)
         jack_error("Driver is not running");
         goto error;
@@ -690,7 +744,7 @@ int JackEngine::ClientInternalOpen(const char* name, int* ref, JackEngineControl
         goto error;
     }
 
-    if (wait && !fSignal.LockedTimedWait(DRIVER_OPEN_TIMEOUT * 1000000)) {
+    if (wait && !fSignal.TimedWait(DRIVER_OPEN_TIMEOUT * 1000000)) {
         // Failure if RT thread is not running (problem with the driver...)
         jack_error("Driver is not running");
         goto error;
@@ -768,7 +822,7 @@ int JackEngine::ClientCloseAux(int refnum, bool wait)
 
     // Wait until next cycle to be sure client is not used anymore
     if (wait) {
-        if (!fSignal.LockedTimedWait(fEngineControl->fTimeOutUsecs * 2)) { // Must wait at least until a switch occurs in Process, even in case of graph end failure
+        if (!fSignal.TimedWait(fEngineControl->fTimeOutUsecs * 2)) { // Must wait at least until a switch occurs in Process, even in case of graph end failure
             jack_error("JackEngine::ClientCloseAux wait error ref = %ld", refnum);
         }
     }
@@ -799,7 +853,7 @@ int JackEngine::ClientActivate(int refnum, bool is_real_time, bool wait)
     }
 
     // Wait for graph state change to be effective
-    if (wait && !fSignal.LockedTimedWait(fEngineControl->fTimeOutUsecs * 10)) {
+    if (wait && !fSignal.TimedWait(fEngineControl->fTimeOutUsecs * 10)) {
         jack_error("JackEngine::ClientActivate wait error ref = %ld name = %s", refnum, client->GetClientControl()->fName);
         return -1;
     } else {
@@ -854,7 +908,7 @@ int JackEngine::ClientDeactivate(int refnum, bool wait)
     fLastSwitchUsecs = 0; // Force switch to occur next cycle, even when called with "dead" clients
 
     // Wait for graph state change to be effective
-    if (wait && !fSignal.LockedTimedWait(fEngineControl->fTimeOutUsecs * 10)) {
+    if (wait && !fSignal.TimedWait(fEngineControl->fTimeOutUsecs * 10)) {
         jack_error("JackEngine::ClientDeactivate wait error ref = %ld name = %s", refnum, client->GetClientControl()->fName);
         return -1;
     } else {

@@ -118,12 +118,8 @@ bool JackPosixProcessSync::TimedWait(long usec)
     ThrowIf(!pthread_equal(pthread_self(), fOwner), JackException("JackPosixProcessSync::TimedWait: a thread has to have locked a mutex before it can wait"));
     fOwner = 0;
 
-    struct timeval T0, T1;
     timespec time;
     int res;
-
-    jack_log("JackPosixProcessSync::TimedWait time out = %ld", usec);
-    gettimeofday(&T0, 0);
 
     MonotonicDeadline(usec, &time);
 
@@ -133,10 +129,6 @@ bool JackPosixProcessSync::TimedWait(long usec)
     } else {
         fOwner = pthread_self();
     }
-
-    gettimeofday(&T1, 0);
-    jack_log("JackPosixProcessSync::TimedWait finished delta = %5.1lf",
-             (1e6 * T1.tv_sec - 1e6 * T0.tv_sec + T1.tv_usec - T0.tv_usec));
 
     return (res == 0);
 }

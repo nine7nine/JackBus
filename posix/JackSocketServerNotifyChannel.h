@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #define __JackSocketServerNotifyChannel__
 
 #include "JackSocket.h"
+#include <mutex>
 
 namespace Jack
 {
@@ -34,6 +35,7 @@ class JackSocketServerNotifyChannel
     private:
 
         JackClientSocket fRequestSocket;
+        std::mutex fWriteLock;  /*! notifier thread and NotifyQuit() */
 
     public:
 

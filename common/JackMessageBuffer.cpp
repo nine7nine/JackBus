@@ -34,8 +34,6 @@ JackMessageBuffer::JackMessageBuffer()
     fInitArg(NULL),
     fThread(this),
     fGuard(),
-    fInBuffer(0),
-    fOutBuffer(0),
     fOverruns(0),
     fRunning(false)
 {
@@ -81,33 +79,25 @@ bool JackMessageBuffer::Stop()
 
 void JackMessageBuffer::Flush()
 {
-    unsigned int out = __atomic_load_n(&fOutBuffer, __ATOMIC_RELAXED);
-    while (out != __atomic_load_n(&fInBuffer, __ATOMIC_ACQUIRE)) {
-        jack_log_function(fBuffers[out].level, fBuffers[out].message);
-        out = MB_NEXT(out);
-        // releases the slot to the producers
-        __atomic_store_n(&fOutBuffer, out, __ATOMIC_RELEASE);
-    }
+    while (fQueue.TryPop([](JackMessage& msg) { jack_log_function(msg.level, msg.message); })) {}
 }
 
+/*
+ Called from realtime threads (through JackMessageBufferAdd as their log
+ function): no lock and no system call. The previous version took a trylock
+ and signalled a condition variable for every message (glibc condvars
+ serialize on an internal lock that is not priority-inheriting), dropped the
+ message on lock contention and, without a full check, overwrote unread
+ messages once more than MB_BUFFERS were queued.
+*/
 void JackMessageBuffer::AddMessage(int level, const char *message)
 {
-    if (fGuard.Trylock()) {
-        unsigned int in = __atomic_load_n(&fInBuffer, __ATOMIC_RELAXED);
-        unsigned int next = MB_NEXT(in);
-        if (next == __atomic_load_n(&fOutBuffer, __ATOMIC_ACQUIRE)) {
-            /* Ring full: drop. Writing anyway (as before) overwrote the
-             * message being printed and made the ring appear empty. */
-            INC_ATOMIC(&fOverruns);
-        } else {
-            fBuffers[in].level = level;
-            strncpy(fBuffers[in].message, message, MB_BUFFERSIZE - 1);
-            fBuffers[in].message[MB_BUFFERSIZE - 1] = 0;
-            __atomic_store_n(&fInBuffer, next, __ATOMIC_RELEASE);
-            fGuard.Signal();
-        }
-        fGuard.Unlock();
-    } else {            /* lock collision */
+    bool queued = fQueue.TryPush([&](JackMessage& msg) {
+        msg.level = level;
+        strncpy(msg.message, message, MB_BUFFERSIZE - 1);
+        msg.message[MB_BUFFERSIZE - 1] = 0;
+    });
+    if (!queued) {
         INC_ATOMIC(&fOverruns);
     }
 }
@@ -116,7 +106,8 @@ bool JackMessageBuffer::Execute()
 {
     if (fGuard.Lock()) {
         while (fRunning) {
-            fGuard.Wait();
+            // Producers never wake us: poll (Stop()/SetInitCallback() signal).
+            fGuard.TimedWait(MB_FLUSH_INTERVAL_USEC);
             /* the client asked for all threads to run a thread
             initialization callback, which includes us.
             */
@@ -126,7 +117,7 @@ bool JackMessageBuffer::Execute()
                 /* and we're done */
                 fGuard.Signal();
             }
-            
+
             /* releasing the mutex reduces contention */
             fGuard.Unlock();
             Flush();

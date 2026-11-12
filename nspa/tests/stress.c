@@ -33,7 +33,14 @@ struct client {
 };
 
 static struct client cl[MAXCLIENTS];
-static atomic_ulong xruns;
+static atomic_ulong xruns, graph_orders;
+
+static int on_graph_order(void *arg)
+{
+    (void)arg;
+    atomic_fetch_add(&graph_orders, 1);
+    return 0;
+}
 
 static int on_xrun(void *arg)
 {
@@ -111,6 +118,8 @@ int main(int argc, char **argv)
         }
         jack_set_process_callback(cl[k].c, process, &cl[k]);
         jack_set_xrun_callback(cl[k].c, on_xrun, &cl[k]);
+        if (k == 0)
+            jack_set_graph_order_callback(cl[k].c, on_graph_order, NULL);
         if (jack_activate(cl[k].c)) {
             fprintf(stderr, "FAIL: jack_activate(%s)\n", name);
             return 1;
@@ -131,6 +140,10 @@ int main(int argc, char **argv)
         }
     }
     usleep(settle_ms * 1000);
+    if (iters > 0 && atomic_load(&graph_orders) == 0) {
+        printf("FAIL: no graph order callback after %d connect/disconnect rounds\n", iters);
+        failures++;
+    }
 
     unsigned long tot_cycles = 0, tot_bad = 0;
     for (int k = 0; k < nclients; k++) {
@@ -145,8 +158,8 @@ int main(int argc, char **argv)
             failures++;
         }
     }
-    printf("clients=%d iters=%d cycles=%lu xruns=%lu timing_violations=%lu api_failures=%d frames=%u..%u%s\n",
-           nclients, iters, tot_cycles, atomic_load(&xruns), tot_bad, failures,
+    printf("clients=%d iters=%d cycles=%lu xruns=%lu graph_orders=%lu timing_violations=%lu api_failures=%d frames=%u..%u%s\n",
+           nclients, iters, tot_cycles, atomic_load(&xruns), atomic_load(&graph_orders), tot_bad, failures,
            cl[0].first_frames, cl[0].last_frames, atomic_load(&cl[0].wrapped) ? " (wrapped)" : "");
 
     for (int k = nclients - 1; k >= 0; k--)

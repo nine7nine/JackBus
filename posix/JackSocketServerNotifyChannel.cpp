@@ -32,7 +32,8 @@ int JackSocketServerNotifyChannel::Open(const char* server_name)
         jack_error("Cannot connect to server socket");
         return -1;
     } else {
-        fRequestSocket.SetNonBlocking(true);
+        // Only non-realtime threads write here now (JackEngineNotifier,
+        // NotifyQuit), so a blocking socket is fine: complete packets only.
         return 0;
     }
 }
@@ -51,6 +52,7 @@ A non blocking write operation should be used : check if write can succeed, and 
 void JackSocketServerNotifyChannel::Notify(int refnum, int notify, int value)
 {
     JackClientNotificationRequest req(refnum, notify, value);
+    std::lock_guard<std::mutex> lock(fWriteLock);
     if (req.Write(&fRequestSocket) < 0) {
         jack_error("Could not write notification ref = %d notify = %d", refnum, notify);
     }

@@ -28,6 +28,8 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackPlatformPlug.h"
 #include "JackRequest.h"
 #include "JackChannel.h"
+#include "JackBoundedQueue.h"
+#include "JackCycleSignal.h"
 #include <map>
 
 namespace Jack
@@ -36,6 +38,49 @@ namespace Jack
 class JackClientInterface;
 struct JackEngineControl;
 class JackExternalClient;
+
+/*!
+\brief Carries notifications from the realtime thread to the server request thread.
+
+ The realtime thread used to write each notification (graph reorder, xrun)
+ to the server's request socket itself: a system call taking socket locks
+ and allocating kernel memory in the realtime thread, on a non-blocking
+ socket where a partial write would desynchronize the request stream. Now
+ the realtime side only pushes onto a lock-free queue (no lock, no system
+ call; dropped and counted if full) and this thread forwards the
+ notifications through the same channel, so the request thread receives and
+ handles them exactly as before (ordering and threading unchanged).
+*/
+class JackEngineNotifier : public JackRunnableInterface
+{
+    private:
+
+        struct Notification {
+            int fRefNum;
+            int fNotify;
+            int fValue;
+        };
+
+        JackBoundedQueue<Notification, 256> fQueue;
+        JackServerNotifyChannel* fChannel;
+        JackThread fThread;
+        alignas(SInt32) SInt32 fDropped;
+
+        void Drain();
+
+    public:
+
+        JackEngineNotifier(JackServerNotifyChannel* channel);
+
+        int Start();
+        void Stop();
+
+        // Realtime thread.
+        void Notify(int refnum, int notify, int value);
+
+        // JackRunnableInterface (notifier thread).
+        bool Execute();
+};
 
 /*!
 \brief Engine description.
@@ -52,8 +97,9 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         char fSelfConnectMode;
         JackClientInterface* fClientTable[CLIENT_NUM];
         JackSynchro* fSynchroTable;
-        JackServerNotifyChannel fChannel;              /*! To communicate between the RT thread and server */
-        JackProcessSync fSignal;
+        JackServerNotifyChannel fChannel;              /*! Engine -> server request thread */
+        JackEngineNotifier fNotifier;                  /*! RT thread -> fChannel, without system calls */
+        JackCycleSignal fSignal;                       /*! "a cycle has passed", signalled by the RT thread */
         jack_time_t fLastSwitchUsecs;
         JackMetadata fMetadata;
 
