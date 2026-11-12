@@ -20,7 +20,7 @@
 # Environment: NSPA_BUILD_DIR (default ./build), NSPA_HW_OUT (default
 # /tmp/jack2-nspa-hw), NSPA_HW_SERVERS (default "fork system"), NSPA_HW_LOW
 # (low-latency configurations, default "64x2 64x3 128x2"), NSPA_HW_ONLY
-# (subset of: load capture seq lowlat sync; default all).
+# (subset of: load capture seq lowlat sync midi; default all).
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"
@@ -99,6 +99,7 @@ if [ "${NSPA_HW_INNER:-0}" != 1 ]; then
     cc -O2 -Wall -I"$root/common" -o "$out/capture_stale" "$here/capture_stale.c" -L"$fl" -ljack || exit 1
     cc -O2 -Wall -I"$root/common" -o "$out/hwutil" "$here/hwutil.c" -L"$fl" -ljack || exit 1
     cc -O2 -Wall -o "$out/seq_ports" "$here/seq_ports.c" -lasound || exit 1
+    cc -O2 -Wall -I"$root/common" -o "$out/seq_loop" "$here/seq_loop.c" -L"$fl" -ljack -lasound -lpthread || exit 1
 
     mixer_state="$out/mixer.state"
     alsactl -f "$mixer_state" store "$card" || { echo "cannot save the mixer state of $card, not running" >&2; exit 1; }
@@ -208,11 +209,14 @@ start_server() {
     if ! ensure_muted "before $which server"; then
         echo "ABORT: cannot mute the playback outputs of $card" >&2; exit 1
     fi
+    # STRACE_OUT: run the server under strace (the tracer must be the parent:
+    # no ptrace capability in here); stop it with stop_traced_server
     if [ "$which" = fork ]; then
-        env LD_LIBRARY_PATH="$build/common" JACK_DRIVER_DIR="$build" \
+        env LD_LIBRARY_PATH="$build/common" JACK_DRIVER_DIR="$build" ${STRACE_OUT:+strace -f -qq -o $STRACE_OUT} \
             "$build/jackd" -R -P 89 ${SERVER_OPTS:-} -d alsa -d "$dev" "$@" >"$log" 2>&1 &
     else
-        /usr/bin/jackd -R -P 89 ${SERVER_OPTS:-} -d alsa -d "$dev" "$@" >"$log" 2>&1 &
+        env ${STRACE_OUT:+strace -f -qq -o $STRACE_OUT} \
+            /usr/bin/jackd -R -P 89 ${SERVER_OPTS:-} -d alsa -d "$dev" "$@" >"$log" 2>&1 &
     fi
     SERVER_PID=$!
     if ! client "$which" "$out/hwutil" wait 10 2>/dev/null; then
@@ -223,6 +227,14 @@ start_server() {
     if ! ensure_muted "after $which server start"; then
         echo "ABORT: cannot mute the playback outputs of $card" >&2; stop_server; exit 1
     fi
+}
+
+stop_traced_server() {  # SERVER_PID is strace: stop the traced jackd itself
+    pkill -TERM -x jackd
+    i=0
+    while kill -0 "$SERVER_PID" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -0 "$SERVER_PID" 2>/dev/null && { pkill -KILL -x jackd; kill -KILL "$SERVER_PID"; }
+    wait "$SERVER_PID" 2>/dev/null
 }
 
 stop_server() {
@@ -379,5 +391,35 @@ for which in ${NSPA_HW_SERVERS:-fork system}; do
         alive && stop_server
     fi
     SERVER_OPTS=
+
+    # 5. -X seq: MIDI timing in both directions (seq_loop), and the system
+    # calls of the idle driver thread (no MIDI flowing)
+    if want midi; then
+    for cfg in 512x2 256x2; do
+        tag=$which-midi-$cfg
+        if start_server "$which" "$out/$tag.server.log" -r 48000 -p "${cfg%x*}" -n "${cfg#*x}" -X seq; then
+            client "$which" "$out/seq_loop" 200 >"$out/$tag.log" 2>&1
+            rc=$?
+            [ $rc = 0 ] && r=PASS || r=FAIL
+            result $r "$tag MIDI through -X seq: $(grep -E 'ALSA -> JACK|JACK -> ALSA|xruns during' "$out/$tag.log" | sed 's/^ *//; s/  */ /g' | tr '\n' ';')"
+            alive && stop_server
+        fi
+    done
+    tag=$which-seq-idle
+    STRACE_OUT="$out/$tag.strace"
+    rm -f "$STRACE_OUT"
+    if start_server "$which" "$out/$tag.server.log" -r 48000 -p 512 -n 2 -X seq; then
+        sleep 6
+        stop_traced_server
+        # driver thread: the one polling the PCM most often
+        t=$(grep -E ' (ppoll|poll)\(' "$STRACE_OUT" | awk '{print $1}' | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+        n=$(awk -v t="$t" '$1 == t' "$STRACE_OUT" | grep -cE ' (ppoll|poll)\(')
+        per=$(awk -v t="$t" '$1 == t' "$STRACE_OUT" | sed -E 's/^[0-9]+ +//; s/\(.*//' | sort | uniq -c | sort -rn |
+              awk -v n="$n" 'n > 0 && $1 / n >= 0.05 {printf "%s %.2f, ", $2, $1 / n}')
+        seqio=$(awk -v t="$t" '$1 == t' "$STRACE_OUT" | grep -c 'SNDRV_SEQ_IOCTL_GET_QUEUE_STATUS')
+        result INFO "$tag driver thread syscalls per cycle (512x2, -X seq, no MIDI, $n cycles): ${per%, }; seq queue-status ioctls $(awk -v a="$seqio" -v n="$n" 'BEGIN {printf "%.2f", n ? a / n : 0}')/cycle"
+    fi
+    STRACE_OUT=
+    fi
 done
 exit $fail
