@@ -157,4 +157,9 @@ else echo "FAIL midi-wrap:"; sed 's/^/  /' "$out/midi_wrap.log"; fail=1; fi
 if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(tail -1 "$out/memops.log")"
 else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
 
+if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then
+    "$here/jackdbus.sh" "$JACK_BUILD/dbus/jackdbus" 2>&1 | grep -v 'Segmentation fault' || true
+    "$here/jackdbus.sh" "$JACK_BUILD/dbus/jackdbus" >/dev/null 2>&1 || fail=1
+fi
+
 exit $fail

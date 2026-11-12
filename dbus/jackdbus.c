@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <signal.h>
+#include <fcntl.h>
 #include <dbus/dbus.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -846,6 +847,52 @@ jack_dbus_only_error(
     va_end(ap);
 }
 
+#if !defined(DISABLE_SIGNAL_MAGIC)
+/*
+ jackctl_setup_signals() blocks these signals in every thread, but nothing
+ ever waited for them: SIGTERM (systemctl stop, logout, shutdown) was simply
+ ignored until the 90 s stop timeout and SIGKILL, so the server was never
+ stopped cleanly and pending settings were lost. Consume them from the main
+ loop (which wakes at least every 200 ms).
+*/
+static sigset_t g_signals;
+
+static void jackdbus_init_signal_set(void)
+{
+    sigemptyset(&g_signals);
+    sigaddset(&g_signals, SIGHUP);
+    sigaddset(&g_signals, SIGINT);
+    sigaddset(&g_signals, SIGQUIT);
+    sigaddset(&g_signals, SIGTERM);
+    sigaddset(&g_signals, SIGPIPE);
+    sigaddset(&g_signals, SIGUSR1);
+    sigaddset(&g_signals, SIGUSR2);
+}
+
+static bool jackdbus_take_exit_signal(void)
+{
+    struct timespec zero = {0, 0};
+    int sig;
+
+    while ((sig = sigtimedwait(&g_signals, NULL, &zero)) > 0)
+    {
+        switch (sig)
+        {
+        case SIGHUP:
+        case SIGINT:
+        case SIGQUIT:
+        case SIGTERM:
+            jack_info("Received signal %d, exiting", sig);
+            return true;
+        default:
+            /* SIGPIPE, SIGUSR1, SIGUSR2: ignore */
+            break;
+        }
+    }
+    return false;
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -889,7 +936,9 @@ main (int argc, char **argv)
     }
 
 #if !defined(DISABLE_SIGNAL_MAGIC)
+    /* Blocks these signals in all threads; they are consumed in the main loop below. */
     jackctl_setup_signals(0);
+    jackdbus_init_signal_set();
 #endif
 
     jack_set_error_function(jack_dbus_error_callback);
@@ -897,6 +946,15 @@ main (int argc, char **argv)
 
     /* setup our SIGSEGV magic that prints nice stack in our logfile */
     setup_sigsegv();
+    if (g_log_filename != NULL)
+    {
+        /* separate fd: the crash handler must not touch the stdio FILE */
+        int crash_log_fd = open(g_log_filename, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0644);
+        if (crash_log_fd >= 0)
+        {
+            sigsegv_set_log_fd(crash_log_fd);
+        }
+    }
 
     jack_info("------------------");
     jack_info("Controller activated. Version %s (%s) built on %s", jack_get_version_string(), JACK_VERSION, timestamp_str);
@@ -916,6 +974,10 @@ main (int argc, char **argv)
         ret = 1;
         goto fail_uninit_log;
     }
+
+    /* Don't let libdbus _exit() the process (with the audio server running)
+     * when the bus goes away; leave the main loop and shut down cleanly. */
+    dbus_connection_set_exit_on_disconnect(g_connection, FALSE);
 
     ret = dbus_bus_request_name(
                 g_connection,
@@ -950,6 +1012,12 @@ main (int argc, char **argv)
     while (!g_exit_command && dbus_connection_read_write_dispatch (g_connection, 200))
     {
         jack_controller_run(controller_ptr);
+#if !defined(DISABLE_SIGNAL_MAGIC)
+        if (jackdbus_take_exit_signal())
+        {
+            g_exit_command = TRUE;
+        }
+#endif
     }
 
     jack_controller_destroy(controller_ptr);

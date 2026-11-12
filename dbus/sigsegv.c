@@ -9,212 +9,135 @@
  * Author:  Jaco Kroon <jaco@kroon.co.za>
  *
  * Copyright (C) 2005 - 2008 Jaco Kroon
+ *
+ * jack2-nspa: rewritten to be async-signal-safe. The previous handler called
+ * jack_error() (vsnprintf, stat/fopen/fprintf on the log file),
+ * __cxa_demangle() (malloc), walked frame pointers and finished with exit()
+ * while the server's realtime threads were still running. A crash inside
+ * malloc or stdio (including glibc heap-corruption aborts, as SIGABRT is
+ * handled too) could deadlock in the handler, leaving a hung jackdbus that
+ * still held the sound card and its D-Bus name. Now the handler only uses
+ * write(2) and backtrace_symbols_fd(3), then re-raises the signal with the
+ * default action so a core dump (e.g. systemd-coredump) is produced.
  */
 
 #if defined(HAVE_CONFIG_H)
 #include "config.h"
 #endif
 
-//#define NO_CPP_DEMANGLE
-#define SIGSEGV_NO_AUTO_INIT
-
 #ifndef _GNU_SOURCE
 # define _GNU_SOURCE
 #endif
 
-#include <memory.h>
-#include <stdlib.h>
-#include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
-#include <dlfcn.h>
+#include <string.h>
+#include <unistd.h>
 #ifdef HAVE_EXECINFO_H
 # include <execinfo.h>
 #endif
-#include <errno.h>
-#ifndef NO_CPP_DEMANGLE
-char * __cxa_demangle(const char * __mangled_name, char * __output_buffer, size_t * __length, int * __status);
-#endif
 
 #include "jack/control.h"
+#include "sigsegv.h"
 
-#if defined(REG_RIP)
-# define SIGSEGV_STACK_IA64
-# define REGFORMAT "%016lx"
-#elif defined(REG_EIP)
-# define SIGSEGV_STACK_X86
-# define REGFORMAT "%08x"
-#else
-# define SIGSEGV_STACK_GENERIC
-# define REGFORMAT "%x"
-#endif
+/* File descriptors the handler writes to: stderr, plus the jackdbus log
+ * file if sigsegv_set_log_fd() was called. */
+static volatile int g_log_fd = -1;
 
-#ifdef __APPLE__
-
-// TODO : does not compile yet on OSX
-static void signal_segv(int signum, siginfo_t* info, void*ptr) 
-{}
-
-#else
-
-#include <ucontext.h>
-
-static void signal_segv(int signum, siginfo_t* info, void*ptr) {
-    static const char *si_codes[3] = {"", "SEGV_MAPERR", "SEGV_ACCERR"};
-
-    const char *si_code_str;
-    ucontext_t *ucontext = (ucontext_t*)ptr;
-
-#if (defined(HAVE_UCONTEXT) && defined(HAVE_NGREG)) || defined(HAVE_EXECINFO_H)
-    size_t i;
-#endif
-#if defined(SIGSEGV_STACK_X86) || defined(SIGSEGV_STACK_IA64)
-    int f = 0;
-    Dl_info dlinfo;
-    void **bp = 0;
-    void *ip = 0;
-#else
-    void *bt[20];
-    char **strings;
-    size_t sz;
-#endif
-
-    if (signum == SIGSEGV)
-    {
-        jack_error("Segmentation Fault!");
+static void write_all(int fd, const char *s, size_t len)
+{
+    while (len > 0) {
+        ssize_t res = write(fd, s, len);
+        if (res <= 0) {
+            if (res < 0 && errno == EINTR)
+                continue;
+            return;
+        }
+        s += res;
+        len -= (size_t)res;
     }
-    else if (signum == SIGABRT)
-    {
-        jack_error("Abort!");
-    }
-    else if (signum == SIGILL)
-    {
-        jack_error("Illegal instruction!");
-    }
-    else if (signum == SIGFPE)
-    {
-        jack_error("Floating point exception!");
-    }
-    else
-    {
-        jack_error("Unknown bad signal caught!");
-    }
-
-    if (info->si_code >= 0 && info->si_code < 3) 
-        si_code_str = si_codes[info->si_code];
-    else
-        si_code_str = "unknown";
-
-    jack_error("info.si_signo = %d", signum);
-    jack_error("info.si_errno = %d", info->si_errno);
-    jack_error("info.si_code  = %d (%s)", info->si_code, si_code_str);
-    jack_error("info.si_addr  = %p", info->si_addr);
-#if defined(HAVE_UCONTEXT) && defined(HAVE_NGREG)
-    for(i = 0; i < NGREG; i++)
-        jack_error("reg[%02d]       = 0x" REGFORMAT, i, 
-#if defined(HAVE_UCONTEXT_GP_REGS)
-                ucontext->uc_mcontext.gp_regs[i]
-#elif defined(HAVE_UCONTEXT_UC_REGS)
-                ucontext->uc_mcontext.uc_regs[i]
-#elif defined(HAVE_UCONTEXT_MC_GREGS)
-                ucontext->uc_mcontext.mc_gregs[i]
-#elif defined(HAVE_UCONTEXT_GREGS)
-                ucontext->uc_mcontext.gregs[i]
-#endif
-                );
-#endif /* defined(HAVE_UCONTEXT) && defined(HAVE_NGREG) */
-
-#if defined(SIGSEGV_STACK_X86) || defined(SIGSEGV_STACK_IA64)
-# if defined(SIGSEGV_STACK_IA64)
-    ip = (void*)ucontext->uc_mcontext.gregs[REG_RIP];
-    bp = (void**)ucontext->uc_mcontext.gregs[REG_RBP];
-# elif defined(SIGSEGV_STACK_X86)
-    ip = (void*)ucontext->uc_mcontext.gregs[REG_EIP];
-    bp = (void**)ucontext->uc_mcontext.gregs[REG_EBP];
-# endif
-
-    jack_error("Stack trace:");
-    while(bp && ip) {
-        if(!dladdr(ip, &dlinfo))
-            break;
-
-        const char *symname = dlinfo.dli_sname;
-#ifndef NO_CPP_DEMANGLE
-        int status;
-        char *tmp = __cxa_demangle(symname, NULL, 0, &status);
-
-        if(status == 0 && tmp)
-            symname = tmp;
-#endif
-
-        jack_error("% 2d: %p <%s+%u> (%s)",
-                ++f,
-                ip,
-                symname,
-                (unsigned)(ip - dlinfo.dli_saddr),
-                dlinfo.dli_fname);
-
-#ifndef NO_CPP_DEMANGLE
-        if(tmp)
-            free(tmp);
-#endif
-
-        if(dlinfo.dli_sname && !strcmp(dlinfo.dli_sname, "main"))
-            break;
-
-        ip = bp[1];
-        bp = (void**)bp[0];
-    }
-#else
-# ifdef HAVE_EXECINFO_H
-    jack_error("Stack trace (non-dedicated):");
-    sz = backtrace(bt, 20);
-    strings = backtrace_symbols(bt, sz);
-
-    for(i = 0; i < sz; ++i)
-        jack_error("%s", strings[i]);
-# else
-    jack_error("Stack trace not available");
-# endif
-#endif
-    jack_error("End of stack trace");
-    exit (-1);
 }
 
+static void write_both(const char *s)
+{
+    size_t len = strlen(s);
+    int log_fd = g_log_fd;
+    write_all(STDERR_FILENO, s, len);
+    if (log_fd >= 0)
+        write_all(log_fd, s, len);
+}
+
+#ifdef __APPLE__
+// TODO : does not compile yet on OSX
+static void signal_segv(int signum, siginfo_t* info, void*ptr)
+{}
+#else
+static void signal_segv(int signum, siginfo_t* info, void* ptr)
+{
+    const char *what;
+    (void)info;
+    (void)ptr;
+
+    switch (signum) {
+    case SIGSEGV: what = "Segmentation fault"; break;
+    case SIGABRT: what = "Abort"; break;
+    case SIGILL:  what = "Illegal instruction"; break;
+    case SIGFPE:  what = "Floating point exception"; break;
+    default:      what = "Fatal signal"; break;
+    }
+
+    write_both("jackdbus: ");
+    write_both(what);
+    write_both(", stack trace follows\n");
+#ifdef HAVE_EXECINFO_H
+    {
+        void *bt[64];
+        int n = backtrace(bt, 64);
+        int log_fd = g_log_fd;
+        backtrace_symbols_fd(bt, n, STDERR_FILENO);
+        if (log_fd >= 0)
+            backtrace_symbols_fd(bt, n, log_fd);
+    }
+#endif
+    write_both("jackdbus: end of stack trace\n");
+
+    /* SA_RESETHAND restored the default action; the signal is blocked while
+     * we run and is delivered (terminating with a core) when we return. */
+    raise(signum);
+}
 #endif
 
-int setup_sigsegv() {
+void sigsegv_set_log_fd(int fd)
+{
+    g_log_fd = fd;
+}
+
+int setup_sigsegv()
+{
+    static const int signals[] = {SIGSEGV, SIGILL, SIGABRT, SIGFPE};
     struct sigaction action;
+    size_t i;
+
+#ifdef HAVE_EXECINFO_H
+    {
+        /* The first backtrace() call loads libgcc_s (malloc, dlopen): do it now,
+         * not in the handler. */
+        void *bt[2];
+        backtrace(bt, 2);
+    }
+#endif
 
     memset(&action, 0, sizeof(action));
     action.sa_sigaction = signal_segv;
-#ifdef SA_SIGINFO
-    action.sa_flags = SA_SIGINFO;
-#endif
-    if(sigaction(SIGSEGV, &action, NULL) < 0) {
-        jack_error("sigaction failed. errno is %d (%s)", errno, strerror(errno));
-        return 0;
-    }
+    action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&action.sa_mask);
 
-    if(sigaction(SIGILL, &action, NULL) < 0) {
-        jack_error("sigaction failed. errno is %d (%s)", errno, strerror(errno));
-        return 0;
+    for (i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) {
+        if (sigaction(signals[i], &action, NULL) < 0) {
+            jack_error("sigaction failed. errno is %d (%s)", errno, strerror(errno));
+            return 0;
+        }
     }
-
-    if(sigaction(SIGABRT, &action, NULL) < 0) {
-        jack_error("sigaction failed. errno is %d (%s)", errno, strerror(errno));
-        return 0;
-    }
-
-    if(sigaction(SIGFPE, &action, NULL) < 0) {
-        jack_error("sigaction failed. errno is %d (%s)", errno, strerror(errno));
-        return 0;
-    }
-
     return 1;
 }
-
-#ifndef SIGSEGV_NO_AUTO_INIT
-static void __attribute((constructor)) init(void) {
-    setup_sigsegv();
-}
-#endif

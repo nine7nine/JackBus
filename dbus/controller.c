@@ -767,6 +767,13 @@ void
 jack_controller_destroy(
         void * context)
 {
+    if (controller_ptr->pending_save != 0)
+    {
+        /* settings changed less than 2 s ago (save is delayed): don't lose them on exit */
+        controller_ptr->pending_save = 0;
+        jack_controller_settings_save_auto(controller_ptr);
+    }
+
     if (controller_ptr->started)
     {
         while (!jack_controller_stop_server(controller_ptr, NULL))
