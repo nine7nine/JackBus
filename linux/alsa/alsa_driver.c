@@ -1767,9 +1767,10 @@ alsa_driver_write (alsa_driver_t* driver, jack_nframes_t nframes)
 		}
 	}
 */
-    MonitorInput();
-
 	if (driver->hw_monitoring) {
+		/* only consumed with hardware monitoring: don't walk all
+		 * capture ports every cycle otherwise */
+		MonitorInput();
 		if ((driver->hw->input_monitor_mask
 		     != driver->input_monitor_mask)
 		    && !driver->all_monitor_in) {

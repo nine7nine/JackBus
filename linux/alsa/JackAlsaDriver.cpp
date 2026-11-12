@@ -487,8 +487,8 @@ void JackAlsaDriver::MonitorInputAux()
 {
     for (int chn = 0; chn < fCaptureChannels; chn++) {
         JackPort* port = fGraphManager->GetPort(fCapturePortList[chn]);
-        if (port->MonitoringInput()) {
-            ((alsa_driver_t *)fDriver)->input_monitor_mask |= (1 << chn);
+        if (port->MonitoringInput() && chn < (int)(8 * sizeof(unsigned long))) {
+            ((alsa_driver_t *)fDriver)->input_monitor_mask |= (1UL << chn);  /* int shift: UB from channel 31 */
         }
     }
 }
