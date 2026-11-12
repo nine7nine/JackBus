@@ -416,6 +416,8 @@ int main(int argc, char** argv)
                 break;
 
             case 'm':
+                /* don't mlockall() the server (see jackctl_lock_memory) */
+                setenv("JACK_NO_MLOCK", "1", 1);
                 break;
 
             case 'u':

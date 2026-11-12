@@ -15,6 +15,7 @@ if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
 fi
 
 mount -t tmpfs -o size=1g,mode=1777 nspa-shm /dev/shm
+ulimit -c 0  # crashes show up as exit status; no core files in the tree
 unset DBUS_SESSION_BUS_ADDRESS NOTIFY_SOCKET JACK_DEFAULT_SERVER JACK_PROMISCUOUS_SERVER
 export JACK_BUILD="${NSPA_BUILD_DIR:-$here/build}"
 export JACK_DRIVER_DIR="$JACK_BUILD"

@@ -66,6 +66,9 @@ struct jackctl_server
 
     class JackServer * engine;
 
+    /* true while this server holds an mlockall() of the process */
+    bool memory_locked;
+
     /* string, server name */
     union jackctl_parameter_value name;
     union jackctl_parameter_value default_name;
@@ -769,6 +772,7 @@ SERVER_EXPORT jackctl_server_t * jackctl_server_create2(
     server_ptr->internals = NULL;
     server_ptr->parameters = NULL;
     server_ptr->engine = NULL;
+    server_ptr->memory_locked = false;
 
     strcpy(value.str, JackTools::DefaultServerName());
     if (jackctl_add_parameter(
@@ -966,6 +970,77 @@ SERVER_EXPORT const JSList * jackctl_server_get_drivers_list(jackctl_server *ser
     return (server_ptr) ? server_ptr->drivers : NULL;
 }
 
+
+#ifndef WIN32
+#include <sys/mman.h>
+#include <sys/resource.h>
+#endif
+
+/*
+ Lock the whole process (code, heap, thread stacks, current and future
+ mappings) into RAM for a realtime server, so the RT threads never take page
+ faults: libjackserver/driver/libasound code pages are file-backed and can be
+ evicted under memory pressure even without swap. Until now only the shm
+ segments were mlock()ed and LockAllMemory() was never called.
+
+ Only done with an unlimited RLIMIT_MEMLOCK (or CAP_IPC_LOCK): with a finite
+ limit, MCL_FUTURE would make later mappings (e.g. the ~100 MB graph segment)
+ fail once the limit is reached. Opt out with JACK_NO_MLOCK=1 (jackd -m).
+*/
+#ifndef WIN32
+/* CAP_IPC_LOCK (bit 14) in the effective capability set: the memlock limit does not apply. */
+static bool jackctl_has_cap_ipc_lock()
+{
+    bool has = false;
+    FILE* status = fopen("/proc/self/status", "r");
+    if (status) {
+        char line[256];
+        unsigned long long caps;
+        while (fgets(line, sizeof(line), status)) {
+            if (sscanf(line, "CapEff: %llx", &caps) == 1) {
+                has = (caps >> 14) & 1;
+                break;
+            }
+        }
+        fclose(status);
+    }
+    return has;
+}
+#endif
+
+static bool jackctl_lock_memory()
+{
+#ifndef WIN32
+    const char* no_mlock = getenv("JACK_NO_MLOCK");
+    if (no_mlock && no_mlock[0] && strcmp(no_mlock, "0") != 0) {
+        jack_info("Not locking server memory (JACK_NO_MLOCK)");
+        return false;
+    }
+    struct rlimit limit;
+    if (getrlimit(RLIMIT_MEMLOCK, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY && !jackctl_has_cap_ipc_lock()) {
+        jack_info("Not locking all server memory: RLIMIT_MEMLOCK is limited (%llu kB); "
+                  "only shared memory segments are locked", (unsigned long long)limit.rlim_cur / 1024);
+        return false;
+    }
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
+        jack_log("Locked all server memory");
+        return true;
+    }
+    jack_error("Cannot lock all server memory (%s)", strerror(errno));
+#endif
+    return false;
+}
+
+static void jackctl_unlock_memory(jackctl_server * server_ptr)
+{
+#ifndef WIN32
+    if (server_ptr->memory_locked) {
+        munlockall();
+        server_ptr->memory_locked = false;
+    }
+#endif
+}
+
 SERVER_EXPORT bool jackctl_server_stop(jackctl_server *server_ptr)
 {
     if (server_ptr) {
@@ -996,6 +1071,8 @@ SERVER_EXPORT bool jackctl_server_close(jackctl_server *server_ptr)
         jack_unregister_server(server_ptr->name.str);
 
         server_ptr->engine = NULL;
+
+        jackctl_unlock_memory(server_ptr);
 
         return true;
     } else {
@@ -1052,6 +1129,11 @@ jackctl_server_open(
             goto fail;
         }
 
+        /* lock memory before the server allocates segments and threads */
+        if (server_ptr->realtime.b) {
+            server_ptr->memory_locked = jackctl_lock_memory();
+        }
+
         /* get the engine/driver started */
         server_ptr->engine = new JackServer(
             server_ptr->sync.b,
@@ -1091,6 +1173,8 @@ fail_delete:
     server_ptr->engine = NULL;
 
 fail_unregister:
+    jackctl_unlock_memory(server_ptr);
+
     jack_log("Cleaning up shared memory");
 
     jack_cleanup_shm();
