@@ -382,11 +382,11 @@ jack_controller_patchbay_create_client(
     client_ptr->pid = jack_get_client_pid(client_ptr->name);
     jack_info("New client '%s' with PID %d", client_ptr->name, client_ptr->pid);
 
-    client_ptr->id = patchbay_ptr->next_client_id++;
     INIT_LIST_HEAD(&client_ptr->ports);
 
-
+    /* the PID query above goes to the server: never under the patchbay lock */
     pthread_mutex_lock(&patchbay_ptr->lock);
+    client_ptr->id = patchbay_ptr->next_client_id++;
     list_add_tail(&client_ptr->siblings, &patchbay_ptr->graph.clients);
     patchbay_ptr->graph.version++;
     jack_controller_patchbay_send_signal_client_appeared(patchbay_ptr->graph.version, client_ptr->id, client_ptr->name);
@@ -465,17 +465,6 @@ jack_controller_patchbay_new_port(
 
     client_name_len = port_short_name - port_full_name - 1; /* without terminating '\0' */
 
-    client_ptr = jack_controller_patchbay_find_client(patchbay_ptr, port_full_name, client_name_len);
-    if (client_ptr == NULL)
-    {
-        client_ptr = jack_controller_patchbay_create_client(patchbay_ptr, port_full_name, client_name_len);
-        if (client_ptr == NULL)
-        {
-            jack_error("Creation of new jack_graph client failed.");
-            return;
-        }
-    }
-
     port_ptr = malloc(sizeof(struct jack_graph_port));
     if (port_ptr == NULL)
     {
@@ -491,12 +480,28 @@ jack_controller_patchbay_new_port(
         return;
     }
 
+    pthread_mutex_lock(&patchbay_ptr->lock);
+    client_ptr = jack_controller_patchbay_find_client(patchbay_ptr, port_full_name, client_name_len);
+    if (client_ptr == NULL)
+    {
+        /* create_client() queries the server (PID): not under the lock */
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+        client_ptr = jack_controller_patchbay_create_client(patchbay_ptr, port_full_name, client_name_len);
+        if (client_ptr == NULL)
+        {
+            jack_error("Creation of new jack_graph client failed.");
+            free(port_ptr->name);
+            free(port_ptr);
+            return;
+        }
+        pthread_mutex_lock(&patchbay_ptr->lock);
+    }
+
     port_ptr->id = patchbay_ptr->next_port_id++;
     port_ptr->flags = port_flags;
     port_ptr->type = port_type;
     port_ptr->client = client_ptr;
 
-    pthread_mutex_lock(&patchbay_ptr->lock);
     list_add_tail(&port_ptr->siblings_client, &client_ptr->ports);
     list_add_tail(&port_ptr->siblings_graph, &patchbay_ptr->graph.ports);
     patchbay_ptr->graph.version++;
@@ -643,11 +648,12 @@ jack_controller_patchbay_create_connection(
         return NULL;
     }
 
-    connection_ptr->id = patchbay_ptr->next_connection_id++;
+    /* id assigned under the lock below */
     connection_ptr->port1 = port1_ptr;
     connection_ptr->port2 = port2_ptr;
 
     pthread_mutex_lock(&patchbay_ptr->lock);
+    connection_ptr->id = patchbay_ptr->next_connection_id++;
     list_add_tail(&connection_ptr->siblings, &patchbay_ptr->graph.connections);
     patchbay_ptr->graph.version++;
     jack_controller_patchbay_send_signal_ports_connected(
@@ -739,20 +745,26 @@ jack_controller_patchbay_find_connection_by_id(
     return NULL;
 }
 
+/* Full "client:port" name; caller holds the patchbay lock. */
+static
+void
+jack_controller_patchbay_port_full_name(
+    struct jack_graph_port *port_ptr,
+    char *buffer,
+    size_t size)
+{
+    snprintf(buffer, size, "%s:%s", port_ptr->client->name, port_ptr->name);
+}
+
 static
 bool
 jack_controller_patchbay_connect(
     struct jack_dbus_method_call *dbus_call_ptr,
     struct jack_controller *controller_ptr,
-    struct jack_graph_port *port1_ptr,
-    struct jack_graph_port *port2_ptr)
+    const char *port1_name,
+    const char *port2_name)
 {
     int ret;
-    char port1_name[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
-    char port2_name[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
-
-    sprintf(port1_name, "%s:%s", port1_ptr->client->name, port1_ptr->name);
-    sprintf(port2_name, "%s:%s", port2_ptr->client->name, port2_ptr->name);
 
     ret = jack_connect(controller_ptr->client, port1_name, port2_name);
     if (ret != 0)
@@ -769,15 +781,10 @@ bool
 jack_controller_patchbay_disconnect(
     struct jack_dbus_method_call *dbus_call_ptr,
     struct jack_controller *controller_ptr,
-    struct jack_graph_port *port1_ptr,
-    struct jack_graph_port *port2_ptr)
+    const char *port1_name,
+    const char *port2_name)
 {
     int ret;
-    char port1_name[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
-    char port2_name[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
-
-    sprintf(port1_name, "%s:%s", port1_ptr->client->name, port1_ptr->name);
-    sprintf(port2_name, "%s:%s", port2_ptr->client->name, port2_ptr->name);
 
     ret = jack_disconnect(controller_ptr->client, port1_name, port2_name);
     if (ret != 0)
@@ -1182,17 +1189,22 @@ jack_controller_dbus_connect_ports_by_name(
         goto unlock;
     }
 
-    if (!jack_controller_patchbay_connect(
-            call,
-            controller_ptr,
-            port1_ptr,
-            port2_ptr))
     {
-        /* jack_controller_patchbay_connect() constructed error reply */
-        goto unlock;
-    }
+        char full_name1[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
+        char full_name2[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
 
-    jack_dbus_construct_method_return_empty(call);
+        jack_controller_patchbay_port_full_name(port1_ptr, full_name1, sizeof(full_name1));
+        jack_controller_patchbay_port_full_name(port2_ptr, full_name2, sizeof(full_name2));
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+
+        /* Not under the patchbay lock: the server runs our graph callbacks
+         * (which take it) from its own threads while serving the request. */
+        if (jack_controller_patchbay_connect(call, controller_ptr, full_name1, full_name2))
+        {
+            jack_dbus_construct_method_return_empty(call);
+        }
+        return;
+    }
 
 unlock:
     pthread_mutex_unlock(&patchbay_ptr->lock);
@@ -1249,17 +1261,22 @@ jack_controller_dbus_connect_ports_by_id(
         goto unlock;
     }
 
-    if (!jack_controller_patchbay_connect(
-            call,
-            controller_ptr,
-            port1_ptr,
-            port2_ptr))
     {
-        /* jack_controller_patchbay_connect() constructed error reply */
-        goto unlock;
-    }
+        char full_name1[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
+        char full_name2[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
 
-    jack_dbus_construct_method_return_empty(call);
+        jack_controller_patchbay_port_full_name(port1_ptr, full_name1, sizeof(full_name1));
+        jack_controller_patchbay_port_full_name(port2_ptr, full_name2, sizeof(full_name2));
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+
+        /* Not under the patchbay lock: the server runs our graph callbacks
+         * (which take it) from its own threads while serving the request. */
+        if (jack_controller_patchbay_connect(call, controller_ptr, full_name1, full_name2))
+        {
+            jack_dbus_construct_method_return_empty(call);
+        }
+        return;
+    }
 
 unlock:
     pthread_mutex_unlock(&patchbay_ptr->lock);
@@ -1324,17 +1341,22 @@ jack_controller_dbus_disconnect_ports_by_name(
         goto unlock;
     }
 
-    if (!jack_controller_patchbay_disconnect(
-            call,
-            controller_ptr,
-            port1_ptr,
-            port2_ptr))
     {
-        /* jack_controller_patchbay_connect() constructed error reply */
-        goto unlock;
-    }
+        char full_name1[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
+        char full_name2[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
 
-    jack_dbus_construct_method_return_empty(call);
+        jack_controller_patchbay_port_full_name(port1_ptr, full_name1, sizeof(full_name1));
+        jack_controller_patchbay_port_full_name(port2_ptr, full_name2, sizeof(full_name2));
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+
+        /* Not under the patchbay lock: the server runs our graph callbacks
+         * (which take it) from its own threads while serving the request. */
+        if (jack_controller_patchbay_disconnect(call, controller_ptr, full_name1, full_name2))
+        {
+            jack_dbus_construct_method_return_empty(call);
+        }
+        return;
+    }
 
 unlock:
     pthread_mutex_unlock(&patchbay_ptr->lock);
@@ -1391,17 +1413,22 @@ jack_controller_dbus_disconnect_ports_by_id(
         goto unlock;
     }
 
-    if (!jack_controller_patchbay_disconnect(
-            call,
-            controller_ptr,
-            port1_ptr,
-            port2_ptr))
     {
-        /* jack_controller_patchbay_connect() constructed error reply */
-        goto unlock;
-    }
+        char full_name1[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
+        char full_name2[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
 
-    jack_dbus_construct_method_return_empty(call);
+        jack_controller_patchbay_port_full_name(port1_ptr, full_name1, sizeof(full_name1));
+        jack_controller_patchbay_port_full_name(port2_ptr, full_name2, sizeof(full_name2));
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+
+        /* Not under the patchbay lock: the server runs our graph callbacks
+         * (which take it) from its own threads while serving the request. */
+        if (jack_controller_patchbay_disconnect(call, controller_ptr, full_name1, full_name2))
+        {
+            jack_dbus_construct_method_return_empty(call);
+        }
+        return;
+    }
 
 unlock:
     pthread_mutex_unlock(&patchbay_ptr->lock);
@@ -1438,17 +1465,21 @@ jack_controller_dbus_disconnect_ports_by_connection_id(
         goto unlock;
     }
 
-    if (!jack_controller_patchbay_disconnect(
-            call,
-            controller_ptr,
-            connection_ptr->port1,
-            connection_ptr->port2))
     {
-        /* jack_controller_patchbay_connect() constructed error reply */
-        goto unlock;
-    }
+        char full_name1[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
+        char full_name2[JACK_CLIENT_NAME_SIZE + JACK_PORT_NAME_SIZE];
 
-    jack_dbus_construct_method_return_empty(call);
+        jack_controller_patchbay_port_full_name(connection_ptr->port1, full_name1, sizeof(full_name1));
+        jack_controller_patchbay_port_full_name(connection_ptr->port2, full_name2, sizeof(full_name2));
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+
+        /* not under the patchbay lock, see jack_controller_dbus_connect_ports_by_name() */
+        if (jack_controller_patchbay_disconnect(call, controller_ptr, full_name1, full_name2))
+        {
+            jack_dbus_construct_method_return_empty(call);
+        }
+        return;
+    }
 
 unlock:
     pthread_mutex_unlock(&patchbay_ptr->lock);
@@ -1550,7 +1581,10 @@ jack_controller_client_registration_callback(
     else
     {
         jack_log("client '%s' destroyed", client_name);
+        /* callbacks run in server threads, concurrently with D-Bus method calls */
+        pthread_mutex_lock(&patchbay_ptr->lock);
         jack_controller_patchbay_destroy_client_by_name(patchbay_ptr, client_name);
+        pthread_mutex_unlock(&patchbay_ptr->lock);
     }
 }
 
@@ -1575,14 +1609,17 @@ jack_controller_port_registration_callback(
     else
     {
         jack_log("port '%s' destroyed", port_name);
+        pthread_mutex_lock(&patchbay_ptr->lock);
         graph_port_ptr = jack_controller_patchbay_find_port_by_full_name(patchbay_ptr, port_name);
         if (graph_port_ptr == NULL)
         {
+            pthread_mutex_unlock(&patchbay_ptr->lock);
             jack_error("Failed to find port '%s' to destroy", port_name);
             return;
         }
 
         jack_controller_patchbay_remove_port(patchbay_ptr, graph_port_ptr);
+        pthread_mutex_unlock(&patchbay_ptr->lock);
     }
 }
 
@@ -1607,18 +1644,21 @@ jack_controller_port_connect_callback(
     port1_name = jack_port_name(port1);
     port2_name = jack_port_name(port2);
 
+    /* lookups and the create/destroy must be atomic against D-Bus readers */
+    pthread_mutex_lock(&patchbay_ptr->lock);
+
     port1_ptr = jack_controller_patchbay_find_port_by_full_name(patchbay_ptr, port1_name);
     if (port1_ptr == NULL)
     {
         jack_error("Failed to find port '%s' to [dis]connect", port1_name);
-        return;
+        goto unlock;
     }
 
     port2_ptr = jack_controller_patchbay_find_port_by_full_name(patchbay_ptr, port2_name);
     if (port2_ptr == NULL)
     {
         jack_error("Failed to find port '%s' to [dis]connect", port2_name);
-        return;
+        goto unlock;
     }
 
     if (connect)
@@ -1628,7 +1668,7 @@ jack_controller_port_connect_callback(
         if (connection_ptr != NULL)
         {
             jack_error("'%s' and '%s' are already connected", port1_name, port2_name);
-            return;
+            goto unlock;
         }
 
         jack_controller_patchbay_create_connection(patchbay_ptr, port1_ptr, port2_ptr);
@@ -1640,11 +1680,14 @@ jack_controller_port_connect_callback(
         if (connection_ptr == NULL)
         {
             jack_error("Cannot find connection being removed");
-            return;
+            goto unlock;
         }
 
         jack_controller_patchbay_destroy_connection(patchbay_ptr, connection_ptr);
     }
+
+unlock:
+    pthread_mutex_unlock(&patchbay_ptr->lock);
 }
 
 void jack_controller_port_rename_callback(jack_port_id_t port, const char * old_name, const char * new_name, void * context)
@@ -1674,13 +1717,6 @@ void jack_controller_port_rename_callback(jack_port_id_t port, const char * old_
 
     port_old_short_name++;      /* skip ':' separator char */
 
-    port_ptr = jack_controller_patchbay_find_port_by_full_name(patchbay_ptr, old_name);
-    if (port_ptr == NULL)
-    {
-        jack_error("renamed port '%s' not found", old_name);
-        return;
-    }
-
     name_buffer = strdup(port_new_short_name);
     if (name_buffer == NULL)
     {
@@ -1688,10 +1724,21 @@ void jack_controller_port_rename_callback(jack_port_id_t port, const char * old_
         return;
     }
 
+    /* The old name was freed outside the lock while D-Bus methods (GetGraph...)
+     * read it under the lock: use-after-free. */
+    pthread_mutex_lock(&patchbay_ptr->lock);
+    port_ptr = jack_controller_patchbay_find_port_by_full_name(patchbay_ptr, old_name);
+    if (port_ptr == NULL)
+    {
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+        free(name_buffer);
+        jack_error("renamed port '%s' not found", old_name);
+        return;
+    }
+
     free(port_ptr->name);
     port_ptr->name = name_buffer;
 
-    pthread_mutex_lock(&patchbay_ptr->lock);
     patchbay_ptr->graph.version++;
     jack_controller_patchbay_send_signal_port_renamed(
         patchbay_ptr->graph.version,

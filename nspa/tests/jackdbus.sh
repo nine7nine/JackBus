@@ -117,6 +117,38 @@ fi
 rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 rm -rf "$HOME/.config/jack"
 
+# 1c. patchbay under concurrent graph changes (server threads) and D-Bus calls
+if start_jackdbus; then
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
+    if call org.jackaudio.JackControl.StartServer; then
+        stress="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/stress64"
+        LD_LIBRARY_PATH="$(dirname "$jackdbus")/../common" timeout 120 "$stress" 4 150 >/dev/null 2>&1 &
+        spid=$!
+        i=0; dbus_fail=0
+        while kill -0 $spid 2>/dev/null && [ $i -lt 300 ]; do
+            call org.jackaudio.JackPatchbay.GetGraph uint64:0 || dbus_fail=$((dbus_fail + 1))
+            call org.jackaudio.JackPatchbay.ConnectPortsByName string:system string:capture_1 string:stress0 string:in0
+            call org.jackaudio.JackPatchbay.DisconnectPortsByName string:system string:capture_1 string:stress0 string:in0
+            i=$((i + 1))
+        done
+        wait $spid
+        if ! kill -0 $JD_PID 2>/dev/null; then
+            result jackdbus-patchbay 1 "jackdbus died during concurrent patchbay activity"
+        elif ! call org.jackaudio.JackPatchbay.GetGraph uint64:0; then
+            result jackdbus-patchbay 1 "jackdbus stopped answering after concurrent patchbay activity"
+        else
+            result jackdbus-patchbay 0 "$i rounds of GetGraph/Connect/Disconnect during client churn ($dbus_fail failed GetGraph)"
+        fi
+        call org.jackaudio.JackControl.StopServer
+    else
+        echo "FAIL jackdbus-patchbay: StartServer failed"; fail=1
+    fi
+    kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
+else
+    echo "FAIL jackdbus-patchbay: jackdbus did not come up"; fail=1
+fi
+rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
+
 # 2. crash handler
 if start_jackdbus; then
     kill -SEGV $JD_PID
