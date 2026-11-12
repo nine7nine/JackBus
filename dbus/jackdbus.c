@@ -558,6 +558,14 @@ fail:
     jack_error ("Ran out of memory trying to construct method return");
 }
 
+/*
+ The log callbacks run in several threads (D-Bus thread, server request
+ thread, message buffer thread, ...). jack_dbus_log_open() may fclose() and
+ reopen the file (rotation), so without a lock one thread could write to a
+ FILE another thread just closed.
+*/
+static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
+
 static bool jack_dbus_log_open(void)
 {
     struct stat st;
@@ -611,11 +619,13 @@ jack_dbus_info_callback(const char *msg)
     ctime_r(&timestamp, timestamp_str);
     timestamp_str[24] = 0;
 
+    pthread_mutex_lock(&g_log_lock);
     if (jack_dbus_log_open())
     {
         fprintf(g_logfile, "%s: %s\n", timestamp_str, msg);
         fflush(g_logfile);
     }
+    pthread_mutex_unlock(&g_log_lock);
 }
 
 #define ANSI_BOLD_ON    "\033[1m"
@@ -633,11 +643,13 @@ jack_dbus_error_callback(const char *msg)
     ctime_r(&timestamp, timestamp_str);
     timestamp_str[24] = 0;
 
+    pthread_mutex_lock(&g_log_lock);
     if (jack_dbus_log_open())
     {
         fprintf(g_logfile, "%s: " ANSI_BOLD_ON ANSI_COLOR_RED "ERROR: %s" ANSI_RESET "\n", timestamp_str, msg);
         fflush(g_logfile);
     }
+    pthread_mutex_unlock(&g_log_lock);
 }
 
 bool
@@ -779,10 +791,13 @@ static bool log_init(void)
 
 static void log_uninit(void)
 {
+    pthread_mutex_lock(&g_log_lock);
     if (g_logfile != NULL)
     {
         fclose(g_logfile);
+        g_logfile = NULL;
     }
+    pthread_mutex_unlock(&g_log_lock);
 
     free(g_log_filename);
 }
