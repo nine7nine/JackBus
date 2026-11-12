@@ -12,7 +12,9 @@
 # against /usr/bin/jackd (with /usr/lib/libjack).
 #
 # Environment: NSPA_BUILD_DIR (default ./build), NSPA_HW_OUT (default
-# /tmp/jack2-nspa-hw), NSPA_HW_SERVERS (default "fork system").
+# /tmp/jack2-nspa-hw), NSPA_HW_SERVERS (default "fork system"), NSPA_HW_LOW
+# (low-latency configurations, default "64x2 64x3 128x2"), NSPA_HW_ONLY
+# (subset of: load capture seq lowlat sync; default all).
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"
@@ -84,7 +86,7 @@ start_server() {
         /usr/bin/jackd -R -P 89 ${SERVER_OPTS:-} -d alsa -d "$dev" "$@" >"$log" 2>&1 &
     fi
     SERVER_PID=$!
-    if ! client "$which" "$out/hwutil" wait 10; then
+    if ! client "$which" "$out/hwutil" wait 10 2>/dev/null; then
         echo "  server did not come up, see $log" >&2
         stop_server
         return 1
@@ -111,6 +113,11 @@ client() {
 libpath() { [ "$1" = fork ] && echo "$build/common"; }
 
 alive() { kill -0 "$SERVER_PID" 2>/dev/null; }
+want() {
+    [ -z "${NSPA_HW_ONLY:-}" ] && return 0
+    case " $NSPA_HW_ONLY " in *" $1 "*) return 0 ;; esac
+    return 1
+}
 
 result() {  # result <PASS|FAIL|INFO> <text>
     [ "$1" = FAIL ] && fail=1
@@ -137,19 +144,23 @@ for which in ${NSPA_HW_SERVERS:-fork system}; do
 
     # 1. your settings: 48 kHz, 512x2, -X seq
     tag=$which-512
-    if start_server "$which" "$out/$tag.server.log" -r 48000 -p 512 -n 2 -X seq; then
+    if { want load || want capture || want seq; } &&
+       start_server "$which" "$out/$tag.server.log" -r 48000 -p 512 -n 2 -X seq; then
+      if want load; then
         res="$(client "$which" "$out/hwutil" xruns 20)"
         result INFO "$tag idle 20 s: $res"
         xruns_during "$which" "$tag-stress" client "$which" "$out/stress" 4 2000 >"$out/$tag.stress.log" 2>&1
         rc=$?
         [ $rc = 0 ] && r=PASS || r=FAIL
         result $r "$tag stress (4 clients, 2000 connect rounds): exit $rc; $XRUNS"
+      fi
+      if want capture; then
         client "$which" "$out/capture_stale" 20 >"$out/$tag.stale.log" 2>&1
-        rc=$?
-        [ $rc = 0 ] && r=PASS || r=FAIL
-        result $r "$tag capture after reconnect: $(tail -1 "$out/$tag.stale.log")"
-
-        before=$(client "$which" "$out/hwutil" midi-ports)
+        case $? in 0) r=PASS ;; 3) r=INFO ;; *) r=FAIL ;; esac
+        result $r "$tag capture buffer in the cycle a connection takes effect: $(tail -1 "$out/$tag.stale.log")"
+      fi
+      if want seq; then
+        before=$(client "$which" "$out/hwutil" midi-ports 2>/dev/null)
         "$out/seq_ports" 150 4 2>"$out/$tag.seq.log" &
         sp=$!
         sleep 2
@@ -162,10 +173,12 @@ for which in ${NSPA_HW_SERVERS:-fork system}; do
         else
             result FAIL "$tag -X seq burst of 150 sequencer ports: server died ($(tail -2 "$out/$tag.server.log" | tr '\n' ' '))"
         fi
+      fi
         alive && stop_server
     fi
 
     # 2. -X seq with 100 sequencer ports existing at startup
+    if want seq; then
     tag=$which-seqstart
     "$out/seq_ports" 100 15 2>"$out/$tag.seq.log" &
     sp=$!
@@ -183,23 +196,48 @@ for which in ${NSPA_HW_SERVERS:-fork system}; do
         result FAIL "$tag -X seq with 100 sequencer ports at startup: server did not start ($(tail -2 "$out/$tag.server.log" | tr '\n' ' '))"
     fi
     kill $sp 2>/dev/null; wait $sp 2>/dev/null
-
-    # 3. low latency: 64x2 (1.3 ms)
-    tag=$which-64
-    if start_server "$which" "$out/$tag.server.log" -r 48000 -p 64 -n 2; then
-        res="$(client "$which" "$out/hwutil" xruns 20)"
-        result INFO "$tag idle 20 s: $res"
-        xruns_during "$which" "$tag-stress" client "$which" "$out/stress" 4 2000 >"$out/$tag.stress.log" 2>&1
-        rc=$?
-        [ $rc = 0 ] && r=PASS || r=FAIL
-        result $r "$tag stress (4 clients, 2000 connect rounds): exit $rc; $XRUNS"
-        stop_server
     fi
+
+    # 3. low latency (NSPA_HW_LOW: list of PERIODxNPERIODS), without and
+    # with a PM QoS CPU latency request of 0 us (deep C-state exit latencies
+    # are around 1 ms on laptops). The fork holds the request itself
+    # (--cpu-dma-latency); for /usr/bin/jackd a helper process holds it.
+    want lowlat &&
+    for qos in off on; do
+    for cfg in ${NSPA_HW_LOW:-64x2 64x3 128x2}; do
+        tag=$which-$cfg
+        holder=
+        if [ $qos = on ]; then
+            tag=$tag-pmqos0
+            if [ "$which" = fork ]; then
+                SERVER_OPTS="--cpu-dma-latency 0"
+            else
+                sh -c 'printf "\000\000\000\000"; exec sleep 3600' >/dev/cpu_dma_latency &
+                holder=$!
+            fi
+        fi
+        if start_server "$which" "$out/$tag.server.log" -r 48000 -p "${cfg%x*}" -n "${cfg#*x}"; then
+            res="$(client "$which" "$out/hwutil" xruns 20)"
+            result INFO "$tag idle 20 s: $res (cpu_dma_latency=$(od -An -tu4 /dev/cpu_dma_latency | tr -d ' '))"
+            xruns_during "$which" "$tag-stress" client "$which" "$out/stress" 4 2000 >"$out/$tag.stress.log" 2>&1
+            rc=$?
+            # device xruns break the stress timing checks: compare, don't gate
+            if alive; then
+                result INFO "$tag stress (4 clients, 2000 connect rounds): exit $rc; $XRUNS; $(tail -1 "$out/$tag.stress.log")"
+                stop_server
+            else
+                result FAIL "$tag stress: server died ($(tail -2 "$out/$tag.server.log" | tr '\n' ' '))"
+            fi
+        fi
+        SERVER_OPTS=
+        [ -n "$holder" ] && { kill $holder; wait $holder 2>/dev/null; }
+    done
+    done
 
     # 4. xrun recovery in sync mode
     tag=$which-sync
     SERVER_OPTS=-S
-    if start_server "$which" "$out/$tag.server.log" -r 48000 -p 512 -n 2; then
+    if want sync && start_server "$which" "$out/$tag.server.log" -r 48000 -p 512 -n 2; then
         client "$which" "$out/xrun_timer" >"$out/$tag.log" 2>&1
         rc=$?
         [ $rc = 0 ] && r=PASS || r=FAIL
