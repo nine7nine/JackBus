@@ -23,22 +23,31 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackTypes.h"
 #include "JackAtomic_os.h"
 
+// Both return the value *before* the operation.
 static inline long INC_ATOMIC(volatile SInt32* val)
 {
+#if defined(__GNUC__)
+    return __atomic_fetch_add(val, 1, __ATOMIC_SEQ_CST);
+#else
     SInt32 actual;
     do {
         actual = *val;
     } while (!CAS(actual, actual + 1, val));
     return actual;
+#endif
 }
 
 static inline long DEC_ATOMIC(volatile SInt32* val)
 {
+#if defined(__GNUC__)
+    return __atomic_fetch_sub(val, 1, __ATOMIC_SEQ_CST);
+#else
     SInt32 actual;
     do {
         actual = *val;
     } while (!CAS(actual, actual - 1, val));
     return actual;
+#endif
 }
 
 #endif

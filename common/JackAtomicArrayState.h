@@ -136,7 +136,7 @@ class JackAtomicArrayState
                 new_val = old_val;
                 *result = GetIndex1(new_val, state);
                 cur_index = GetIndex1(new_val, 0);
-                next_index = SwapIndex1(fCounter, state);
+                next_index = SwapIndex1(old_val, state);  // from the snapshot being CAS-ed, not a fresh read
                 need_copy = (GetIndex1(new_val, state) == 0);	// Written = false, switch just occurred
                 SetIndex1(new_val, state, 0);					// Written = false, invalidate state
             } while (!CAS(Counter1(old_val), Counter1(new_val), (UInt32*)&fCounter));
