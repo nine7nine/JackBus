@@ -57,7 +57,7 @@ int JackGenericClientChannel::ServerCheck(const char* server_name)
 void JackGenericClientChannel::ServerSyncCall(JackRequest* req, JackResult* res, int* result)
 {
     // Check call context
-    if (jack_tls_get(JackGlobals::fNotificationThread)) {
+    if (JackGlobals::fNotificationThread) {
         jack_error("Cannot callback the server in notification thread!");
         *result = -1;
         return;
@@ -90,7 +90,7 @@ void JackGenericClientChannel::ServerSyncCall(JackRequest* req, JackResult* res,
 void JackGenericClientChannel::ServerAsyncCall(JackRequest* req, JackResult* res, int* result)
 {
     // Check call context
-    if (jack_tls_get(JackGlobals::fNotificationThread)) {
+    if (JackGlobals::fNotificationThread) {
         jack_error("Cannot callback the server in notification thread!");
         *result = -1;
         return;

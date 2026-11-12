@@ -29,8 +29,11 @@ using namespace Jack;
 
 static bool change_thread_log_function(jack_log_function_t log_function)
 {
-    return (jack_tls_get(JackGlobals::fKeyLogFunction) == NULL
-            && jack_tls_set(JackGlobals::fKeyLogFunction, (void*)log_function));
+    if (JackGlobals::fKeyLogFunction != NULL) {
+        return false;
+    }
+    JackGlobals::fKeyLogFunction = (void*)log_function;
+    return true;
 }
 
 SERVER_EXPORT int set_threaded_log_function()
@@ -73,7 +76,7 @@ static void jack_format_and_log(int level, const char *prefix, const char *fmt, 
 
     vsnprintf(buffer + len, sizeof(buffer) - len, fmt, ap);
 
-    log_function = (jack_log_function_t)jack_tls_get(JackGlobals::fKeyLogFunction);
+    log_function = (jack_log_function_t)JackGlobals::fKeyLogFunction;
 
     /* if log function is not overridden for thread, use default one */
     if (log_function == NULL)

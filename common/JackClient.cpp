@@ -559,9 +559,7 @@ bool JackClient::Init()
     InitAux();
 
     // Setup context
-    if (!jack_tls_set(JackGlobals::fRealTimeThread, this)) {
-        jack_error("Failed to set thread realtime key");
-    }
+    JackGlobals::fRealTimeThread = this;
 
     // Setup RT
     if (GetEngineControl()->fRealTime) {

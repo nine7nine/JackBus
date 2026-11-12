@@ -302,23 +302,23 @@ static inline bool CheckBufferSize(jack_nframes_t buffer_size)
     return (buffer_size >= 1 && buffer_size <= BUFFER_SIZE_MAX);
 }
 
-static inline void WaitGraphChange()
+static inline JackGraphManager* WaitGraphChange()
 {
     /*
-    TLS key that is set only in RT thread, so never waits for pending
-    graph change in RT context (just read the current graph state).
+    fRealTimeThread is set only in RT threads, which never wait for a pending
+    graph change (they just read the current graph state). Checked after the
+    pending-change test, so the common case reads no thread-local state.
+    Returns the graph manager (NULL if no client is open).
     */
-
-    if (jack_tls_get(JackGlobals::fRealTimeThread) == NULL) {
-        JackGraphManager* manager = GetGraphManager();
+    JackGraphManager* manager = GetGraphManager();
+    if (manager && manager->IsPendingChange() && JackGlobals::fRealTimeThread == NULL) {
         JackEngineControl* control = GetEngineControl();
-        assert(manager);
-        assert(control);
-        if (manager->IsPendingChange()) {
+        if (control) {
             jack_log("WaitGraphChange...");
             JackSleep(int(control->fPeriodUsecs * 1.1f));
         }
     }
+    return manager;
 }
 
 LIB_EXPORT void jack_set_error_function(print_function func)
@@ -469,8 +469,7 @@ LIB_EXPORT int jack_port_connected(const jack_port_t* port)
         jack_error("jack_port_connected called with an incorrect port %ld", myport);
         return -1;
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         return (manager ? manager->GetConnectionsNum(myport) : -1);
     }
 }
@@ -488,8 +487,7 @@ LIB_EXPORT int jack_port_connected_to(const jack_port_t* port, const char* port_
         jack_error("jack_port_connected_to called with a NULL port name");
         return -1;
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         jack_port_id_t dst = (manager ? manager->GetPort(port_name) : NO_PORT);
         if (dst == NO_PORT) {
             jack_error("Unknown destination port port_name = %s", port_name);
@@ -550,8 +548,7 @@ LIB_EXPORT jack_nframes_t jack_port_get_latency(jack_port_t* port)
         jack_error("jack_port_get_latency called with an incorrect port %ld", myport);
         return 0;
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         return (manager ? manager->GetPort(myport)->GetLatency() : 0);
     }
 }
@@ -580,8 +577,7 @@ LIB_EXPORT void jack_port_get_latency_range(jack_port_t *port, jack_latency_call
     if (!CheckPort(myport)) {
         jack_error("jack_port_get_latency_range called with an incorrect port %ld", myport);
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         if (manager)
             manager->GetPort(myport)->GetLatencyRange(mode, range);
     }
@@ -596,8 +592,7 @@ LIB_EXPORT void jack_port_set_latency_range(jack_port_t *port, jack_latency_call
     if (!CheckPort(myport)) {
         jack_error("jack_port_set_latency_range called with an incorrect port %ld", myport);
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         if (manager)
             manager->GetPort(myport)->SetLatencyRange(mode, range);
     }
@@ -618,8 +613,7 @@ LIB_EXPORT int jack_recompute_total_latency(jack_client_t* ext_client, jack_port
         jack_error("jack_recompute_total_latency called with a NULL port");
         return -1;
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         return (manager ? manager->ComputeTotalLatency(myport) : -1);
     }
 }
@@ -1156,8 +1150,7 @@ LIB_EXPORT const char** jack_port_get_connections(const jack_port_t* port)
         jack_error("jack_port_get_connections called with an incorrect port %ld", myport);
         return NULL;
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         return (manager ? manager->GetConnections(myport) : NULL);
     }
 }
@@ -1179,8 +1172,7 @@ LIB_EXPORT const char** jack_port_get_all_connections(const jack_client_t* ext_c
         jack_error("jack_port_get_all_connections called with an incorrect port %ld", myport);
         return NULL;
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         return (manager ? manager->GetConnections(myport) : NULL);
     }
 }
@@ -1201,8 +1193,7 @@ LIB_EXPORT jack_nframes_t jack_port_get_total_latency(jack_client_t* ext_client,
         jack_error("jack_port_get_total_latency called with an incorrect port %ld", myport);
         return 0;
     } else {
-        WaitGraphChange();
-        JackGraphManager* manager = GetGraphManager();
+        JackGraphManager* manager = WaitGraphChange();
         if (manager) {
             manager->ComputeTotalLatency(myport);
             return manager->GetPort(myport)->GetTotalLatency();
@@ -1764,7 +1755,7 @@ void* JackClientRealTimeThreadStart(void* data)
 {
     JackClientThreadStart start = *static_cast<JackClientThreadStart*>(data);
     delete static_cast<JackClientThreadStart*>(data);
-    jack_tls_set(JackGlobals::fRealTimeThread, (void*)1);  // only tested for NULL
+    JackGlobals::fRealTimeThread = (void*)1;  // only tested for NULL
     return start.fRoutine(start.fArg);
 }
 

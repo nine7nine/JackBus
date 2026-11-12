@@ -264,6 +264,16 @@ def configure(conf):
     conf.env.append_unique('CXXFLAGS', ['-Wall', '-Wno-invalid-offsetof'])
     conf.env.append_unique('CXXFLAGS', '-std=gnu++11')
 
+    # x86/x86_64: TLS descriptors for the __thread state in JackGlobals. In a
+    # shared library the default dialect calls __tls_get_addr (which may
+    # update the DTV, i.e. allocate, after a later dlopen); with descriptors a
+    # read is an indirect call to a two-instruction resolver when the library
+    # sits in static TLS. Other architectures fail the check and keep their
+    # default.
+    if conf.check_cxx(cxxflags='-mtls-dialect=gnu2', msg='Checking for -mtls-dialect=gnu2', mandatory=False):
+        conf.env.append_unique('CFLAGS', '-mtls-dialect=gnu2')
+        conf.env.append_unique('CXXFLAGS', '-mtls-dialect=gnu2')
+
     if conf.env['IS_FREEBSD']:
         conf.check(lib='execinfo', uselib='EXECINFO', define_name='EXECINFO')
         conf.check_cfg(package='libsysinfo', args='--cflags --libs')

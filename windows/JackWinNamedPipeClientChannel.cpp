@@ -119,9 +119,7 @@ bool JackWinNamedPipeClientChannel::Init()
     jack_log("JackWinNamedPipeClientChannel::Init");
     
     // Setup context
-    if (!jack_tls_set(JackGlobals::fNotificationThread, this)) {
-        jack_error("Failed to set thread notification key");
-    }
+    JackGlobals::fNotificationThread = this;
 
     if (!fNotificationListenPipe.Accept()) {
         jack_error("JackWinNamedPipeClientChannel: cannot establish notification pipe");

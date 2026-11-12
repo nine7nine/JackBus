@@ -37,9 +37,21 @@ namespace Jack
 // Globals used for client management on server or library side.
 struct JackGlobals {
 
-    static jack_tls_key fRealTimeThread;
-    static jack_tls_key fNotificationThread;
-    static jack_tls_key fKeyLogFunction;
+    /*
+     Per-thread state: plain __thread pointers instead of pthread keys. Built
+     with TLS descriptors (-mtls-dialect=gnu2), a read is one indirect call to
+     a two-instruction resolver when libjack sits in static TLS, which glibc
+     arranges even when libjack is dlopen()ed; it never touches the DTV, so
+     it cannot allocate on an RT thread. Zero-initialized, so there is no
+     static-initialization-order dependency either.
+     fRealTimeThread: non-NULL in the client's process thread and in RT
+     threads created through jack_client_create_thread().
+     fNotificationThread: non-NULL in the client's notification thread.
+     fKeyLogFunction: per-thread log function (jack_log_function_t), or NULL.
+    */
+    static __thread void* fRealTimeThread;
+    static __thread void* fNotificationThread;
+    static __thread void* fKeyLogFunction;
     static JackMutex* fOpenMutex;
     static JackMutex* fSynchroMutex;
     static volatile bool fServerRunning;
