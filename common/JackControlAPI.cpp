@@ -112,6 +112,11 @@ struct jackctl_server
     /* char enum, self connect mode mode */
     union jackctl_parameter_value self_connect_mode;
     union jackctl_parameter_value default_self_connect_mode;
+
+    /* int, PM QoS CPU DMA latency request in microseconds while running, -1 = none */
+    union jackctl_parameter_value cpu_dma_latency;
+    union jackctl_parameter_value default_cpu_dma_latency;
+    int cpu_dma_latency_fd;
 };
 
 struct jackctl_driver
@@ -773,6 +778,7 @@ SERVER_EXPORT jackctl_server_t * jackctl_server_create2(
     server_ptr->parameters = NULL;
     server_ptr->engine = NULL;
     server_ptr->memory_locked = false;
+    server_ptr->cpu_dma_latency_fd = -1;
 
     strcpy(value.str, JackTools::DefaultServerName());
     if (jackctl_add_parameter(
@@ -932,6 +938,24 @@ SERVER_EXPORT jackctl_server_t * jackctl_server_create2(
         goto fail_free_parameters;
     }
 
+    value.i = -1;
+    if (jackctl_add_parameter(
+            &server_ptr->parameters,
+            "cpu-dma-latency",
+            "CPU wakeup latency limit in microseconds while the server runs (-1 = off).",
+            "Holds a PM QoS request on /dev/cpu_dma_latency while the server runs, so idle "
+            "CPUs avoid C-states whose exit latency exceeds this (e.g. 0 = stay in C0/C1). "
+            "Deep C-states can take a millisecond or more to wake from: significant at small "
+            "buffer sizes. Costs power. Needs write access to /dev/cpu_dma_latency "
+            "(e.g. the realtime group with realtime-privileges).",
+            JackParamInt,
+            &server_ptr->cpu_dma_latency,
+            &server_ptr->default_cpu_dma_latency,
+            value) == NULL)
+    {
+        goto fail_free_parameters;
+    }
+
     JackServerGlobals::on_device_acquire = on_device_acquire;
     JackServerGlobals::on_device_release = on_device_release;
     JackServerGlobals::on_device_reservation_loop = on_device_reservation_loop;
@@ -973,6 +997,8 @@ SERVER_EXPORT const JSList * jackctl_server_get_drivers_list(jackctl_server *ser
 
 #ifndef WIN32
 #include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/resource.h>
 #endif
 
@@ -1031,6 +1057,37 @@ static bool jackctl_lock_memory()
     return false;
 }
 
+/* PM QoS: keep the request alive by holding the file descriptor open. */
+static void jackctl_hold_cpu_dma_latency(jackctl_server * server_ptr)
+{
+#ifdef __linux__
+    int32_t usec = server_ptr->cpu_dma_latency.i;
+    if (usec < 0 || server_ptr->cpu_dma_latency_fd >= 0) {
+        return;
+    }
+    int fd = open("/dev/cpu_dma_latency", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        jack_error("cpu-dma-latency: cannot open /dev/cpu_dma_latency (%s)", strerror(errno));
+        return;
+    }
+    if (write(fd, &usec, sizeof(usec)) != (ssize_t)sizeof(usec)) {
+        jack_error("cpu-dma-latency: cannot set %d us (%s)", usec, strerror(errno));
+        close(fd);
+        return;
+    }
+    server_ptr->cpu_dma_latency_fd = fd;
+    jack_info("Holding a CPU DMA latency request of %d us", usec);
+#endif
+}
+
+static void jackctl_release_cpu_dma_latency(jackctl_server * server_ptr)
+{
+    if (server_ptr->cpu_dma_latency_fd >= 0) {
+        close(server_ptr->cpu_dma_latency_fd);
+        server_ptr->cpu_dma_latency_fd = -1;
+    }
+}
+
 static void jackctl_unlock_memory(jackctl_server * server_ptr)
 {
 #ifndef WIN32
@@ -1073,6 +1130,7 @@ SERVER_EXPORT bool jackctl_server_close(jackctl_server *server_ptr)
         server_ptr->engine = NULL;
 
         jackctl_unlock_memory(server_ptr);
+        jackctl_release_cpu_dma_latency(server_ptr);
 
         return true;
     } else {
@@ -1133,6 +1191,7 @@ jackctl_server_open(
         if (server_ptr->realtime.b) {
             server_ptr->memory_locked = jackctl_lock_memory();
         }
+        jackctl_hold_cpu_dma_latency(server_ptr);
 
         /* get the engine/driver started */
         server_ptr->engine = new JackServer(
@@ -1174,6 +1233,7 @@ fail_delete:
 
 fail_unregister:
     jackctl_unlock_memory(server_ptr);
+    jackctl_release_cpu_dma_latency(server_ptr);
 
     jack_log("Cleaning up shared memory");
 

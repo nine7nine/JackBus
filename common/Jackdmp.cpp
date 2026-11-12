@@ -231,6 +231,7 @@ static void usage(FILE* file, jackctl_server_t *server, bool full = true)
 
     fprintf(file,
             "               [ --replace-registry ]\n"
+            "               [ --cpu-dma-latency usecs (hold a PM QoS request while running) ]\n"
             "               [ --silent OR -s ]\n"
             "               [ --sync OR -S ]\n"
             "               [ --temporary OR -T ]\n"
@@ -302,6 +303,7 @@ int main(int argc, char** argv)
                                        { "silent", 0, 0, 's' },
                                        { "sync", 0, 0, 'S' },
                                        { "autoconnect", 1, 0, 'a' },
+                                       { "cpu-dma-latency", 1, 0, 1000 },
                                        { 0, 0, 0, 0 }
                                    };
 
@@ -433,6 +435,14 @@ int main(int argc, char** argv)
 
             case 's':
                 jack_set_error_function(silent_jack_error_callback);
+                break;
+
+            case 1000:
+                param = jackctl_get_parameter(server_parameters, "cpu-dma-latency");
+                if (param != NULL) {
+                    value.i = atoi(optarg);
+                    jackctl_parameter_set_value(param, &value);
+                }
                 break;
 
             case 'S':
