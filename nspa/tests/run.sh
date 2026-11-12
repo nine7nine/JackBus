@@ -42,6 +42,7 @@ cc -O2 $tcf -Wall -I"$root/common" -o "$out/rt_faults" "$here/rt_faults.c" -L"$f
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/stale_client" "$here/stale_client.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/mixdown" "$here/mixdown.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/metadata" "$here/metadata.c" -L"$fork_lib" -ljack || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/refnum_bound" "$here/refnum_bound.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -269,6 +270,23 @@ if "$out/nocancel" >"$out/nocancel.log" 2>&1; then echo "PASS nocancel: $(tail -
 else echo "FAIL nocancel: $(tail -2 "$out/nocancel.log" | tr '\n' ' ')"; fail=1; fi
 if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(tail -1 "$out/memops.log")"
 else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
+
+# Per-cycle client loops bounded by the highest refnum in use (server), and
+# the chunked successor scan (libjack): clients open and close so that live
+# refnums are high, low, and the highest one disappears.
+refnum_case() {  # refnum_case <name> <server> <lib|system>
+    skip_system "$1" "$2" "$3" && return
+    if ! start_server "$2" "$out/$1.server.log"; then echo "FAIL $1: server"; fail=1; return; fi
+    if [ "$3" = system ]; then env -u LD_LIBRARY_PATH timeout 60 "$out/refnum_bound" >"$out/$1.log" 2>&1
+    else LD_LIBRARY_PATH="$3" timeout 60 "$out/refnum_bound" >"$out/$1.log" 2>&1; fi
+    rc=$?
+    stop_server || rc=1
+    if [ $rc -eq 0 ]; then echo "PASS $1: $(grep -c ' ok$' "$out/$1.log") stages ok"
+    else echo "FAIL $1 (rc=$rc):"; sed 's/^/  /' "$out/$1.log" | tail -6; fail=1; fi
+}
+refnum_case refnum-bound_fork-server_fork-lib fork "$fork_lib"
+refnum_case refnum-bound_fork-server_system-lib fork system
+refnum_case refnum-bound_system-server_fork-lib system "$fork_lib"
 
 # Metadata across libjack builds: one Berkeley DB environment in
 # /dev/shm/jack_db-<uid> is shared by the server and all clients, so every
