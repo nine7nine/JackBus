@@ -158,6 +158,12 @@ run_case fork-server_fork-lib       fork   "$out/stress64" "$fork_lib"
 run_case fork-server_system-lib     fork   "$out/stress64" system
 run_case system-server_fork-lib     system "$out/stress64" "$fork_lib"
 run_case fork-server_system-lib32   fork   "$out/stress32" system
+# fork lib32 libjack (mixed build: nspa/build.sh -o build-mixed --mixed)
+lib32="$root/build-mixed/lib32/common"
+if [ -f "$lib32/libjack.so" ] && cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32fork" "$here/stress.c" -L"$lib32" -ljack -lpthread 2>/dev/null; then
+    run_case fork-server_fork-lib32     fork   "$out/stress32fork" "$lib32"
+    run_case system-server_fork-lib32   system "$out/stress32fork" "$lib32"
+fi
 two_servers
 xrun_timer_case xrun-timer_fork-server       fork   "$fork_lib" 1
 xrun_timer_case xrun-timer_system-server     system system      0
