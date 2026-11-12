@@ -177,23 +177,24 @@ for which in ${NSPA_HW_SERVERS:-fork system}; do
         alive && stop_server
     fi
 
-    # 2. -X seq with 100 sequencer ports existing at startup
+    # 2. -X seq with 150 sequencer ports existing at startup (the ring per
+    # direction held 63 in 1.9.22)
     if want seq; then
     tag=$which-seqstart
-    "$out/seq_ports" 100 15 2>"$out/$tag.seq.log" &
+    "$out/seq_ports" 150 15 2>"$out/$tag.seq.log" &
     sp=$!
     sleep 0.5
     if start_server "$which" "$out/$tag.server.log" -r 48000 -p 512 -n 2 -X seq; then
         sleep 2
         n=$(client "$which" "$out/hwutil" midi-ports 2>/dev/null)
         if alive && [ -n "$n" ]; then
-            result PASS "$tag -X seq with 100 sequencer ports at startup: server alive, ${n} MIDI ports"
+            result PASS "$tag -X seq with 150 sequencer ports (75 per direction) at startup: server alive, ${n} MIDI ports"
         else
-            result FAIL "$tag -X seq with 100 sequencer ports at startup: server died ($(tail -2 "$out/$tag.server.log" | tr '\n' ' '))"
+            result FAIL "$tag -X seq with 150 sequencer ports (75 per direction) at startup: server died ($(tail -2 "$out/$tag.server.log" | tr '\n' ' '))"
         fi
         alive && stop_server
     else
-        result FAIL "$tag -X seq with 100 sequencer ports at startup: server did not start ($(tail -2 "$out/$tag.server.log" | tr '\n' ' '))"
+        result FAIL "$tag -X seq with 150 sequencer ports (75 per direction) at startup: server did not start ($(tail -2 "$out/$tag.server.log" | tr '\n' ' '))"
     fi
     kill $sp 2>/dev/null; wait $sp 2>/dev/null
     fi
