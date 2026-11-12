@@ -23,14 +23,19 @@ lib32 = 'lib32'
 
 
 def check_berkeley_db(conf):
-    # Plain <db.h>/libdb first; then the versioned layout used by Arch Linux
-    # (db5.3: /usr/include/db5.3/db.h + libdb-5.3), so no distro patch is needed.
+    # Berkeley DB 5.3 in its versioned layout first (/usr/include/db5.3/db.h +
+    # libdb-5.3, what Arch Linux builds jack2 against), then plain <db.h>/libdb.
+    # The metadata environment in /dev/shm/jack_db-<uid> is shared by the
+    # server and every client, and a process built against another Berkeley DB
+    # version cannot open it (DB_VERSION_MISMATCH / mmap errors): the fork must
+    # use the same version as the distribution's libjack. db 6.x is also
+    # AGPL-3.0, which is why Arch keeps jack2 on db5.3.
     try:
-        conf.check(header_name='db.h', uselib_store='DB', define_name='HAVE_DB_H')
-        conf.check(lib='db', uselib_store='DB')
-    except conf.errors.ConfigurationError:
         conf.check(header_name='db.h', includes=['/usr/include/db5.3'], uselib_store='DB', define_name='HAVE_DB_H')
         conf.check(lib='db-5.3', uselib_store='DB')
+    except conf.errors.ConfigurationError:
+        conf.check(header_name='db.h', uselib_store='DB', define_name='HAVE_DB_H')
+        conf.check(lib='db', uselib_store='DB')
 
 
 def display_feature(conf, msg, build):

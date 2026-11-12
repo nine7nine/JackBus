@@ -41,6 +41,7 @@ c++ -std=gnu++11 -O2 $tcf -Wall -I"$root/common" -I"$root/common/jack" -I"$root/
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/rt_faults" "$here/rt_faults.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/stale_client" "$here/stale_client.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/mixdown" "$here/mixdown.c" -L"$fork_lib" -ljack || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/metadata" "$here/metadata.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -268,6 +269,31 @@ if "$out/nocancel" >"$out/nocancel.log" 2>&1; then echo "PASS nocancel: $(tail -
 else echo "FAIL nocancel: $(tail -2 "$out/nocancel.log" | tr '\n' ' ')"; fail=1; fi
 if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(tail -1 "$out/memops.log")"
 else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
+
+# Metadata across libjack builds: one Berkeley DB environment in
+# /dev/shm/jack_db-<uid> is shared by the server and all clients, so every
+# build must use the same Berkeley DB version as Arch's jack2 (db5.3).
+metadata_case() {  # metadata_case <name> <server> <set-lib|system> <get-lib|system>
+    skip_system "$1" "$2" "$3" && return
+    skip_system "$1" "$2" "$4" && return
+    rm -rf /dev/shm/jack_db-*
+    if ! start_server "$2" "$out/$1.server.log"; then echo "FAIL $1: server"; fail=1; return; fi
+    if [ "$3" = system ]; then env -u LD_LIBRARY_PATH "$out/metadata" set 5 >"$out/$1.set.log" 2>&1 &
+    else LD_LIBRARY_PATH="$3" "$out/metadata" set 5 >"$out/$1.set.log" 2>&1 & fi
+    setter=$!
+    sleep 1
+    if [ "$4" = system ]; then env -u LD_LIBRARY_PATH "$out/metadata" get >"$out/$1.get.log" 2>&1
+    else LD_LIBRARY_PATH="$4" "$out/metadata" get >"$out/$1.get.log" 2>&1; fi
+    rc=$?
+    kill $setter 2>/dev/null; wait $setter 2>/dev/null
+    stop_server || rc=1
+    if [ $rc -eq 0 ] && grep -q '^PASS' "$out/$1.set.log"; then echo "PASS $1: $(grep -h '^PASS' "$out/$1.set.log" "$out/$1.get.log" | sed 's/^PASS: //' | tr '\n' ';')"
+    else echo "FAIL $1: $(grep -hE '^(PASS|FAIL)|DB' "$out/$1.set.log" "$out/$1.get.log" | head -4 | tr '\n' ';')"; fail=1; fi
+}
+metadata_case metadata_fork-server_fork-set_system-get fork "$fork_lib" system
+metadata_case metadata_fork-server_system-set_fork-get fork system "$fork_lib"
+metadata_case metadata_system-server_fork-set_fork-get system "$fork_lib" "$fork_lib"
+metadata_case metadata_system-server_system-set_fork-get system system "$fork_lib"
 
 # Input-port mixdown: exact sums of 0..6 sources, at a period that is not a
 # multiple of the SSE width (scalar tail) and at a normal one; 64- and
