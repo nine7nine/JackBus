@@ -38,6 +38,7 @@ c++ -std=gnu++11 -O2 $tcf -w -DSERVER_SIDE -I"$root/common" -I"$root/common/jack
     -include "$JACK_BUILD/config.h" -o "$out/connection_copy" "$here/connection_copy.cpp" -L"$fork_lib" -ljackserver || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/rt_faults" "$here/rt_faults.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/stale_client" "$here/stale_client.c" -L"$fork_lib" -ljack || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/mixdown" "$here/mixdown.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -263,6 +264,31 @@ if LD_LIBRARY_PATH="$fork_lib" "$out/connection_copy" >"$out/connection_copy.log
 else echo "FAIL connection-copy: $(tail -1 "$out/connection_copy.log")"; fail=1; fi
 if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(tail -1 "$out/memops.log")"
 else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
+
+# Input-port mixdown: exact sums of 0..6 sources, at a period that is not a
+# multiple of the vector width (scalar tail) and at a normal one; 64- and
+# 32-bit libjack (the multiversioned mixdown runs in the client).
+mixdown_case() {  # mixdown_case <name> <period> <binary> <libdir>
+    [ -x "$3" ] || { echo "SKIP $1"; return; }
+    # not "SERVER_PERIOD=$2 start_server": with sh (bash in POSIX mode) a
+    # prefix assignment to a function call persists after it
+    saved_period=${SERVER_PERIOD:-}
+    SERVER_PERIOD=$2
+    if start_server fork "$out/$1.server.log"; then
+        if LD_LIBRARY_PATH="$4" timeout 60 "$3" >"$out/$1.log" 2>&1; then echo "PASS $1: $(tail -1 "$out/$1.log" | sed 's/^PASS: //')"
+        else echo "FAIL $1: $(tail -1 "$out/$1.log")"; fail=1; fi
+        stop_server || fail=1
+    else
+        echo "FAIL $1: server"; fail=1
+    fi
+    SERVER_PERIOD=$saved_period
+}
+mixdown_case mixdown-1021 1021 "$out/mixdown" "$fork_lib"
+mixdown_case mixdown-64 64 "$out/mixdown" "$fork_lib"
+lib32="$root/build-mixed/lib32/common"
+if [ -z "$san" ] && [ -f "$lib32/libjack.so" ] && cc -m32 -O2 -Wall -I"$root/common" -o "$out/mixdown32" "$here/mixdown.c" -L"$lib32" -ljack 2>/dev/null; then
+    mixdown_case mixdown-1021-lib32 1021 "$out/mixdown32" "$lib32"
+fi
 
 if [ -n "$san" ]; then
     echo "SKIP rt-syscalls (sanitizer run)"
