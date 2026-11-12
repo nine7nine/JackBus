@@ -702,7 +702,7 @@ void sample_move_d32l24_sS (char *dst, jack_default_audio_sample_t *src, unsigne
 		__m128 clipped = _mm_min_ss(int_max, _mm_max_ss(scaled, int_min));
 
 		int y = _mm_cvttss_si32(clipped);
-		*((int *) dst) = y<<8;
+		*((int *) dst) = y;  /* LSB-justified, like the vector loop above (was y<<8) */
 
 		dst += dst_skip;
 		src++;

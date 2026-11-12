@@ -968,7 +968,14 @@ alsa_driver_set_parameters (alsa_driver_t *driver,
 	driver->period_usecs =
 		(jack_time_t) floor ((((float) driver->frames_per_cycle) /
 				      driver->frame_rate) * 1000000.0f);
-	driver->poll_timeout = (int) floor (1.5f * driver->period_usecs);
+	/* poll() takes milliseconds. This used to pass period_usecs * 1.5
+	 * straight through (16 s at 512 frames/48 kHz), so a stalled device
+	 * took seconds to minutes to be noticed and recovered. Use 4 periods,
+	 * but at least 100 ms so slow device starts (USB) don't trigger
+	 * recoveries; MAX_RETRY_COUNT consecutive timeouts stop the driver. */
+	driver->poll_timeout = (int) ceil (4.0 * driver->period_usecs / 1000.0);
+	if (driver->poll_timeout < 100)
+		driver->poll_timeout = 100;
 
 // JACK2
 /*

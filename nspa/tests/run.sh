@@ -24,6 +24,8 @@ cc -O2 -Wall -I"$root/common" -o "$out/stress64" "$here/stress.c" -L"$fork_lib" 
 cc -O2 -Wall -I"$root/common" -o "$out/xrun_timer" "$here/xrun_timer.c" -L"$fork_lib" -ljack -lpthread || exit 1
 c++ -std=gnu++11 -O2 -Wall -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
     -o "$out/midi_wrap" "$here/midi_wrap.cpp" -L"$fork_lib" -ljackserver || exit 1
+cc -march=x86-64 -mtune=generic -O2 -I"$root/common" -I"$root/common/jack" -o "$out/memops_consistency" \
+    "$here/memops_consistency.c" "$root/common/memops.c" -lm || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -152,5 +154,7 @@ xrun_timer_case xrun-timer_system-server     system system      0
 wrap_case
 if LD_LIBRARY_PATH="$fork_lib" "$out/midi_wrap" >"$out/midi_wrap.log" 2>&1; then echo "PASS midi-wrap: $(tail -1 "$out/midi_wrap.log")"
 else echo "FAIL midi-wrap:"; sed 's/^/  /' "$out/midi_wrap.log"; fail=1; fi
+if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(tail -1 "$out/memops.log")"
+else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
 
 exit $fail
