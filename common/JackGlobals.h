@@ -64,7 +64,12 @@ struct JackGlobals {
 #ifdef __CLIENTDEBUG__
     static std::ofstream* fStream;
 #endif
+#ifdef __CLIENTDEBUG__
      static void CheckContext(const char* name);
+#else
+     // Inline no-op: every API entry point calls it, jack_port_get_buffer included
+     static void CheckContext(const char*) {}
+#endif
 };
 
 // Each "side" server and client will implement this to get the shared graph manager, engine control and inter-process synchro table.

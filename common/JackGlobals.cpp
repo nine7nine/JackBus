@@ -66,11 +66,6 @@ void JackGlobals::CheckContext(const char* name)
 #endif
 }
 
-#else
-
-void JackGlobals::CheckContext(const char* name)
-{}
-
 #endif
 
 } // end of namespace
