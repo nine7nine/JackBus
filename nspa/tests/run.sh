@@ -270,8 +270,8 @@ if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(
 else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
 
 # Input-port mixdown: exact sums of 0..6 sources, at a period that is not a
-# multiple of the vector width (scalar tail) and at a normal one; 64- and
-# 32-bit libjack (the multiversioned mixdown runs in the client).
+# multiple of the SSE width (scalar tail) and at a normal one; 64- and
+# 32-bit libjack (the mixdown runs in the client).
 mixdown_case() {  # mixdown_case <name> <period> <binary> <libdir>
     [ -x "$3" ] || { echo "SKIP $1"; return; }
     # not "SERVER_PERIOD=$2 start_server": with sh (bash in POSIX mode) a
