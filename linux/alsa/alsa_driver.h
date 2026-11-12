@@ -66,6 +66,7 @@ typedef struct _alsa_driver {
     const snd_pcm_channel_area_t *capture_areas;
     const snd_pcm_channel_area_t *playback_areas;
     struct pollfd                *pfd;
+    unsigned int                  pfd_capacity;   /* entries allocated in pfd */
     unsigned int                  playback_nfds;
     unsigned int                  capture_nfds;
     unsigned long                 interleave_unit;

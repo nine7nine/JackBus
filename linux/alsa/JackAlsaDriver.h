@@ -76,6 +76,7 @@ class JackAlsaDriver : public JackAudioDriver
 
         int Start();
         int Stop();
+        int RestartStreams();   // xrun recovery: PCM streams only
 
         int Read();
         int Write();

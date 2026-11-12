@@ -415,6 +415,15 @@ int JackAlsaDriver::Start()
     return res;
 }
 
+int JackAlsaDriver::RestartStreams()
+{
+    int res = alsa_driver_stop((alsa_driver_t *)fDriver);
+    if (res == 0) {
+        res = alsa_driver_start((alsa_driver_t *)fDriver);
+    }
+    return res;
+}
+
 int JackAlsaDriver::Stop()
 {
     int res = alsa_driver_stop((alsa_driver_t *)fDriver);
@@ -951,11 +960,13 @@ void SetTime(jack_time_t time)
 
 int Restart()
 {
-    int res;
-    if ((res = g_alsa_driver->Stop()) == 0) {
-        res = g_alsa_driver->Start();
-    }
-    return res;
+    // Only called for xrun recovery, from the driver's realtime thread
+    // (alsa_driver_wait -> alsa_driver_xrun_recovery). Restart the PCM
+    // streams only: the full Stop()/Start() also stopped and restarted every
+    // slave driver (e.g. alsarawmidi joins and re-creates its I/O threads,
+    // with sleeps while they start) and re-initialized the frame timer, all
+    // in the realtime thread. The frame timer is re-seeded by NotifyXRun().
+    return g_alsa_driver->RestartStreams();
 }
 
 #ifdef __cplusplus

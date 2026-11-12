@@ -241,7 +241,18 @@ int JackThreadedDriver::Stop()
 
 bool JackThreadedDriver::Execute()
 {
-    return (Process() == 0);
+    if (Process() == 0) {
+        return true;
+    }
+    /*
+    The driver failed for good (device removed, recovery failed, retry limit
+    reached): this thread exits and the server no longer runs cycles. It used
+    to exit silently, leaving the server "started" with no audio and clients
+    waiting forever. Notify them through the usual shutdown callback.
+    */
+    jack_error("JackThreadedDriver::Execute: driver failed, the server stops processing");
+    fDriver->NotifyFailure(JackFailure | JackBackendError, "JACK audio backend failed");
+    return false;
 }
 
 bool JackThreadedDriver::Init()

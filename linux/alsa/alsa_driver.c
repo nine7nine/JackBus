@@ -1115,13 +1115,14 @@ alsa_driver_start (alsa_driver_t *driver)
 		driver->capture_nfds = 0;
 	}
 
-	if (driver->pfd) {
+	/* also runs in the realtime thread for xrun recovery: only (re)allocate
+	 * when the descriptor count grew (it doesn't between restarts) */
+	if (!driver->pfd || driver->pfd_capacity < driver->playback_nfds + driver->capture_nfds + 2) {
 		free (driver->pfd);
+		driver->pfd_capacity = driver->playback_nfds + driver->capture_nfds + 2;
+		driver->pfd = (struct pollfd *)
+			malloc (sizeof (struct pollfd) * driver->pfd_capacity);
 	}
-
-	driver->pfd = (struct pollfd *)
-		malloc (sizeof (struct pollfd) *
-			(driver->playback_nfds + driver->capture_nfds + 2));
 
 	if (driver->midi && !driver->xrun_recovery)
 		(driver->midi->start)(driver->midi);
