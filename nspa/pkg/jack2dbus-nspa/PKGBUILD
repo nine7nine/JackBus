@@ -1,19 +1,19 @@
-# jack2dbus-nspa: JACK2 1.9.22 with the jack2-nspa RT / correctness / performance
-# fixes (branch nspa, see RT-AUDIT.md). One package replacing Arch's jack2 and
-# jack2-dbus (same files, same paths, same configure options; no docs, no
-# lib32). Client API/ABI, shared memory layout and protocol are unchanged:
-# applications linked against jack2 keep working, and Arch's lib32-jack2
-# 1.9.22 still works against this server.
+# jack2dbus-nspa: JACK2 1.9.22 with RT / correctness / performance fixes
+# (https://github.com/nine7nine/jack2dbus-nspa, see the commit log). One package
+# replacing Arch's jack2 and jack2-dbus (same files, same paths, same configure
+# options; no docs, no lib32). Client API/ABI, shared memory layout and protocol
+# are unchanged: applications linked against jack2 keep working, and Arch's
+# lib32-jack2 1.9.22 still works against this server.
 #
-# Build from the local repository: _repo defaults to the repository this file
-# is in; NSPA_REPO=/path/to/jack2 overrides it.
+# Builds the main branch from GitHub. To build from a local clone instead:
+#   NSPA_REPO=/path/to/jack2 [NSPA_BRANCH=nspa] makepkg
 
 pkgname=jack2dbus-nspa
 pkgver=1.9.22.r0.g0
 pkgrel=1
 pkgdesc="The JACK low-latency audio server, with D-Bus (jackdbus), jack2-nspa RT fixes"
 arch=(x86_64)
-url="https://github.com/jackaudio/jack2"
+url="https://github.com/nine7nine/jack2dbus-nspa"
 license=(GPL-2.0-or-later LGPL-2.1-or-later)
 depends=(
   alsa-lib libasound.so
@@ -45,8 +45,11 @@ conflicts=(jack jack2 jack2-dbus)
 # same commit without LTO (16 clients, 32 frames, 12 interleaved runs): critical
 # path median 214.8 vs 224.0 us, p99 438.7 vs 444.0 us, DSP load 16.6 vs 17.9%;
 # server instructions per cycle -1..-5%.
-_repo="${NSPA_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
-source=("jack2::git+file://$_repo#branch=nspa")
+if [[ -n ${NSPA_REPO:-} ]]; then
+  source=("jack2::git+file://$NSPA_REPO#branch=${NSPA_BRANCH:-nspa}")
+else
+  source=("jack2::git+$url.git#branch=main")
+fi
 sha512sums=('SKIP')
 
 pkgver() {
