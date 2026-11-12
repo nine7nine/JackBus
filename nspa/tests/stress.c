@@ -8,12 +8,16 @@
  *   - current_frames advances by exactly nframes between consecutive cycles
  *     (unless an xrun was reported in between)
  *   - jack_frame_time() lies within [current_frames, current_frames + 2*nframes)
+ *     (STRESS_FT_SLACK_PCT=p lowers the bound by p% of nframes: with a real
+ *     device the callback can start slightly before the DLL's filtered cycle
+ *     start, so frame time is a few frames below current_frames)
  * Exit status: 0 on success, 1 on any violation or API failure.
  *
  * Usage: stress [nclients=4] [iterations=200] [settle_ms=300]
  */
 #include <jack/jack.h>
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +34,9 @@ struct client {
     atomic_int wrapped;
     atomic_ulong cycles, bad_times, bad_continuity, bad_frame_time;
     atomic_int xrun_pending;
+    int ft_min, ft_max;  /* jack_frame_time() - current_frames, signed */
 };
+static int ft_slack_pct;
 
 static struct client cl[MAXCLIENTS];
 static atomic_ulong xruns, graph_orders;
@@ -69,9 +75,11 @@ static int process(jack_nframes_t n, void *arg)
             s->first_frames = cf;
         else if (cf < s->last_frames)
             atomic_store(&s->wrapped, 1);
-        jack_nframes_t ft = jack_frame_time(s->c);
-        if ((jack_nframes_t)(ft - cf) >= 2 * n)
+        int dev = (int32_t)(jack_frame_time(s->c) - cf);
+        if (dev < -(int)(n * ft_slack_pct / 100) || dev >= 2 * (int)n)
             atomic_fetch_add(&s->bad_frame_time, 1);
+        if (!s->have_last || dev < s->ft_min) s->ft_min = dev;
+        if (!s->have_last || dev > s->ft_max) s->ft_max = dev;
         s->last_frames = cf;
         s->have_last = 1;
     }
@@ -87,6 +95,8 @@ static int process(jack_nframes_t n, void *arg)
 int main(int argc, char **argv)
 {
     int nclients = argc > 1 ? atoi(argv[1]) : 4;
+    if (getenv("STRESS_FT_SLACK_PCT"))
+        ft_slack_pct = atoi(getenv("STRESS_FT_SLACK_PCT"));
     int iters = argc > 2 ? atoi(argv[2]) : 200;
     int settle_ms = argc > 3 ? atoi(argv[3]) : 300;
     int failures = 0;
@@ -151,8 +161,9 @@ int main(int argc, char **argv)
                       bf = atomic_load(&cl[k].bad_frame_time), cy = atomic_load(&cl[k].cycles);
         tot_cycles += cy;
         tot_bad += bt + bc + bf;
-        if (bt || bc || bf)
-            printf("client %d: cycles=%lu bad_times=%lu bad_continuity=%lu bad_frame_time=%lu\n", k, cy, bt, bc, bf);
+        if (bt || bc || bf || ft_slack_pct)
+            printf("client %d: cycles=%lu bad_times=%lu bad_continuity=%lu bad_frame_time=%lu frame_time-current_frames=[%d,%d]\n",
+                   k, cy, bt, bc, bf, cl[k].ft_min, cl[k].ft_max);
         if (cy == 0) {
             printf("client %d: FAIL no cycles\n", k);
             failures++;
