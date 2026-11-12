@@ -18,6 +18,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 */
 
 #include "JackGenericClientChannel.h"
+#include "JackThread.h"
 #include "JackClient.h"
 #include "JackGlobals.h"
 #include "JackError.h"
@@ -59,6 +60,9 @@ void JackGenericClientChannel::ServerSyncCall(JackRequest* req, JackResult* res,
         return;
     }
     
+    JackNoCancelScope no_cancel;  // the RT thread may call in here (End/Error) and be cancelled
+    std::lock_guard<std::mutex> lock(fRequestLock);
+
     if (req->Write(fRequest) < 0) {
         jack_error("Could not write request type = %ld", req->fType);
         *result = -1;
@@ -89,6 +93,9 @@ void JackGenericClientChannel::ServerAsyncCall(JackRequest* req, JackResult* res
         return;
     }
     
+    JackNoCancelScope no_cancel;  // the RT thread may call in here (End/Error) and be cancelled
+    std::lock_guard<std::mutex> lock(fRequestLock);
+
     if (req->Write(fRequest) < 0) {
         jack_error("Could not write request type = %ld", req->fType);
         *result = -1;

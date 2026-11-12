@@ -37,7 +37,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <stdlib.h>
 #include <inttypes.h>
 
-jack_time_t (*_jack_get_microseconds)(void) = 0;
+static jack_time_t jack_get_microseconds_from_system (void);
+
+/* System clock until SetClockSource() is called: jack_get_time() used to call
+ * a NULL pointer if invoked before any client was opened. */
+jack_time_t (*_jack_get_microseconds)(void) = jack_get_microseconds_from_system;
 
 #if defined(__gnu_linux__) && (defined(__i386__) || defined(__x86_64__))
 #define HPET_SUPPORT

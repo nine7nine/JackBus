@@ -21,6 +21,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #define __JackGenericClientChannel__
 
 #include "JackChannel.h"
+#include <mutex>
 
 namespace Jack
 {
@@ -38,6 +39,11 @@ class JackGenericClientChannel : public detail::JackClientChannelInterface
     protected:
 
         detail::JackClientRequestInterface* fRequest;
+
+        /*! Serializes request/reply exchanges on fRequest: application threads
+            calling the API concurrently could otherwise read each other's
+            replies (and desynchronize the stream, replies differ in size). */
+        std::mutex fRequestLock;
 
         void ServerSyncCall(JackRequest* req, JackResult* res, int* result);
         void ServerAsyncCall(JackRequest* req, JackResult* res, int* result);

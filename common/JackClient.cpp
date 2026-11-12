@@ -77,6 +77,11 @@ JackClient::JackClient(JackSynchro* table):fThread(this)
     fPortRenameArg = NULL;
     fSyncArg = NULL;
     fTimebaseArg = NULL;
+    fTransportCallbackSeq = 0;
+    fRTSync = NULL;
+    fRTSyncArg = NULL;
+    fRTTimebase = NULL;
+    fRTTimebaseArg = NULL;
     fThreadFunArg = NULL;
     fSessionArg = NULL;
     fLatencyArg = NULL;
@@ -345,12 +350,21 @@ int JackClient::HandleLatencyCallback(int status)
     jack_latency_callback_mode_t mode = (status == 0) ? JackCaptureLatency : JackPlaybackLatency;
 	jack_latency_range_t latency = { UINT32_MAX, 0 };
 
+    /* Runs on the notification thread while application threads may
+     * register/unregister ports: work on a snapshot of the port list. */
+    list<jack_port_id_t> ports;
+    {
+        JackNoCancelScope no_cancel;  // the notification thread is cancelled on close
+        std::lock_guard<std::mutex> lock(fPortListLock);
+        ports = fPortList;
+    }
+
 	/* first setup all latency values of the ports.
 	 * this is based on the connections of the ports.
 	 */
     list<jack_port_id_t>::iterator it;
 
-	for (it = fPortList.begin(); it != fPortList.end(); it++) {
+	for (it = ports.begin(); it != ports.end(); it++) {
         JackPort* port = GetGraphManager()->GetPort(*it);
         if ((port->GetFlags() & JackPortIsOutput) && (mode == JackPlaybackLatency)) {
             GetGraphManager()->RecalculateLatency(*it, mode);
@@ -369,7 +383,7 @@ int JackClient::HandleLatencyCallback(int status)
 		if (mode == JackPlaybackLatency) {
 			/* iterate over all OutputPorts, to find maximum playback latency
 			 */
-			for (it = fPortList.begin(); it != fPortList.end(); it++) {
+			for (it = ports.begin(); it != ports.end(); it++) {
                 JackPort* port = GetGraphManager()->GetPort(*it);
                 if (port->GetFlags() & JackPortIsOutput) {
 					jack_latency_range_t other_latency;
@@ -389,7 +403,7 @@ int JackClient::HandleLatencyCallback(int status)
 
 			/* now set the found latency on all input ports
 			 */
-			for (it = fPortList.begin(); it != fPortList.end(); it++) {
+			for (it = ports.begin(); it != ports.end(); it++) {
                 JackPort* port = GetGraphManager()->GetPort(*it);
                 if (port->GetFlags() & JackPortIsInput) {
 					port->SetLatencyRange(mode, &latency);
@@ -399,7 +413,7 @@ int JackClient::HandleLatencyCallback(int status)
 		if (mode == JackCaptureLatency) {
 			/* iterate over all InputPorts, to find maximum playback latency
 			 */
-			for (it = fPortList.begin(); it != fPortList.end(); it++) {
+			for (it = ports.begin(); it != ports.end(); it++) {
                 JackPort* port = GetGraphManager()->GetPort(*it);
 				if (port->GetFlags() & JackPortIsInput) {
 					jack_latency_range_t other_latency;
@@ -419,7 +433,7 @@ int JackClient::HandleLatencyCallback(int status)
 
 			/* now set the found latency on all output ports
 			 */
-			for (it = fPortList.begin(); it != fPortList.end(); it++) {
+			for (it = ports.begin(); it != ports.end(); it++) {
                 JackPort* port = GetGraphManager()->GetPort(*it);
                 if (port->GetFlags() & JackPortIsOutput) {
 					port->SetLatencyRange(mode, &latency);
@@ -563,6 +577,22 @@ int JackClient::StartThread()
 {
     if (fThread.StartSync() < 0) {
         jack_error("Start thread error");
+        return -1;
+    }
+
+    /*
+    StartSync() returns as soon as the thread is "initing", i.e. before
+    Init() ran the buffer-size and thread-init callbacks and set up realtime
+    scheduling. Wait for Init() to complete, so the client is not inserted in
+    the graph (activated in the server) while still doing that: the first
+    cycle would be late (an xrun on every activation), and the buffer-size
+    callback could run concurrently with one from the notification thread.
+    */
+    for (int i = 0; i < 10000 && fThread.GetStatus() == JackThread::kIniting; i++) {
+        JackSleep(1000);
+    }
+    if (fThread.GetStatus() != JackThread::kRunning) {
+        jack_error("JackClient::StartThread: thread initialization did not complete");
         return -1;
     }
 
@@ -714,7 +744,10 @@ int JackClient::PortRegister(const char* port_name, const char* port_type, unsig
 
     if (result == 0) {
         jack_log("JackClient::PortRegister ref = %ld name = %s type = %s port_index = %ld", GetClientControl()->fRefNum, port_full_name_str.c_str(), port_type, port_index);
-        fPortList.push_back(port_index);
+        {
+            std::lock_guard<std::mutex> lock(fPortListLock);
+            fPortList.push_back(port_index);
+        }
         return port_index;
     } else {
         return 0;
@@ -724,10 +757,17 @@ int JackClient::PortRegister(const char* port_name, const char* port_type, unsig
 int JackClient::PortUnRegister(jack_port_id_t port_index)
 {
     jack_log("JackClient::PortUnRegister port_index = %ld", port_index);
-    list<jack_port_id_t>::iterator it = find(fPortList.begin(), fPortList.end(), port_index);
+    bool found = false;
+    {
+        std::lock_guard<std::mutex> lock(fPortListLock);
+        list<jack_port_id_t>::iterator it = find(fPortList.begin(), fPortList.end(), port_index);
+        if (it != fPortList.end()) {
+            fPortList.erase(it);
+            found = true;
+        }
+    }
 
-    if (it != fPortList.end()) {
-        fPortList.erase(it);
+    if (found) {
         int result = -1;
         fChannel->PortUnRegister(GetClientControl()->fRefNum, port_index, &result);
         return result;
@@ -841,14 +881,54 @@ inline int JackClient::ActivateAux()
     }
 }
 
+// Seqlock writer side (see JackClient.h); callers hold fTransportCallbackLock.
+void JackClient::BeginTransportCallbackWrite()
+{
+    unsigned int seq = __atomic_load_n(&fTransportCallbackSeq, __ATOMIC_RELAXED);
+    __atomic_store_n(&fTransportCallbackSeq, seq + 1, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+}
+
+void JackClient::EndTransportCallbackWrite()
+{
+    unsigned int seq = __atomic_load_n(&fTransportCallbackSeq, __ATOMIC_RELAXED);
+    __atomic_store_n(&fTransportCallbackSeq, seq + 1, __ATOMIC_RELEASE);
+}
+
+// RT thread: take a consistent copy of the callback pairs, or keep the previous one.
+inline void JackClient::SnapshotTransportCallbacks()
+{
+    for (int attempt = 0; attempt < 3; attempt++) {
+        unsigned int seq1 = __atomic_load_n(&fTransportCallbackSeq, __ATOMIC_ACQUIRE);
+        if (seq1 & 1) {
+            continue;
+        }
+        JackSyncCallback sync = __atomic_load_n(&fSync, __ATOMIC_RELAXED);
+        void* sync_arg = __atomic_load_n(&fSyncArg, __ATOMIC_RELAXED);
+        JackTimebaseCallback timebase = __atomic_load_n(&fTimebase, __ATOMIC_RELAXED);
+        void* timebase_arg = __atomic_load_n(&fTimebaseArg, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        if (__atomic_load_n(&fTransportCallbackSeq, __ATOMIC_RELAXED) == seq1) {
+            fRTSync = sync;
+            fRTSyncArg = sync_arg;
+            fRTTimebase = timebase;
+            fRTTimebaseArg = timebase_arg;
+            return;
+        }
+    }
+}
+
 int JackClient::ReleaseTimebase()
 {
     int result = -1;
     fChannel->ReleaseTimebase(GetClientControl()->fRefNum, &result);
     if (result == 0) {
         GetClientControl()->fTransportTimebase = false;
-        fTimebase = NULL;
-        fTimebaseArg = NULL;
+        std::lock_guard<std::mutex> lock(fTransportCallbackLock);
+        BeginTransportCallbackWrite();
+        __atomic_store_n(&fTimebase, (JackTimebaseCallback)NULL, __ATOMIC_RELAXED);
+        __atomic_store_n(&fTimebaseArg, (void*)NULL, __ATOMIC_RELAXED);
+        EndTransportCallbackWrite();
     }
     return result;
 }
@@ -856,9 +936,18 @@ int JackClient::ReleaseTimebase()
 /* Call the server if the client is active, otherwise keeps the arguments */
 int JackClient::SetSyncCallback(JackSyncCallback sync_callback, void* arg)
 {
-    GetClientControl()->fTransportSync = (fSync != NULL);
-    fSyncArg = arg;
-    fSync = sync_callback;
+    {
+        std::lock_guard<std::mutex> lock(fTransportCallbackLock);
+        BeginTransportCallbackWrite();
+        __atomic_store_n(&fSyncArg, arg, __ATOMIC_RELAXED);
+        __atomic_store_n(&fSync, sync_callback, __ATOMIC_RELAXED);
+        EndTransportCallbackWrite();
+    }
+    /* transport.h: "invoked at the first available opportunity after its
+     * registration is complete. If the client is currently active this will
+     * be the following process cycle". This used to test the *previous*
+     * callback, so a newly set one waited for the next transport change. */
+    GetClientControl()->fTransportSync = (sync_callback != NULL);
     return ActivateAux();
 }
 
@@ -867,14 +956,19 @@ int JackClient::SetTimebaseCallback(int conditional, JackTimebaseCallback timeba
     int result = -1;
     fChannel->SetTimebaseCallback(GetClientControl()->fRefNum, conditional, &result);
 
+    std::unique_lock<std::mutex> lock(fTransportCallbackLock);
+    BeginTransportCallbackWrite();
     if (result == 0) {
+        __atomic_store_n(&fTimebaseArg, arg, __ATOMIC_RELAXED);
+        __atomic_store_n(&fTimebase, timebase_callback, __ATOMIC_RELAXED);
+        EndTransportCallbackWrite();
+        lock.unlock();
         GetClientControl()->fTransportTimebase = true;
-        fTimebase = timebase_callback;
-        fTimebaseArg = arg;
         return ActivateAux();
     } else {
-        fTimebase = NULL;
-        fTimebaseArg = NULL;
+        __atomic_store_n(&fTimebase, (JackTimebaseCallback)NULL, __ATOMIC_RELAXED);
+        __atomic_store_n(&fTimebaseArg, (void*)NULL, __ATOMIC_RELAXED);
+        EndTransportCallbackWrite();
         return result;
     }
 }
@@ -940,14 +1034,17 @@ void JackClient::CallSyncCallback()
 
 inline void JackClient::CallSyncCallbackAux()
 {
+    // Once per cycle (CycleWaitAux), before the sync and timebase callbacks.
+    SnapshotTransportCallbacks();
+
     if (GetClientControl()->fTransportSync) {
 
         JackTransportEngine& transport = GetEngineControl()->fTransport;
         jack_position_t* cur_pos = transport.ReadCurrentState();
         jack_transport_state_t transport_state = transport.GetState();
 
-        if (fSync != NULL) {
-            if (fSync(transport_state, cur_pos, fSyncArg)) {
+        if (fRTSync != NULL) {
+            if (fRTSync(transport_state, cur_pos, fRTSyncArg)) {
                 GetClientControl()->fTransportState = JackTransportRolling;
                 GetClientControl()->fTransportSync = false;
             }
@@ -971,16 +1068,16 @@ inline void JackClient::CallTimebaseCallbackAux()
 
     transport.GetTimebaseMaster(master, unused);
 
-    if (GetClientControl()->fRefNum == master && fTimebase) { // Client *is* timebase...
+    if (GetClientControl()->fRefNum == master && fRTTimebase) { // Client *is* timebase...
 
         jack_transport_state_t transport_state = transport.GetState();
         jack_position_t* cur_pos = transport.WriteNextStateStart(1);
 
         if (GetClientControl()->fTransportTimebase) {
-            fTimebase(transport_state, GetEngineControl()->fBufferSize, cur_pos, true, fTimebaseArg);
+            fRTTimebase(transport_state, GetEngineControl()->fBufferSize, cur_pos, true, fRTTimebaseArg);
             GetClientControl()->fTransportTimebase = false; // Callback is called only once with "new_pos" = true
         } else if (transport_state == JackTransportRolling) {
-            fTimebase(transport_state, GetEngineControl()->fBufferSize, cur_pos, false, fTimebaseArg);
+            fRTTimebase(transport_state, GetEngineControl()->fBufferSize, cur_pos, false, fRTTimebaseArg);
         }
 
         transport.WriteNextStateStop(1);

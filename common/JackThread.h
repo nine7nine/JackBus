@@ -28,6 +28,24 @@ namespace Jack
 {
 
 /*!
+ \brief Disables cancellation of the calling thread for the lifetime of the object.
+
+ JACK threads are cancelled asynchronously (JackThreadInterface default). A
+ thread cancelled while holding a mutex leaves it locked forever, so declare
+ one of these *before* taking a lock that such a thread can hold; it is
+ destroyed after the lock is released, and a pending cancel then takes effect.
+ */
+class JackNoCancelScope
+{
+#ifndef WIN32
+        int fOldState;
+    public:
+        JackNoCancelScope() { pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &fOldState); }
+        ~JackNoCancelScope() { pthread_setcancelstate(fOldState, NULL); }
+#endif
+};
+
+/*!
  \brief The base class for runnable objects, that have an <B> Init </B> and <B> Execute </B> method to be called in a thread.
  */
 

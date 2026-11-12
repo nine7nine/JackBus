@@ -31,6 +31,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackMetadata.h"
 #include "varargs.h"
 #include <list>
+#include <mutex>
 
 namespace Jack
 {
@@ -97,6 +98,27 @@ class SERVER_EXPORT JackClient : public JackClientInterface, public JackRunnable
         detail::JackClientChannelInterface* fChannel;
         JackSynchro* fSynchroTable;
         std::list<jack_port_id_t> fPortList;
+        std::mutex fPortListLock;  /*! fPortList: app threads vs notification thread */
+
+        /*!
+        Sync and timebase callbacks may be changed by application threads while
+        the RT thread uses them (jack_set_sync_callback, jack_set_timebase_callback,
+        jack_release_timebase on an active client). Writers update the
+        function/argument pairs inside a seqlock (fTransportCallbackSeq,
+        serialized by fTransportCallbackLock); the RT thread takes a consistent
+        copy (fRT*) each cycle, keeping its previous copy if a write is in
+        progress, so it never spins and never calls a half-updated pair.
+        */
+        unsigned int fTransportCallbackSeq;
+        std::mutex fTransportCallbackLock;
+        JackSyncCallback fRTSync;
+        void* fRTSyncArg;
+        JackTimebaseCallback fRTTimebase;
+        void* fRTTimebaseArg;
+
+        void BeginTransportCallbackWrite();
+        void EndTransportCallbackWrite();
+        inline void SnapshotTransportCallbacks();
 
         JackSessionReply fSessionReply;
 
