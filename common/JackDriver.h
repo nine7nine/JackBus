@@ -161,6 +161,7 @@ class SERVER_EXPORT JackDriver : public JackDriverClientInterface
         jack_port_id_t fCapturePortList[DRIVER_PORT_NUM];
         jack_port_id_t fPlaybackPortList[DRIVER_PORT_NUM];
         jack_port_id_t fMonitorPortList[DRIVER_PORT_NUM];
+        bool fCapturePortWritten[DRIVER_PORT_NUM];  // capture buffer holds samples from an earlier cycle
 
         driver_connections_list_t fConnections;		// Connections list
 

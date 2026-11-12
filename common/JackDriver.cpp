@@ -53,6 +53,7 @@ JackDriver::JackDriver(const char* name, const char* alias, JackLockedEngine* en
     fDelayedUsecs = 0.f;
     fIsMaster = true;
     fIsRunning = false;
+    memset(fCapturePortWritten, 0, sizeof(fCapturePortWritten));
 }
 
 JackDriver::~JackDriver()

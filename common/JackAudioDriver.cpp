@@ -85,6 +85,24 @@ int JackAudioDriver::Open(jack_nframes_t buffer_size,
         monitor, capture_driver_name, playback_driver_name, capture_latency, playback_latency);
 }
 
+bool JackAudioDriver::IsCaptureChannelNeeded(int chn, bool graph_change_pending)
+{
+    if (graph_change_pending || fGraphManager->GetConnectionsNum(fCapturePortList[chn]) > 0) {
+        fCapturePortWritten[chn] = true;
+        return true;
+    }
+    return false;
+}
+
+void JackAudioDriver::SkipCaptureChannel(int chn, jack_nframes_t nframes)
+{
+    if (fCapturePortWritten[chn]) {
+        jack_default_audio_sample_t* buf = (jack_default_audio_sample_t*)fGraphManager->GetBuffer(fCapturePortList[chn], nframes);
+        memset(buf, 0, nframes * sizeof(jack_default_audio_sample_t));
+        fCapturePortWritten[chn] = false;
+    }
+}
+
 void JackAudioDriver::UpdateLatencies()
 {
     jack_latency_range_t input_range;

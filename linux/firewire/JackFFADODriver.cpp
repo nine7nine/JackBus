@@ -70,9 +70,13 @@ JackFFADODriver::ffado_driver_read (ffado_driver_t * driver, jack_nframes_t nfra
     jack_default_audio_sample_t* buf = NULL;
 
     printEnter();
+    bool graph_change_pending = fGraphManager->IsPendingChange();
     for (chn = 0; chn < driver->capture_nchannels; chn++) {
         // if nothing connected, don't process
-        if (fGraphManager->GetConnectionsNum(fCapturePortList[chn]) == 0) {
+        if (!IsCaptureChannelNeeded(chn, graph_change_pending)) {
+            if (driver->capture_channels[chn].stream_type == ffado_stream_type_audio) {
+                SkipCaptureChannel(chn, nframes);
+            }
             buf = (jack_default_audio_sample_t*)driver->scratchbuffer;
             // we always have to specify a valid buffer
             ffado_streaming_set_capture_stream_buffer(driver->dev, chn, (char *)(buf));

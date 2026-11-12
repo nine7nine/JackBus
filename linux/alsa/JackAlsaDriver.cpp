@@ -472,10 +472,13 @@ int JackAlsaDriver::Write()
 
 void JackAlsaDriver::ReadInputAux(jack_nframes_t orig_nframes, snd_pcm_sframes_t contiguous, snd_pcm_sframes_t nread)
 {
+    bool graph_change_pending = fGraphManager->IsPendingChange();
     for (int chn = 0; chn < fCaptureChannels; chn++) {
-        if (fGraphManager->GetConnectionsNum(fCapturePortList[chn]) > 0) {
+        if (IsCaptureChannelNeeded(chn, graph_change_pending)) {
             jack_default_audio_sample_t* buf = (jack_default_audio_sample_t*)fGraphManager->GetBuffer(fCapturePortList[chn], orig_nframes);
             alsa_driver_read_from_channel((alsa_driver_t *)fDriver, chn, buf + nread, contiguous);
+        } else if (nread == 0) {
+            SkipCaptureChannel(chn, orig_nframes);
         }
     }
 }

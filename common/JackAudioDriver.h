@@ -51,6 +51,17 @@ class SERVER_EXPORT JackAudioDriver : public JackDriver
         void HandleLatencyCallback(int status);
         virtual void UpdateLatencies();
 
+        /*
+        Capture buffers of ports without connections are not filled. The
+        driver reads before the engine switches to a pending graph, so a
+        port connected at this cycle's switch would expose stale samples
+        from the last time it was used. While a graph change is pending,
+        fill every channel (IsCaptureChannelNeeded); a skipped buffer that
+        still holds old samples is zeroed once (SkipCaptureChannel).
+        */
+        bool IsCaptureChannelNeeded(int chn, bool graph_change_pending);
+        void SkipCaptureChannel(int chn, jack_nframes_t nframes);
+
         int ProcessAsync();
         void ProcessGraphAsync();
         void ProcessGraphAsyncMaster();
