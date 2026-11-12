@@ -31,12 +31,21 @@ if [ "${NSPA_HW_INNER:-0}" != 1 ]; then
     cc -O2 -Wall -I"$root/common" -o "$out/hwutil" "$here/hwutil.c" -L"$fl" -ljack || exit 1
     cc -O2 -Wall -o "$out/seq_ports" "$here/seq_ports.c" -lasound || exit 1
 
+    # All playback outputs of the card stay at zero and muted for the whole
+    # run (xruns and server start/stop click): save the mixer state, mute
+    # every playback control, restore the saved state at the end. Capture
+    # controls are left alone (the capture test needs the input).
+    card="${dev#hw:}"; card="${card%%,*}"
+    mixer_state="$out/mixer.state"
+    alsactl -f "$mixer_state" store "$card" || { echo "cannot save the mixer state of $card, not running" >&2; exit 1; }
+    playback_controls() {
+        amixer -c "$card" scontrols | sed -n "s/^Simple mixer control '\(.*\)',\([0-9]*\)$/\1,\2/p" |
+        while IFS= read -r ctl; do
+            caps=$(amixer -c "$card" sget "$ctl" | sed -n 's/^ *Capabilities: //p')
+            case " $caps " in *" pvolume"*|*" pswitch"*) echo "$ctl" ;; esac
+        done
+    }
     was_running=0
-    if command -v jack_control >/dev/null && jack_control status 2>/dev/null | grep -q '^started'; then
-        was_running=1
-        echo "stopping the running jackdbus server (jack_control stop)"
-        jack_control stop >/dev/null || { echo "jack_control stop failed" >&2; exit 1; }
-    fi
     restore() {
         if [ $was_running = 1 ]; then
             echo "restarting the jackdbus server (jack_control start)"
@@ -44,9 +53,31 @@ if [ "${NSPA_HW_INNER:-0}" != 1 ]; then
             sleep 1
             jack_control status | tail -1
         fi
+        alsactl -f "$mixer_state" restore "$card" && echo "mixer state of $card restored"
     }
     trap restore EXIT
     trap 'exit 130' INT TERM
+    playback_controls | while IFS= read -r ctl; do
+        caps=$(amixer -c "$card" sget "$ctl" | sed -n 's/^ *Capabilities: //p')
+        case " $caps " in *" pvolume"*) amixer -q -c "$card" sset "$ctl" 0% ;; esac
+        case " $caps " in *" pswitch"*) amixer -q -c "$card" sset "$ctl" mute ;; esac
+    done
+    # verify before anything opens the device
+    loud=$(playback_controls | while IFS= read -r ctl; do
+        amixer -c "$card" sget "$ctl" | grep -E 'Playback' | grep -vE 'Playback channels|Limits' |
+            sed 's/Capture.*//' | grep -qE '\[on\]|Playback [1-9]' && echo "$ctl"
+    done)
+    if [ -n "$loud" ]; then
+        echo "could not mute the playback controls of $card: $loud" >&2
+        exit 1
+    fi
+    echo "playback outputs of $card muted: $(playback_controls | tr '\n' ' ')"
+
+    if command -v jack_control >/dev/null && jack_control status 2>/dev/null | grep -q '^started'; then
+        was_running=1
+        echo "stopping the running jackdbus server (jack_control stop)"
+        jack_control stop >/dev/null || { echo "jack_control stop failed" >&2; exit 1; }
+    fi
 
     uid=$(id -u) gid=$(id -g)
     # own PID namespace: every test process dies with the run
