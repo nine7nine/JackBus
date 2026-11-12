@@ -22,6 +22,17 @@ out = 'build'
 lib32 = 'lib32'
 
 
+def check_berkeley_db(conf):
+    # Plain <db.h>/libdb first; then the versioned layout used by Arch Linux
+    # (db5.3: /usr/include/db5.3/db.h + libdb-5.3), so no distro patch is needed.
+    try:
+        conf.check(header_name='db.h', uselib_store='DB', define_name='HAVE_DB_H')
+        conf.check(lib='db', uselib_store='DB')
+    except conf.errors.ConfigurationError:
+        conf.check(header_name='db.h', includes=['/usr/include/db5.3'], uselib_store='DB', define_name='HAVE_DB_H')
+        conf.check(lib='db-5.3', uselib_store='DB')
+
+
 def display_feature(conf, msg, build):
     if build:
         conf.msg(msg, 'yes', color='GREEN')
@@ -199,8 +210,7 @@ def options(opt):
     db = opt.add_auto_option(
             'db',
             help='Use Berkeley DB (metadata)')
-    db.check(header_name='db.h')
-    db.check(lib='db')
+    db.add_function(check_berkeley_db)
 
     # dbus options
     opt.recurse('dbus')
