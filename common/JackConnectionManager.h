@@ -26,6 +26,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackCompilerDeps.h"
 #include <vector>
 #include <assert.h>
+#include <string.h>
 
 namespace Jack
 {
@@ -117,6 +118,23 @@ class JackFixedArray
             return fCounter;
         }
 
+        /*!
+        \brief Make this array equal to src, touching only the used part.
+
+        Items are always compact in [0, fCounter) followed by EMPTY up to SIZE
+        (AddItem fills the first EMPTY slot, RemoveItem shifts left and
+        re-terminates; RT readers iterate until EMPTY). So copying src's first
+        max(src.fCounter, fCounter) + 1 entries overwrites every stale item
+        here with src's items or EMPTY, and everything beyond is EMPTY in both.
+        */
+        void CopyFrom(const JackFixedArray& src)
+        {
+            uint32_t count = (src.fCounter > fCounter) ? src.fCounter : fCounter;
+            uint32_t entries = (count < (uint32_t)SIZE) ? count + 1 : (uint32_t)SIZE;
+            memcpy(fTable, src.fTable, entries * sizeof(jack_int_t));
+            fCounter = src.fCounter;
+        }
+
 } POST_PACKED_STRUCTURE;
 
 /*!
@@ -152,6 +170,12 @@ class JackFixedArray1 : public JackFixedArray<SIZE>
                 fUsed = true;
                 return true;
             }
+        }
+
+        void CopyFrom(const JackFixedArray1& src)
+        {
+            JackFixedArray<SIZE>::CopyFrom(src);
+            fUsed = src.fUsed;
         }
 
 } POST_PACKED_STRUCTURE;
@@ -427,6 +451,16 @@ class SERVER_EXPORT JackConnectionManager
         JackConnectionManager();
         ~JackConnectionManager();
 
+        /*!
+        \brief Make this state equal to src (used by JackAtomicState when a
+        write starts on the next state). Copies the used part of each row
+        instead of the whole ~19 MB structure (Arch build: 4096 port rows of
+        4100 bytes plus 2 x 256 client rows), which on every graph change
+        streamed through and evicted the last-level cache shared with the
+        realtime threads.
+        */
+        void CopyFrom(const JackConnectionManager& src);
+
         // Connections management
         int Connect(jack_port_id_t port_src, jack_port_id_t port_dst);
         int Disconnect(jack_port_id_t port_src, jack_port_id_t port_dst);
@@ -488,6 +522,12 @@ class SERVER_EXPORT JackConnectionManager
         void TopologicalSort(std::vector<jack_int_t>& sorted);
 
 } POST_PACKED_STRUCTURE;
+
+/* JackAtomicState<JackConnectionManager>: copy through CopyFrom(), see above. */
+inline void JackStateCopy(JackConnectionManager& dst, const JackConnectionManager& src)
+{
+    dst.CopyFrom(src);
+}
 
 } // end of namespace
 

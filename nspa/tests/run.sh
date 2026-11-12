@@ -29,6 +29,8 @@ cc -march=x86-64 -mtune=generic -O2 -I"$root/common" -I"$root/common/jack" -o "$
 cc -O2 -Wall -I"$root/common" -o "$out/threads" "$here/threads.c" -L"$fork_lib" -ljack -lpthread || exit 1
 c++ -std=gnu++11 -O2 -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
     -o "$out/pi_mutex" "$here/pi_mutex.cpp" -L"$fork_lib" -ljackserver || exit 1
+c++ -std=gnu++11 -O2 -w -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" -I"$JACK_BUILD" \
+    -include "$JACK_BUILD/config.h" -o "$out/connection_copy" "$here/connection_copy.cpp" -L"$fork_lib" -ljackserver || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -167,6 +169,8 @@ if LD_LIBRARY_PATH="$fork_lib" "$out/midi_wrap" >"$out/midi_wrap.log" 2>&1; then
 else echo "FAIL midi-wrap:"; sed 's/^/  /' "$out/midi_wrap.log"; fail=1; fi
 if LD_LIBRARY_PATH="$fork_lib" "$out/pi_mutex" >"$out/pi_mutex.log" 2>&1; then echo "PASS pi-mutex: $(tail -1 "$out/pi_mutex.log" | sed 's/^PASS: //')"
 else echo "FAIL pi-mutex: $(tail -1 "$out/pi_mutex.log")"; fail=1; fi
+if LD_LIBRARY_PATH="$fork_lib" "$out/connection_copy" >"$out/connection_copy.log" 2>/dev/null; then echo "PASS connection-copy: $(tail -1 "$out/connection_copy.log" | sed 's/^PASS: //')"
+else echo "FAIL connection-copy: $(tail -1 "$out/connection_copy.log")"; fail=1; fi
 if "$out/memops_consistency" >"$out/memops.log" 2>&1; then echo "PASS memops: $(tail -1 "$out/memops.log")"
 else echo "FAIL memops:"; sed 's/^/  /' "$out/memops.log" | tail -6; fail=1; fi
 

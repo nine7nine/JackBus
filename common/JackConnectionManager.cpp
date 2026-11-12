@@ -52,6 +52,21 @@ JackConnectionManager::JackConnectionManager()
 JackConnectionManager::~JackConnectionManager()
 {}
 
+void JackConnectionManager::CopyFrom(const JackConnectionManager& src)
+{
+    for (int i = 0; i < PORT_NUM_MAX; i++) {
+        fConnection[i].CopyFrom(src.fConnection[i]);
+    }
+    for (int i = 0; i < CLIENT_NUM; i++) {
+        fInputPort[i].CopyFrom(src.fInputPort[i]);
+        fOutputPort[i].CopyFrom(src.fOutputPort[i]);
+    }
+    // small or dense: copy whole
+    memcpy((void*)&fConnectionRef, (const void*)&src.fConnectionRef, sizeof(fConnectionRef));
+    memcpy((void*)fInputCounter, (const void*)src.fInputCounter, sizeof(fInputCounter));
+    memcpy((void*)&fLoopFeedback, (const void*)&src.fLoopFeedback, sizeof(fLoopFeedback));
+}
+
 //--------------
 // Internal API
 //--------------

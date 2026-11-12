@@ -29,6 +29,17 @@ namespace Jack
 {
 
 /*!
+\brief Copies a state when a write starts on the next one. Overload it (found
+by argument-dependent lookup) for large states that can be copied more
+cheaply, e.g. JackConnectionManager.
+*/
+template <class T>
+inline void JackStateCopy(T& dst, const T& src)
+{
+    memcpy(&dst, &src, sizeof(T));
+}
+
+/*!
 \brief Counter for CAS
 */
 
@@ -113,7 +124,7 @@ class JackAtomicState
                 NextIndex(new_val) = CurIndex(new_val); // Invalidate next index
             } while (!CAS(Counter(old_val), Counter(new_val), (UInt32*)&fCounter));
             if (need_copy)
-                memcpy(&fState[next_index], &fState[cur_index], sizeof(T));
+                JackStateCopy(fState[next_index], fState[cur_index]);
             return next_index;
         }
 
