@@ -175,9 +175,19 @@ bool JackLinuxFutex::Allocate(const char* name, const char* server_name, int val
     BuildName(name, server_name, fName, sizeof(fName));
     jack_log("JackLinuxFutex::Allocate name = %s val = %ld", fName, value);
 
-    if ((fSharedMem = shm_open(fName, O_CREAT | O_RDWR, 0777)) < 0) {
-        jack_error("Allocate: can't check in named futex name = %s err = %s", fName, strerror(errno));
-        return false;
+    /* A file of the same name can be left over from an earlier server that
+       stopped (or crashed) while this client name was connected, and a hung
+       process of that client may still have it mapped and be waiting on it.
+       Reusing it would let that process take this client's wakeups (the new
+       client then misses cycles: "was not finished, state = Triggered").
+       Start from a new file; only reuse one that cannot be removed. */
+    shm_unlink(fName);
+    if ((fSharedMem = shm_open(fName, O_CREAT | O_EXCL | O_RDWR, 0777)) < 0) {
+        if (errno != EEXIST || (fSharedMem = shm_open(fName, O_CREAT | O_RDWR, 0777)) < 0) {
+            jack_error("Allocate: can't check in named futex name = %s err = %s", fName, strerror(errno));
+            return false;
+        }
+        jack_error("Allocate: reusing named futex %s left by an earlier server", fName);
     }
 
     if (ftruncate(fSharedMem, sizeof(FutexData)) != 0) {

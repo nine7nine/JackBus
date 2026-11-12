@@ -98,6 +98,10 @@ int JackEngine::Close()
         } else if (JackExternalClient* external_client = dynamic_cast<JackExternalClient*>(fClientTable[i])) {
             jack_log("JackEngine::Close external client = %s", external_client->GetClientControl()->fName);
             external_client->Close();
+            // the client process may outlive the server: remove its futex
+            // name, so that it is not left in /dev/shm and found again by the
+            // next server
+            fSynchroTable[i].Destroy();
             fClientTable[i] = NULL;
             delete external_client;
         }

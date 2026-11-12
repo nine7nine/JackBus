@@ -37,6 +37,7 @@ c++ -std=gnu++11 -O2 $tcf -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -
 c++ -std=gnu++11 -O2 $tcf -w -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" -I"$JACK_BUILD" \
     -include "$JACK_BUILD/config.h" -o "$out/connection_copy" "$here/connection_copy.cpp" -L"$fork_lib" -ljackserver || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/rt_faults" "$here/rt_faults.c" -L"$fork_lib" -ljack || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/stale_client" "$here/stale_client.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -179,6 +180,34 @@ wrap_case() {
     else echo "FAIL $name (rc=$rc): $(tail -1 "$out/$name.client.log")"; fail=1; fi
 }
 
+# A client process that outlives its server (here: hung, ignoring the
+# shutdown) must not disturb a client of the same name on the next server.
+# stale_case <server> <TERM|KILL> <gating:1|0>
+stale_case() {
+    name=stale-client_$1-server_$2; server=$1; sig=$2; gating=$3
+    skip_system "$name" "$server" fork && return
+    start_server "$server" "$out/$name.server1.log" || { echo "FAIL $name: server"; fail=1; return; }
+    LD_LIBRARY_PATH="$fork_lib" "$out/stale_client" hang >/dev/null 2>&1 &
+    hang=$!
+    sleep 1
+    kill -$sig "$SERVER_PID"; wait "$SERVER_PID" 2>/dev/null
+    rc=0
+    if [ "$sig" = TERM ] && [ "$server" = fork ] && ls /dev/shm | grep -q 'jack_sem.*_stale$'; then
+        echo "  the stopped server left the client's futex file in /dev/shm"; rc=1
+    fi
+    if start_server "$server" "$out/$name.server2.log"; then
+        LD_LIBRARY_PATH="$fork_lib" timeout 30 "$out/stale_client" check 2 >"$out/$name.client.log" 2>&1 || rc=1
+        stop_server || rc=1
+    else
+        echo "  second server did not start"; rc=1
+    fi
+    kill -KILL $hang; wait $hang 2>/dev/null
+    rm -f /dev/shm/jack_sem.*_stale
+    if [ $rc -eq 0 ]; then echo "PASS $name: $(tail -1 "$out/$name.client.log")"
+    elif [ "$gating" = 1 ]; then echo "FAIL $name: $(tail -1 "$out/$name.client.log")"; fail=1
+    else echo "INFO $name (expected to fail on unfixed servers): $(tail -1 "$out/$name.client.log")"; fi
+}
+
 run_case fork-server_fork-lib       fork   "$out/stress64" "$fork_lib"
 run_case fork-server_system-lib     fork   "$out/stress64" system
 run_case system-server_fork-lib     system "$out/stress64" "$fork_lib"
@@ -190,6 +219,9 @@ if [ -f "$lib32/libjack.so" ] && cc -m32 -O2 -Wall -I"$root/common" -o "$out/str
     run_case system-server_fork-lib32   system "$out/stress32fork" "$lib32"
 fi
 two_servers
+stale_case fork   TERM 1
+stale_case fork   KILL 1
+stale_case system TERM 0
 xrun_timer_case xrun-timer_fork-server       fork   "$fork_lib" 1
 xrun_timer_case xrun-timer_system-server     system system      0
 wrap_case
