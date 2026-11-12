@@ -24,8 +24,12 @@ cc -O2 -Wall -I"$root/common" -o "$out/stress64" "$here/stress.c" -L"$fork_lib" 
 cc -O2 -Wall -I"$root/common" -o "$out/xrun_timer" "$here/xrun_timer.c" -L"$fork_lib" -ljack -lpthread || exit 1
 c++ -std=gnu++11 -O2 -Wall -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
     -o "$out/midi_wrap" "$here/midi_wrap.cpp" -L"$fork_lib" -ljackserver || exit 1
-cc -march=x86-64 -mtune=generic -O2 -I"$root/common" -I"$root/common/jack" -o "$out/memops_consistency" \
-    "$here/memops_consistency.c" "$root/common/memops.c" -lm || exit 1
+# reference: memops.c's portable C paths (no SSE), symbols renamed ref_*
+cc -march=x86-64 -mtune=generic -O2 -U__SSE2__ -U__SSE4_1__ -I"$root/common" -I"$root/common/jack" \
+    -c -o "$out/memops_ref.o" "$root/common/memops.c" || exit 1
+objcopy $(nm --defined-only -g "$out/memops_ref.o" | awk '{print "--redefine-sym " $3 "=ref_" $3}') "$out/memops_ref.o" || exit 1
+cc -march=x86-64 -mtune=generic -O2 -DWITH_REFERENCE -I"$root/common" -I"$root/common/jack" -o "$out/memops_consistency" \
+    "$here/memops_consistency.c" "$root/common/memops.c" "$out/memops_ref.o" -lm || exit 1
 cc -O2 -Wall -I"$root/common" -o "$out/threads" "$here/threads.c" -L"$fork_lib" -ljack -lpthread || exit 1
 c++ -std=gnu++11 -O2 -DSERVER_SIDE -I"$root/common" -I"$root/common/jack" -I"$root/linux" -I"$root/posix" \
     -o "$out/pi_mutex" "$here/pi_mutex.cpp" -L"$fork_lib" -ljackserver || exit 1

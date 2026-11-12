@@ -111,8 +111,19 @@
    the real lrintf functions
 */
 
+#if defined (__SSE2__) && !defined (__sun__)
+/* Same result as lrintf()/lrint() (current rounding mode, i.e. nearest-even),
+   as a single cvtss2si/cvtsd2si. lrintf()/lrint() stay out-of-line PLT calls
+   unless the file is built with -fno-math-errno, which distribution flags
+   don't use: one or two function calls per sample. */
+static inline int f_round_sse(float f) { return _mm_cvtss_si32(_mm_set_ss(f)); }
+static inline int d_round_sse(double f) { return _mm_cvtsd_si32(_mm_set_sd(f)); }
+#define f_round(f) f_round_sse(f)
+#define d_round(f) d_round_sse(f)
+#else
 #define f_round(f) lrintf(f)
 #define d_round(f) lrint(f)
+#endif
 
 #define float_16(s, d)\
 	if ((s) <= NORMALIZED_FLOAT_MIN) {\
@@ -153,10 +164,14 @@
 		(d) = f_round ((s) * SAMPLE_24BIT_SCALING);                    \
 	}
 
+/* clamp written out: fmin()/fmax() are library calls under distribution
+   flags. Same results, including NaN (-> MIN, as fmax(NaN, MIN)) and -0.0. */
 #define float_32(s, d)												\
 	do {															\
-		double clipped = fmin(NORMALIZED_FLOAT_MAX,					\
-				fmax((double)(s), NORMALIZED_FLOAT_MIN));			\
+		double x = (double)(s);										\
+		double clipped = (x > NORMALIZED_FLOAT_MIN)					\
+			? ((x < NORMALIZED_FLOAT_MAX) ? x : NORMALIZED_FLOAT_MAX)	\
+			: NORMALIZED_FLOAT_MIN;									\
 		double scaled = clipped * SAMPLE_32BIT_MAX_D;				\
 		(d) = d_round(scaled);										\
 	}																\
@@ -403,11 +418,11 @@ void sample_move_d32u24_sS (char *dst, jack_default_audio_sample_t *src, unsigne
 	nsamples = nsamples & 3;
 
 	while (unrolled--) {
-		__m128 in = _mm_load_ps(src);
+		__m128 in = _mm_loadu_ps(src);
 		__m128 scaled = _mm_mul_ps(in, factor);
 		__m128 clipped = clip(scaled, int_min, int_max);
 
-		__m128i y = _mm_cvttps_epi32(clipped);
+		__m128i y = _mm_cvtps_epi32(clipped);  /* round, as the scalar code */
 		__m128i shifted = _mm_slli_epi32(y, 8);
 
 #ifdef __SSE4_1__
@@ -436,7 +451,7 @@ void sample_move_d32u24_sS (char *dst, jack_default_audio_sample_t *src, unsigne
 		__m128 scaled = _mm_mul_ss(in, factor);
 		__m128 clipped = _mm_min_ss(int_max, _mm_max_ss(scaled, int_min));
 
-		int y = _mm_cvttss_si32(clipped);
+		int y = _mm_cvtss_si32(clipped);
 		*((int *) dst) = y<<8;
 
 		dst += dst_skip;
@@ -669,11 +684,11 @@ void sample_move_d32l24_sS (char *dst, jack_default_audio_sample_t *src, unsigne
 	nsamples = nsamples & 3;
 
 	while (unrolled--) {
-		__m128 in = _mm_load_ps(src);
+		__m128 in = _mm_loadu_ps(src);
 		__m128 scaled = _mm_mul_ps(in, factor);
 		__m128 clipped = clip(scaled, int_min, int_max);
 
-		__m128i shifted = _mm_cvttps_epi32(clipped);
+		__m128i shifted = _mm_cvtps_epi32(clipped);  /* round, as the scalar code */
 
 #ifdef __SSE4_1__
 		*(int32_t*)dst              = _mm_extract_epi32(shifted, 0);
@@ -701,7 +716,7 @@ void sample_move_d32l24_sS (char *dst, jack_default_audio_sample_t *src, unsigne
 		__m128 scaled = _mm_mul_ss(in, factor);
 		__m128 clipped = _mm_min_ss(int_max, _mm_max_ss(scaled, int_min));
 
-		int y = _mm_cvttss_si32(clipped);
+		int y = _mm_cvtss_si32(clipped);
 		*((int *) dst) = y;  /* LSB-justified, like the vector loop above (was y<<8) */
 
 		dst += dst_skip;
