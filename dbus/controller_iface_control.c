@@ -132,6 +132,11 @@ jack_control_run_method(
             {
                 /* the reply is set by the failed function */
                 assert(call->reply != NULL);
+                if (!controller_ptr->started)
+                {
+                    /* the failed switch stopped the server */
+                    jack_controller_control_send_signal_server_stopped();
+                }
                 return true;
             }
         }

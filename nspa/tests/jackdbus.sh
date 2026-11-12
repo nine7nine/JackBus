@@ -85,6 +85,38 @@ else
 fi
 rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 
+# 1b. failed SwitchMaster must leave jackdbus usable (server stopped, can start again)
+if start_jackdbus; then
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
+    if call org.jackaudio.JackControl.StartServer; then
+        call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:alsa
+        call org.jackaudio.Configure.SetParameterValue array:string:driver,device variant:string:hw:NSPA_TEST_NONEXISTENT
+        if call org.jackaudio.JackControl.SwitchMaster; then
+            result jackdbus-switch-fail 1 "SwitchMaster to a nonexistent device succeeded?"
+        else
+            started=$(dbus-send --session --print-reply --dest=org.jackaudio.service /org/jackaudio/Controller \
+                org.jackaudio.JackControl.IsStarted 2>/dev/null | grep -o 'boolean [a-z]*' | awk '{print $2}')
+            call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
+            if [ "$started" = true ]; then
+                call org.jackaudio.JackControl.StopServer
+            fi
+            if call org.jackaudio.JackControl.StartServer; then
+                result jackdbus-switch-fail 0 "failed switch stopped the server (started=$started), StartServer works again"
+                call org.jackaudio.JackControl.StopServer
+            else
+                result jackdbus-switch-fail 1 "wedged after failed switch (started=$started, StartServer fails)"
+            fi
+        fi
+    else
+        echo "FAIL jackdbus-switch-fail: initial StartServer failed"; fail=1
+    fi
+    kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
+else
+    echo "FAIL jackdbus-switch-fail: jackdbus did not come up"; fail=1
+fi
+rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
+rm -rf "$HOME/.config/jack"
+
 # 2. crash handler
 if start_jackdbus; then
     kill -SEGV $JD_PID

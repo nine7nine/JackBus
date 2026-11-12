@@ -24,6 +24,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 #include <dbus/dbus.h>
 #include <assert.h>
 #include <unistd.h>
@@ -349,8 +350,14 @@ jack_controller_switch_master(
             controller_ptr->server,
             jack_params_get_driver(controller_ptr->params)))
     {
-        jack_dbus_error(dbus_call_context_ptr, JACK_DBUS_ERROR_GENERIC, "Failed to switch master");
+        /* The server has no running master now. Only clearing 'started' left
+         * the dbusapi client, patchbay and server open: StopServer was refused
+         * and StartServer failed ("server already active"). Run the normal
+         * stop path so that a new StartServer works. */
+        jack_error("Failed to switch master, stopping the server");
+        jack_controller_stop_server(controller_ptr, NULL);
         controller_ptr->started = false;
+        jack_dbus_error(dbus_call_context_ptr, JACK_DBUS_ERROR_GENERIC, "Failed to switch master (server stopped)");
         return FALSE;
     }
 
@@ -370,17 +377,37 @@ typedef struct reserved_audio_device {
 int g_device_count = 0;
 static reserved_audio_device g_reserved_device[DEVICE_MAX];
 
+/*
+ Slot bookkeeping: acquire used to write slot [g_device_count] even when that
+ slot was still in use, release looked a device up by name but never freed
+ its slot, and the count was decremented even for unknown devices. With
+ several cards (or SwitchMaster while a slave holds one) this wrote out of
+ bounds ([2] or [-1]), leaked ReserveDevice1 names (locking PulseAudio /
+ PipeWire out of the card) and released the same reservation twice. Use free
+ slots (reserved_device == NULL) and clear them on release.
+*/
 static
 bool
 on_device_acquire(const char * device_name)
 {
     int ret;
+    int slot;
     DBusError error;
+
+    for (slot = 0; slot < DEVICE_MAX; slot++) {
+        if (g_reserved_device[slot].reserved_device == NULL)
+            break;
+    }
+    if (slot == DEVICE_MAX)
+    {
+        jack_error("Cannot reserve audio card %s: already holding %d cards", device_name, DEVICE_MAX);
+        return false;
+    }
 
     dbus_error_init(&error);
 
     ret = rd_acquire(
-        &g_reserved_device[g_device_count].reserved_device,
+        &g_reserved_device[slot].reserved_device,
         g_connection,
         device_name,
         "Jack audio server",
@@ -391,10 +418,11 @@ on_device_acquire(const char * device_name)
     {
         jack_error("Failed to acquire device name : %s error : %s", device_name, (error.message ? error.message : strerror(-ret)));
         dbus_error_free(&error);
+        g_reserved_device[slot].reserved_device = NULL;
         return false;
     }
 
-    strcpy(g_reserved_device[g_device_count].device_name, device_name);
+    snprintf(g_reserved_device[slot].device_name, sizeof(g_reserved_device[slot].device_name), "%s", device_name);
     g_device_count++;
     jack_info("Acquired audio card %s", device_name);
     return true;
@@ -408,18 +436,20 @@ on_device_release(const char * device_name)
 
     // Look for corresponding reserved device
     for (i = 0; i < DEVICE_MAX; i++) {
- 	if (strcmp(g_reserved_device[i].device_name, device_name) == 0)
-	    break;
+        if (g_reserved_device[i].reserved_device != NULL &&
+            strcmp(g_reserved_device[i].device_name, device_name) == 0)
+            break;
     }
 
     if (i < DEVICE_MAX) {
-	jack_info("Released audio card %s", device_name);
+        jack_info("Released audio card %s", device_name);
         rd_release(g_reserved_device[i].reserved_device);
+        g_reserved_device[i].reserved_device = NULL;
+        g_reserved_device[i].device_name[0] = 0;
+        g_device_count--;
     } else {
-	jack_error("Audio card %s not found!!", device_name);
+        jack_error("Audio card %s not found!!", device_name);
     }
-
-    g_device_count--;
 }
 
 #define controller_ptr ((struct jack_controller *)obj)

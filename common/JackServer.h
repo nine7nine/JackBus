@@ -28,6 +28,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackConnectionManager.h"
 #include "JackGlobals.h"
 #include "JackPlatformPlug.h"
+#include "JackMutex.h"
 #include "jslist.h"
 
 namespace Jack
@@ -43,6 +44,10 @@ class JackMetadata;
 /*!
 \brief The Jack server.
 */
+
+/*! Lockable object (JackLockAble only has protected constructors). */
+class JackServerControlLock : public JackLockAble
+{};
 
 class SERVER_EXPORT JackServer
 {
@@ -61,6 +66,9 @@ class SERVER_EXPORT JackServer
         JackConnectionManager fConnectionState;
         JackSynchro fSynchroTable[CLIENT_NUM];
         bool fFreewheel;
+        bool fAudioDriverClosed;   /*! master closed after a failed SwitchMaster */
+        JackServerControlLock fControlLock; /*! serializes SetBufferSize/SetFreewheel/SwitchMaster
+                                       (request thread and, in jackdbus, the D-Bus thread) */
 
         int InternalClientLoadAux(JackLoadableInternalClient* client, const char* so_name, const char* client_name, int options, int* int_ref, jack_uuid_t uuid, int* status);
 

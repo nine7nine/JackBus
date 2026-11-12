@@ -69,6 +69,7 @@ JackServer::JackServer(bool sync, bool temporary, int timeout, bool rt, int prio
     fDriverInfo = new JackDriverInfo();
     fAudioDriver = NULL;
     fFreewheel = false;
+    fAudioDriverClosed = false;
     JackServerGlobals::fInstance = this;   // Unique instance
     JackServerGlobals::fUserCount = 1;     // One user
     JackGlobals::fVerbose = verbose;
@@ -144,8 +145,11 @@ int JackServer::Close()
 {
     jack_log("JackServer::Close");
     fRequestChannel.Close();
-    fAudioDriver->Detach();
-    fAudioDriver->Close();
+    if (fAudioDriver && !fAudioDriverClosed) {
+        fAudioDriver->Detach();
+        fAudioDriver->Close();
+        fAudioDriverClosed = true;
+    }
     fFreewheelDriver->Close();
     fEngine->Close();
     // TODO: move that in reworked JackServerGlobals::Destroy()
@@ -157,6 +161,10 @@ int JackServer::Close()
 int JackServer::Start()
 {
     jack_log("JackServer::Start");
+    if (fAudioDriverClosed) {
+        jack_error("JackServer::Start: no master driver (a previous master switch failed)");
+        return -1;
+    }
     if (fAudioDriver->Start() < 0) {
         return -1;
     }
@@ -173,8 +181,10 @@ int JackServer::Stop()
             res = fThreadedFreewheelDriver->Stop();
         }
     } else {
-        if (fAudioDriver) {
+        if (fAudioDriver && !fAudioDriverClosed) {
             res = fAudioDriver->Stop();
+        } else {
+            res = 0;
         }
     }
     
@@ -245,7 +255,13 @@ int JackServer::LoadInternalSessionFile(const char* file)
 int JackServer::SetBufferSize(jack_nframes_t buffer_size)
 {
     jack_log("JackServer::SetBufferSize nframes = %ld", buffer_size);
+    JackLock lock(&fControlLock);
     jack_nframes_t current_buffer_size = fEngineControl->fBufferSize;
+
+    if (fAudioDriverClosed) {
+        jack_error("SetBufferSize: no master driver");
+        return -1;
+    }
 
     if (current_buffer_size == buffer_size) {
         jack_log("SetBufferSize: requirement for new buffer size equals current value");
@@ -257,18 +273,26 @@ int JackServer::SetBufferSize(jack_nframes_t buffer_size)
         return -1;
     }
 
-    if (fAudioDriver->Stop() != 0) {
-        jack_error("Cannot stop audio driver");
+    /*
+    In freewheel mode the audio driver is already stopped and the freewheel
+    thread runs the graph: it must be stopped around the change, and the
+    audio driver must NOT be started (it used to be, leaving two drivers
+    running cycles concurrently); it restarts when freewheel ends.
+    */
+    JackDriverClientInterface* running = fFreewheel ? fThreadedFreewheelDriver : fAudioDriver;
+
+    if (running->Stop() != 0) {
+        jack_error("Cannot stop %s driver", fFreewheel ? "freewheel" : "audio");
         return -1;
     }
 
     if (fAudioDriver->SetBufferSize(buffer_size) == 0) {
         fEngine->NotifyBufferSize(buffer_size);
-        return fAudioDriver->Start();
+        return running->Start();
     } else { // Failure: try to restore current value
         jack_error("Cannot SetBufferSize for audio driver, restore current value %ld", current_buffer_size);
         fAudioDriver->SetBufferSize(current_buffer_size);
-        fAudioDriver->Start();
+        running->Start();
         // SetBufferSize actually failed, so return an error...
         return -1;
     }
@@ -289,6 +313,12 @@ no graph state change can be done during freewheel mode.
 int JackServer::SetFreewheel(bool onoff)
 {
     jack_log("JackServer::SetFreewheel is = %ld want = %ld", fFreewheel, onoff);
+    JackLock lock(&fControlLock);
+
+    if (fAudioDriverClosed) {
+        jack_error("SetFreewheel: no master driver");
+        return -1;
+    }
 
     if (fFreewheel) {
         if (onoff) {
@@ -385,51 +415,67 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
 {
     std::list<JackDriverInterface*> slave_list;
     std::list<JackDriverInterface*>::const_iterator it;
-    
+    JackLock lock(&fControlLock);
+
+    /*
+    Failure handling: the old master is closed before the new one is opened
+    (they may use the same device). If the new one cannot be opened or
+    attached, the server is left without a running master
+    (fAudioDriverClosed): Start/Stop/Close/SetBufferSize/SetFreewheel skip it
+    and a later successful SwitchMaster recovers. Previously the old, closed
+    driver kept being used (stopped and closed again: use-after-free / double
+    free in e.g. the ALSA driver), and a failed Attach() deleted the new
+    driver info that fDriverInfo already pointed to (double free on close).
+    */
+
     // Remove current master
-    fAudioDriver->Stop();
-    fAudioDriver->Detach();
-    fAudioDriver->Close();
+    if (!fAudioDriverClosed) {
+        fAudioDriver->Stop();
+        fAudioDriver->Detach();
+        fAudioDriver->Close();
+        fAudioDriverClosed = true;
+    }
 
     // Open new master
     JackDriverInfo* info = new JackDriverInfo();
     JackDriverClientInterface* master = info->Open(driver_desc, fEngine, GetSynchroTable(), driver_params);
 
     if (!master) {
-       goto error;
+        jack_error("SwitchMaster: cannot open the new master driver");
+        delete info;
+        return -1;
     }
 
     // Get slaves list
     slave_list = fAudioDriver->GetSlaves();
- 
+
     // Move slaves in new master
     for (it = slave_list.begin(); it != slave_list.end(); it++) {
         JackDriverInterface* slave = *it;
         master->AddSlave(slave);
     }
 
-    // Delete old master
+    // Delete old master (closed)
     delete fDriverInfo;
 
     // Activate master
     fAudioDriver = master;
     fDriverInfo = info;
-    
+
     if (fAudioDriver->Attach() < 0) {
-        goto error;
+        jack_error("SwitchMaster: cannot attach the new master driver");
+        fAudioDriver->Close();
+        return -1;  // fDriverInfo owns the (closed) new driver
     }
-    
+    fAudioDriverClosed = false;
+
     // Notify clients of new values
     fEngine->NotifyBufferSize(fEngineControl->fBufferSize);
     fEngine->NotifySampleRate(fEngineControl->fSampleRate);
-    
+
     // And finally start
     fAudioDriver->SetMaster(true);
     return fAudioDriver->Start();
-
-error:
-    delete info;
-    return -1;
 }
 
 //----------------------
