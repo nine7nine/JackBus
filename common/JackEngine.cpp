@@ -1205,6 +1205,11 @@ void JackEngine::ClientKill(int refnum)
     if (external) {
         external->SetDead();
     }
+    if (detached) {
+        // its ports were announced as gone when it was taken out of the graph: not
+        // again when they are released (ClientCloseAux)
+        fClientTable[refnum]->GetClientControl()->fActive = false;
+    }
     if (!detached) {
         /*
          Deactivated whatever its state, as in 1.9.22, even if it had deactivated
@@ -1430,7 +1435,7 @@ void JackEngine::CheckStuckClients()
     // Clients without such a slot (another libjack): when the graph did not finish
     for (int i = 0; i < fRefNumBound; i++) {   // drivers are skipped (not external clients)
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
-        if (!client || client->IsDead() || fPeerPid[i] <= 0 || !client->GetClientControl()->fActive) {
+        if (!client || client->IsDead() || fThreadDead[i] || fPeerPid[i] <= 0 || !client->GetClientControl()->fActive) {
             continue;
         }
         if (fGraphManager->GetClientTiming(i)->fStatus == Finished || now < fPeerNextCheck[i]) {
@@ -1485,15 +1490,15 @@ bool JackEngine::IsWatched(int refnum) const
 
 /*
  The client's realtime thread ended while it was active: out of the graph now, without
- waiting for the switch. It stays registered (its process may live on); fActive is
- cleared, so that its libjack, if the process does go on, sees it inactive (a later
- jack_deactivate does nothing, jack_activate starts a new thread and brings it back).
+ waiting for the switch. It stays registered (its process may live on), and its
+ fActive flag is left as it is: if the process goes on, its libjack still sees it
+ active, so that jack_deactivate or jack_client_close ends and joins that thread as
+ usual (ClientDeactivate has nothing left to do), and jack_activate after that brings
+ it back. ClientKill clears fActive when it is gone.
  */
 void JackEngine::DetachThreadEndedClient(int refnum)
 {
-    JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
     ClientDeactivate(refnum, false);
-    client->GetClientControl()->fActive = false;
     fThreadDead[refnum] = true;
 }
 
