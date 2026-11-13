@@ -57,6 +57,10 @@ class JackExternalClient : public JackClientInterface
         // Nothing is sent to a client whose process died (request socket gone, or found
         // exiting): every write to its notification socket would fail, and be logged
         void SetDead() { fDead = true; }
+
+        // Request thread: notifications queued for a client that lags (see
+        // JackSocketNotifyChannel). Returns whether it still lags.
+        bool FlushNotifications();
         bool IsDead() const { return fDead; }
 };
 

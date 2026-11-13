@@ -181,6 +181,13 @@ class SERVER_EXPORT JackLockedEngine
             return fEngine.IsClientDead(refnum);
             CATCH_EXCEPTION_RETURN
         }
+        int FlushNotifications()
+        {
+            TRY_CALL
+            JackLock lock(&fEngine);
+            return fEngine.FlushNotifications();
+            CATCH_EXCEPTION_RETURN
+        }
         void CheckStuckClients()
         {
             TRY_CALL

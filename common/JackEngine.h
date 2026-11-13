@@ -212,6 +212,7 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         bool IsClientDead(int refnum);
         void ClientSetPeerPid(int refnum, int pid, int uid);
         void CheckStuckClients();
+        int FlushNotifications();
 
         int GetClientPID(const char* name);
         int GetClientRefNum(const char* name);

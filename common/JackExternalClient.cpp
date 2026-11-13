@@ -89,6 +89,15 @@ int JackExternalClient::Close()
     return 0;
 }
 
+bool JackExternalClient::FlushNotifications()
+{
+#ifdef WIN32
+    return false;
+#else
+    return !fDead && fChannel.Flush();
+#endif
+}
+
 JackClientControl* JackExternalClient::GetClientControl() const
 {
     return fClientControl;

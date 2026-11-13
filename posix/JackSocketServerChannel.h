@@ -49,6 +49,7 @@ class JackSocketServerChannel : public JackRunnableInterface, public JackClientH
         pollfd* fPollTable;
         bool fRebuild;
         bool fSweepDead;    // the engine took clients whose process died out of the graph
+        bool fLagging;      // some client lags: notifications queued for it (JackSocketNotifyChannel)
         std::map<int, std::pair<int, JackClientSocket*> > fSocketTable;
 
         void BuildPoolTable();

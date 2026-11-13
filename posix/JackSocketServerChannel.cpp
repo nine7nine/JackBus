@@ -43,6 +43,7 @@ JackSocketServerChannel::JackSocketServerChannel():
     fPollTable = NULL;
     fRebuild = true;
     fSweepDead = false;
+    fLagging = false;
 }
 
 JackSocketServerChannel::~JackSocketServerChannel()
@@ -257,7 +258,8 @@ bool JackSocketServerChannel::Execute()
     try {
 
         // Global poll
-        if ((poll(fPollTable, fSocketTable.size() + 1, 10000) < 0) && (errno != EINTR)) {
+        // While a client lags, look every 50 ms whether it reads again
+        if ((poll(fPollTable, fSocketTable.size() + 1, fLagging ? 50 : 10000) < 0) && (errno != EINTR)) {
             jack_error("JackSocketServerChannel::Execute : engine poll failed err = %s request thread quits...", strerror(errno));
             return false;
         } else {
@@ -286,6 +288,8 @@ bool JackSocketServerChannel::Execute()
             if (fSweepDead) {
                 KillDeadClients();
             }
+
+            fLagging = (fServer->GetEngine()->FlushNotifications() > 0);
 
             // Check the server request socket */
             if (fPollTable[0].revents & POLLERR) {

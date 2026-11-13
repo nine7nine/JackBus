@@ -1258,6 +1258,20 @@ void JackEngine::CheckStuckClients()
 #endif
 }
 
+// Request thread: send what is queued for clients that lag, if they read again. Returns
+// how many still lag (the request thread then looks again in 50 ms).
+int JackEngine::FlushNotifications()
+{
+    int lagging = 0;
+    for (int i = fEngineControl->fDriverNum; i < fRefNumBound; i++) {
+        JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
+        if (client && client->FlushNotifications()) {
+            lagging++;
+        }
+    }
+    return lagging;
+}
+
 // The client's process is exiting or gone: out of the graph now, without waiting for
 // the switch (other stuck clients may be found too). ClientKill, called next by the
 // request channel (KillDeadClients), waits for the switch and removes the client.
