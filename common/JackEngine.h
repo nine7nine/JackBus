@@ -30,6 +30,9 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackChannel.h"
 #include "JackBoundedQueue.h"
 #include "JackCycleSignal.h"
+#ifdef __linux__
+#include "JackAliveTable.h"
+#endif
 #include <utility>
 #include <vector>
 #include <map>
@@ -80,6 +83,17 @@ class JackEngineNotifier : public JackRunnableInterface
         JackCycleSignal fWake;            // the realtime thread cuts the 20 ms sleep short (see MarkStuck)
         jack_time_t fLastWake;            // realtime thread only
 
+    #ifdef __linux__
+        // Clients' realtime threads (JackAliveTable): the notifier also waits on the
+        // slots of the clients in fAliveWatch (set by the request thread), and has the
+        // request thread check a client whose thread ended (FUTEX_OWNER_DIED)
+        JackAliveTable* fAliveTable;
+        const uint64_t* fAliveWatch;
+        uint64_t fAliveReported[(CLIENT_NUM + 63) / 64];  // notifier thread only
+        bool fWaitV;                                      // futex_waitv available
+        unsigned int WatchSlots(struct futex_waitv* waiters, unsigned int max, bool* ended);
+    #endif
+
         void Drain();
 
     public:
@@ -98,6 +112,14 @@ class JackEngineNotifier : public JackRunnableInterface
          sleep, so a dead client is found within a cycle or two: one FUTEX_WAKE at most
          every 100 ms, only in cycles that already failed.
          */
+        // Request thread: look for dead clients again at the next tick (20 ms)
+        void RequestCheck() { __atomic_store_n(&fStuck, 1, __ATOMIC_RELAXED); }
+        // Request thread: the set of watched clients changed
+        void WakeUp() { fWake.Signal(); }
+    #ifdef __linux__
+        void SetAliveTable(JackAliveTable* table, const uint64_t* watch);
+    #endif
+
         void MarkStuck(jack_time_t now)
         {
             __atomic_store_n(&fStuck, 1, __ATOMIC_RELAXED);
@@ -145,6 +167,20 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         int fPeerPid[CLIENT_NUM];
         unsigned long long fPeerStart[CLIENT_NUM];
         jack_time_t fPeerNextCheck[CLIENT_NUM];
+    #ifdef __linux__
+        // Slots of the clients' realtime threads (see JackAliveTable)
+        JackAliveTable fAliveTable;
+    #endif
+        // Active external clients whose slot the notifier watches (request thread
+        // writes, notifier thread reads)
+        alignas(8) uint64_t fAliveWatch[(CLIENT_NUM + 63) / 64];
+        // Taken out of the graph because their realtime thread ended; removed when
+        // their process is found exiting or gone, or their socket closes
+        bool fThreadDead[CLIENT_NUM];
+        jack_time_t fThreadDeadSince[CLIENT_NUM];
+        void WatchClient(int refnum, bool on);
+        bool IsWatched(int refnum) const;
+        void DetachThreadEndedClient(int refnum);
         JackMetadata fMetadata;
 
         int fSessionPendingReplies;

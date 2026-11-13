@@ -27,6 +27,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <dirent.h>
@@ -67,7 +68,10 @@ JackEngine::JackEngine(JackGraphManager* manager,
         fPeerPid[i] = 0;
         fPeerStart[i] = 0;
         fPeerNextCheck[i] = 0;
+        fThreadDead[i] = false;
+        fThreadDeadSince[i] = 0;
     }
+    memset(fAliveWatch, 0, sizeof(fAliveWatch));
     fRefNumBound = 0;
     fLastSwitchUsecs = 0;
     fSessionPendingReplies = 0;
@@ -87,6 +91,13 @@ int JackEngine::Open()
         jack_error("Cannot connect to server");
         return -1;
     }
+#ifdef __linux__
+    // Without it (e.g. /dev/shm full), dead clients are found the way they were
+    // before: when the graph does not finish, and when their socket closes
+    if (fAliveTable.Allocate(fEngineControl->fServerName)) {
+        fNotifier.SetAliveTable(&fAliveTable, fAliveWatch);
+    }
+#endif
     if (fNotifier.Start() < 0) {
         jack_error("Cannot start the engine notification thread");
         fChannel.Close();
@@ -99,6 +110,9 @@ int JackEngine::Close()
 {
     jack_log("JackEngine::Close");
     fNotifier.Stop();
+#ifdef __linux__
+    fAliveTable.Destroy();
+#endif
     fChannel.Close();
 
     // Close remaining clients (RT is stopped)
@@ -136,7 +150,78 @@ void JackEngine::NotifyQuit()
 
 JackEngineNotifier::JackEngineNotifier(JackServerNotifyChannel* channel)
     : fChannel(channel), fThread(this), fDropped(0), fStuck(0), fLastWake(0)
-{}
+#ifdef __linux__
+    , fAliveTable(NULL), fAliveWatch(NULL), fWaitV(true)
+#endif
+{
+#ifdef __linux__
+    memset(fAliveReported, 0, sizeof(fAliveReported));
+    // tests: behave as on a kernel without futex_waitv (Linux < 5.16)
+    fWaitV = (getenv("JACK_NO_FUTEX_WAITV") == NULL);
+#endif
+}
+
+#ifdef __linux__
+// Before Start(): the notifier then also waits on the watched clients' slots
+void JackEngineNotifier::SetAliveTable(JackAliveTable* table, const uint64_t* watch)
+{
+    fAliveTable = table;
+    fAliveWatch = watch;
+}
+
+/*
+ Notifier thread. For each watched client (active, external) whose realtime thread
+ holds its slot: makes sure the slot's word has FUTEX_WAITERS, so that the kernel
+ wakes us when the owner dies (handle_futex_death only wakes when it is set; the
+ owner never unlocks: it holds the lock for its lifetime), and adds it to waiters.
+ A slot marked FUTEX_OWNER_DIED is reported once (*ended), and not waited on (its
+ value no longer changes: futex_waitv would return at once). Slots that are not
+ locked are left alone: a libjack without slots never locks them.
+ */
+unsigned int JackEngineNotifier::WatchSlots(struct futex_waitv* waiters, unsigned int max, bool* ended)
+{
+    unsigned int count = 0;
+    for (int w = 0; w < (CLIENT_NUM + 63) / 64; w++) {
+        uint64_t bits = __atomic_load_n(&fAliveWatch[w], __ATOMIC_ACQUIRE);
+        fAliveReported[w] &= bits;  // forget clients no longer watched
+        while (bits) {
+            int bit = __builtin_ctzll(bits);
+            bits &= bits - 1;
+            int refnum = w * 64 + bit;
+            uint32_t* word = fAliveTable->Word(refnum);
+            if (!word) {
+                continue;
+            }
+            uint32_t val = __atomic_load_n(word, __ATOMIC_ACQUIRE);
+            if (val & FUTEX_OWNER_DIED) {
+                if (!(fAliveReported[w] & (1ULL << bit))) {
+                    fAliveReported[w] |= (1ULL << bit);
+                    *ended = true;
+                }
+                continue;
+            }
+            if ((val & FUTEX_TID_MASK) == 0) {
+                continue;   // not locked
+            }
+            if (!(val & FUTEX_WAITERS)) {
+                uint32_t want = val | FUTEX_WAITERS;
+                if (!__atomic_compare_exchange_n(word, &val, want, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                    continue;   // changed meanwhile: looked at again next time
+                }
+                val = want;
+            }
+            if (waiters && count < max) {
+                waiters[count].val = val;
+                waiters[count].uaddr = (uintptr_t)word;
+                waiters[count].flags = FUTEX_32;    // process-shared
+                waiters[count].__reserved = 0;
+                count++;
+            }
+        }
+    }
+    return count;
+}
+#endif
 
 int JackEngineNotifier::Start()
 {
@@ -173,14 +258,36 @@ bool JackEngineNotifier::Execute()
 {
     // Poll: notifications are asynchronous (graph order, xrun callbacks), 20 ms of
     // extra delay is harmless. The realtime side wakes us only when the graph did
-    // not finish in a cycle (MarkStuck), at most every 100 ms.
+    // not finish in a cycle (MarkStuck), at most every 100 ms. With a JackAliveTable
+    // we also wake as soon as a watched client's realtime thread ends.
+    bool ended = false;
 #ifdef __linux__
-    fWake.TimedWait(20000);
+    bool waited = false;
+  #if defined(SYS_futex_waitv) && defined(FUTEX_WAITV_MAX)
+    if (fAliveTable && fWaitV) {
+        struct futex_waitv waiters[FUTEX_WAITV_MAX];
+        unsigned int count = WatchSlots(waiters + 1, FUTEX_WAITV_MAX - 1, &ended);
+        if (ended) {
+            waited = true;      // report at once
+        } else if (fWake.TimedWaitV(20000, waiters, count) < 0) {
+            jack_log("JackEngineNotifier: futex_waitv not available, clients' realtime threads are looked at every 20 ms");
+            fWaitV = false;
+        } else {
+            waited = true;
+        }
+    }
+  #endif
+    if (!waited) {
+        fWake.TimedWait(20000);
+    }
+    if (fAliveTable && !ended) {
+        WatchSlots(NULL, 0, &ended);    // what woke us (or, without futex_waitv, what changed)
+    }
 #else
     JackSleep(20000);
 #endif
     Drain();
-    if (__atomic_exchange_n(&fStuck, 0, __ATOMIC_RELAXED)) {
+    if (__atomic_exchange_n(&fStuck, 0, __ATOMIC_RELAXED) || ended) {
         fChannel->Notify(ALL_CLIENTS, kCheckStuckClients, 0);
     }
     return true;
@@ -216,6 +323,11 @@ void JackEngine::UpdateRefNumBound()
 
 void JackEngine::ReleaseRefnum(int refnum)
 {
+    WatchClient(refnum, false);
+    fThreadDead[refnum] = false;
+#ifdef __linux__
+    fAliveTable.ClearSlot(refnum);
+#endif
     fClientTable[refnum] = NULL;
     fPeerPid[refnum] = 0;
     fPeerStart[refnum] = 0;
@@ -774,6 +886,14 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
         return -1;
     }
 
+    // A fresh slot: the client (its libjack) makes it its own, and nothing of an
+    // earlier client of this refnum may be taken for this one's
+    WatchClient(refnum, false);
+    fThreadDead[refnum] = false;
+#ifdef __linux__
+    fAliveTable.ClearSlot(refnum);
+#endif
+
     JackExternalClient* client = new JackExternalClient();
 
     if (!fSynchroTable[refnum].Allocate(real_name, fEngineControl->fServerName, 0)) {
@@ -954,6 +1074,12 @@ int JackEngine::ClientActivate(int refnum, bool is_real_time, bool wait)
 
     if (is_real_time) {
         fGraphManager->Activate(refnum);
+        // Its realtime thread is running and holds its slot (if its libjack has
+        // one): libjack starts the thread before asking for activation
+        fThreadDead[refnum] = false;
+        if (dynamic_cast<JackExternalClient*>(client)) {
+            WatchClient(refnum, true);
+        }
     }
 
     // Wait for graph state change to be effective
@@ -986,6 +1112,16 @@ int JackEngine::ClientDeactivate(int refnum, bool wait)
 {
     JackClientInterface* client = fClientTable[refnum];
     jack_log("JackEngine::ClientDeactivate ref = %ld name = %s", refnum, client->GetClientControl()->fName);
+
+    // Before anything: libjack ends the client's realtime thread once this returns,
+    // which is no reason for the notifier to report it
+    WatchClient(refnum, false);
+
+    if (fThreadDead[refnum]) {
+        // Already out of the graph (DetachThreadEndedClient), its connections and
+        // ports announced as gone then
+        return 0;
+    }
 
     jack_int_t input_ports[PORT_NUM_FOR_CLIENT];
     jack_int_t output_ports[PORT_NUM_FOR_CLIENT];
@@ -1065,10 +1201,11 @@ void JackEngine::ClientKill(int refnum)
      unregistration a second time (patchbays then report ports they cannot find).
      */
     JackExternalClient* external = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
-    if (!external || !external->IsDead()) {
-        if (external) {
-            external->SetDead();
-        }
+    bool detached = (external && external->IsDead()) || fThreadDead[refnum];
+    if (external) {
+        external->SetDead();
+    }
+    if (!detached) {
         /*
          Deactivated whatever its state, as in 1.9.22, even if it had deactivated
          itself (or was never activated): its ports are then announced as gone a
@@ -1081,8 +1218,10 @@ void JackEngine::ClientKill(int refnum)
         fClientTable[refnum]->GetClientControl()->fActive = false;
     } else {
         /*
-         Already taken out of the graph by CheckStuckClients, which does not wait for
-         the switch. Wait for it here, as ClientDeactivate(refnum, true) does: releasing
+         Already taken out of the graph by CheckStuckClients (its process was found
+         dying, or its realtime thread ended), which announced its connections and
+         ports as gone, and does not wait for the switch. Wait for it here, as
+         ClientDeactivate(refnum, true) does: releasing
          the ports below opens one write session per port, and the realtime thread
          cannot switch while one is open, so it could keep running the graph that
          still waits for this client.
@@ -1244,6 +1383,51 @@ void JackEngine::CheckStuckClients()
 {
 #ifdef __linux__
     jack_time_t now = GetMicroSeconds();
+
+    /*
+     Clients whose realtime thread ended while they were active: their slot in the
+     JackAliveTable is marked FUTEX_OWNER_DIED by the kernel (their libjack holds it
+     from that thread). Certain: that thread never runs again. Usually the process
+     was killed or crashed and the cycle it is due in has not started yet: out of
+     the graph before it, the graph does not even miss a cycle.
+     */
+    for (int i = 0; i < fRefNumBound; i++) {
+        JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
+        if (!client || client->IsDead() || fThreadDead[i] || !IsWatched(i) || !client->GetClientControl()->fActive) {
+            continue;
+        }
+        uint32_t* word = fAliveTable.Word(i);
+        if (word && (__atomic_load_n(word, __ATOMIC_ACQUIRE) & FUTEX_OWNER_DIED)) {
+            jack_info("client %s: its realtime thread ended, taken out of the graph", client->GetClientControl()->fName);
+            DetachThreadEndedClient(i);
+            fThreadDeadSince[i] = now;
+        }
+    }
+
+    /*
+     Such a client is removed (ports, registration) once its process is certainly
+     exiting or gone, which usually follows within a few milliseconds; looked at
+     every 20 ms for 2 s. A process that lives on without that thread (its
+     jack_set_process_thread function returned, say) keeps its client until it
+     closes it or activates it again.
+     */
+    bool pending = false;
+    for (int i = 0; i < fRefNumBound; i++) {
+        JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
+        if (!client || client->IsDead() || !fThreadDead[i] || fPeerPid[i] <= 0) {
+            continue;
+        }
+        if (ProcessState(fPeerPid[i], fPeerStart[i]) != kPeerAlive) {
+            client->SetDead();  // the request channel removes it (KillDeadClients)
+        } else if (now - fThreadDeadSince[i] < 2000000) {
+            pending = true;
+        }
+    }
+    if (pending) {
+        fNotifier.RequestCheck();
+    }
+
+    // Clients without such a slot (another libjack): when the graph did not finish
     for (int i = 0; i < fRefNumBound; i++) {   // drivers are skipped (not external clients)
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
         if (!client || client->IsDead() || fPeerPid[i] <= 0 || !client->GetClientControl()->fActive) {
@@ -1278,6 +1462,39 @@ int JackEngine::FlushNotifications()
         }
     }
     return lagging;
+}
+
+void JackEngine::WatchClient(int refnum, bool on)
+{
+    if (refnum < 0 || refnum >= CLIENT_NUM) {
+        return;
+    }
+    uint64_t bit = 1ULL << (refnum % 64);
+    if (on) {
+        __atomic_fetch_or(&fAliveWatch[refnum / 64], bit, __ATOMIC_RELEASE);
+        fNotifier.WakeUp();     // wait on its slot from now on
+    } else {
+        __atomic_fetch_and(&fAliveWatch[refnum / 64], ~bit, __ATOMIC_RELEASE);
+    }
+}
+
+bool JackEngine::IsWatched(int refnum) const
+{
+    return (__atomic_load_n(&fAliveWatch[refnum / 64], __ATOMIC_ACQUIRE) >> (refnum % 64)) & 1;
+}
+
+/*
+ The client's realtime thread ended while it was active: out of the graph now, without
+ waiting for the switch. It stays registered (its process may live on); fActive is
+ cleared, so that its libjack, if the process does go on, sees it inactive (a later
+ jack_deactivate does nothing, jack_activate starts a new thread and brings it back).
+ */
+void JackEngine::DetachThreadEndedClient(int refnum)
+{
+    JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
+    ClientDeactivate(refnum, false);
+    client->GetClientControl()->fActive = false;
+    fThreadDead[refnum] = true;
 }
 
 // The client's process is exiting or gone: out of the graph now, without waiting for

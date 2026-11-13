@@ -44,6 +44,7 @@ namespace Jack
 JackClient::JackClient(JackSynchro* table):fThread(this)
 {
     fSynchroTable = table;
+    fAlive = NULL;
     fProcess = NULL;
     fGraphOrder = NULL;
     fXrun = NULL;
@@ -543,6 +544,14 @@ static void __attribute__((noinline)) PrefaultStack()
 
 bool JackClient::Init()
 {
+#ifdef __linux__
+    // Hold this client's slot for as long as this realtime thread lives: when it
+    // ends while the client is active, the server knows at once (JackAliveTable)
+    if (fAlive) {
+        fAlive->LockSlot(GetClientControl()->fRefNum);
+    }
+#endif
+
     /*
         Execute buffer_size callback.
 

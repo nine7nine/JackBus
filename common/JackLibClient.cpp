@@ -150,6 +150,14 @@ int JackLibClient::Open(const char* server_name, const char* name, jack_uuid_t u
         goto error;
     }
 
+#ifdef __linux__
+    // The slot its realtime thread will hold (JackAliveTable), if the server has them
+    fAlive = JackLibGlobals::fGlobals->AliveTable(fServerName);
+    if (fAlive && !fAlive->InitSlot(GetClientControl()->fRefNum)) {
+        fAlive = NULL;
+    }
+#endif
+
     JackGlobals::fClientTable[GetClientControl()->fRefNum] = this;
     SetClockSource(GetEngineControl()->fClockSource);
     jack_log("JackLibClient::Open name = %s refnum = %ld", name_res, GetClientControl()->fRefNum);

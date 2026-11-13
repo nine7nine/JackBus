@@ -92,6 +92,7 @@ def build(bld):
             '../posix/JackPosixMutex.cpp',
             '../posix/JackSocket.cpp',
             '../linux/JackLinuxFutex.cpp',
+            '../linux/JackAliveTable.cpp',
             '../linux/JackLinuxTime.c',
             ]
         includes = ['../linux', '../posix'] + includes

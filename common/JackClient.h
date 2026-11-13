@@ -39,6 +39,7 @@ namespace Jack
 class JackGraphManager;
 class JackServer;
 class JackEngine;
+class JackAliveTable;
 struct JackClientControl;
 struct JackEngineControl;
 
@@ -97,6 +98,7 @@ class SERVER_EXPORT JackClient : public JackClientInterface, public JackRunnable
         JackThread fThread;    /*! Thread to execute the Process function */
         detail::JackClientChannelInterface* fChannel;
         JackSynchro* fSynchroTable;
+        JackAliveTable* fAlive;     /*! Slot of this client's realtime thread (libjack, Linux), or NULL */
         std::list<jack_port_id_t> fPortList;
         std::mutex fPortListLock;  /*! fPortList: app threads vs notification thread */
 

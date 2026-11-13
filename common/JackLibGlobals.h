@@ -29,7 +29,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackTime.h"
 #include "JackClient.h"
 #include "JackError.h"
+#ifdef __linux__
+#include "JackAliveTable.h"
+#endif
 #include <assert.h>
+#include <string.h>
 #include <signal.h>
 
 #ifdef WIN32
@@ -57,6 +61,15 @@ struct JackLibGlobals
     JackSynchro fSynchroTable[CLIENT_NUM];                  /*! Shared synchro table */
     JackMetadata *fMetadata;                                /*! Shared metadata base */
     sigset_t fProcessSignals;
+#ifdef __linux__
+    /*! Slots telling the server at once when one of this process' clients' realtime
+        threads ends (JackAliveTable), if the server provides them. Mapped when the
+        first client opens; unmapped with the globals, after the last client closed:
+        every realtime thread has been ended and joined by then. */
+    JackAliveTable fAliveTable;
+    char fAliveServer[JACK_SERVER_NAME_SIZE + 1];
+    bool fAliveTried;
+#endif
 
     static int fClientCount;
     static JackLibGlobals* fGlobals;
@@ -69,6 +82,10 @@ struct JackLibGlobals
         }
         fGraphManager = -1;
         fEngineControl = -1;
+#ifdef __linux__
+        fAliveServer[0] = 0;
+        fAliveTried = false;
+#endif
 
         fMetadata = new JackMetadata(false);
 
@@ -101,6 +118,24 @@ struct JackLibGlobals
        sigprocmask(SIG_BLOCK, &fProcessSignals, 0);
     #endif
     }
+
+#ifdef __linux__
+    // Under JackGlobals::fOpenMutex (jack_client_open). NULL if the server has no
+    // such slots, or for a client of a second server in the same process.
+    JackAliveTable* AliveTable(const char* server_name)
+    {
+        if (!fAliveTried) {
+            fAliveTried = true;
+            strncpy(fAliveServer, server_name, JACK_SERVER_NAME_SIZE);
+            fAliveServer[JACK_SERVER_NAME_SIZE] = 0;
+            fAliveTable.Connect(server_name);
+        }
+        if (!fAliveTable.IsMapped() || strcmp(fAliveServer, server_name) != 0) {
+            return NULL;
+        }
+        return &fAliveTable;
+    }
+#endif
 
     static void Init()
     {
