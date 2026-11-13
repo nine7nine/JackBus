@@ -43,6 +43,7 @@ cc -O2 $tcf -Wall -I"$root/common" -o "$out/stale_client" "$here/stale_client.c"
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/mixdown" "$here/mixdown.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/metadata" "$here/metadata.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/refnum_bound" "$here/refnum_bound.c" -L"$fork_lib" -ljack || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/client_kill" "$here/client_kill.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -337,6 +338,43 @@ lib32="$root/build-mixed/lib32/common"
 if [ -z "$san" ] && [ -f "$lib32/libjack.so" ] && cc -m32 -O2 -Wall -I"$root/common" -o "$out/mixdown32" "$here/mixdown.c" -L"$lib32" -ljack 2>/dev/null; then
     mixdown_case mixdown-1021-lib32 1021 "$out/mixdown32" "$lib32"
 fi
+
+# A client (40 in + 40 out ports, between two others) that goes away while the
+# graph runs: closed, or its process gone without jack_client_close (exit,
+# SIGKILL, SIGKILL while a child it forked holds libjack's sockets, SIGKILL with
+# 256 MB locked so the kernel takes a while to tear it down). Limits: xruns for
+# all trials, cycles the client behind it may miss, port-unregistration
+# callbacks exactly once per port.
+kill_case() {  # kill_case <server> <mode> <trials> <mem_mb> <gating 1|0> "<xruns> <cycles> <unreg>"
+    name="client-kill-$2_$1-server"
+    [ "$4" != 0 ] && name="$name-$4MB"
+    skip_system "$name" "$1" fork && return
+    saved_period=${SERVER_PERIOD:-}
+    SERVER_PERIOD=256
+    if start_server "$1" "$out/$name.server.log"; then
+        if NSPA_KILL_LIMITS="$6" LD_LIBRARY_PATH="$fork_lib" timeout 180 "$out/client_kill" "$2" "$3" 40 "$4" >"$out/$name.log" 2>&1; then
+            echo "PASS $name: $(tail -1 "$out/$name.log" | sed 's/^PASS: //')"
+        elif [ "$5" = 1 ]; then
+            echo "FAIL $name: $(tail -1 "$out/$name.log")"; fail=1
+        else
+            echo "INFO $name (expected to fail on unfixed servers): $(tail -1 "$out/$name.log" | sed 's/^FAIL: //')"
+        fi
+        stop_server || fail=1
+    else
+        echo "FAIL $name: server"; fail=1
+    fi
+    SERVER_PERIOD=$saved_period
+}
+kill_case fork close    6 0   1 "0 0 1"
+kill_case fork churn    6 0   1 "0 0 1"
+kill_case fork exit     6 0   1 "12 4 1"
+kill_case fork kill     6 0   1 "12 4 1"
+kill_case fork killfork 4 0   1 "8 4 1"
+if [ -z "$san" ]; then
+    kill_case fork kill 4 256 1 "8 4 1"
+fi
+kill_case system kill     4 0 0 "8 4 1"
+kill_case system killfork 2 0 0 "4 4 1"
 
 if [ -n "$san" ]; then
     echo "SKIP rt-syscalls (sanitizer run)"
