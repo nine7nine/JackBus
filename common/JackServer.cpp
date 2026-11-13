@@ -372,6 +372,13 @@ void JackServer::Notify(int refnum, int notify, int value)
         case kXRunCallback:
             fEngine->NotifyClientXRun(refnum);
             break;
+
+        case kCheckStuckClients:
+            fEngine->CheckStuckClients();
+#ifdef __linux__
+            fRequestChannel.SweepDeadClients();
+#endif
+            break;
     }
 }
 

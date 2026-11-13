@@ -28,6 +28,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackException.h"
 
 #include <assert.h>
+#include <vector>
+#include <sys/socket.h>
 #include <signal.h>
 
 using namespace std;
@@ -40,6 +42,7 @@ JackSocketServerChannel::JackSocketServerChannel():
 {
     fPollTable = NULL;
     fRebuild = true;
+    fSweepDead = false;
 }
 
 JackSocketServerChannel::~JackSocketServerChannel()
@@ -137,6 +140,15 @@ void JackSocketServerChannel::ClientAdd(detail::JackChannelTransactionInterface*
         fSocketTable[fd].first = refnum;
         fRebuild = true;
         jack_log("JackSocketServerChannel::ClientAdd ref = %d fd = %d", refnum, fd);
+    #ifdef __linux__
+        // The client's process as the kernel sees it from here (req->fPID is the
+        // client's own getpid(), wrong across pid namespaces, e.g. Flatpak)
+        struct ucred cred;
+        socklen_t len = sizeof(cred);
+        if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0 && cred.pid > 0) {
+            fServer->GetEngine()->ClientSetPeerPid(refnum, cred.pid, cred.uid);
+        }
+    #endif
     #ifdef __APPLE__
         int on = 1;
         if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, (const char*)&on, sizeof(on)) < 0) {
@@ -180,6 +192,30 @@ void JackSocketServerChannel::ClientKill(int fd)
     socket->Close();
     delete socket;
     fRebuild = true;
+}
+
+/*
+ Clients whose process the engine found exiting or gone are already out of the graph
+ (JackEngine::DetachDeadClient). Their request socket may stay open for a long time:
+ the kernel closes a dying process' files only after tearing down its memory, and a
+ child it spawned may hold a copy of the socket for as long as it runs. Remove them now
+ as if the socket had closed (ports, client registration, notifications to the others).
+ Called after the pass over the poll table, never during it.
+ */
+void JackSocketServerChannel::KillDeadClients()
+{
+    fSweepDead = false;
+    std::vector<int> dead;
+    std::map<int, std::pair<int, JackClientSocket*> >::iterator it;
+    for (it = fSocketTable.begin(); it != fSocketTable.end(); it++) {
+        if (it->second.first >= 0 && fServer->GetEngine()->IsClientDead(it->second.first)) {
+            dead.push_back(it->first);
+        }
+    }
+    for (size_t i = 0; i < dead.size(); i++) {
+        jack_log("JackSocketServerChannel::KillDeadClients fd = %d", dead[i]);
+        ClientKill(dead[i]);
+    }
 }
 
 void JackSocketServerChannel::BuildPoolTable()
@@ -245,6 +281,10 @@ bool JackSocketServerChannel::Execute()
                         fDecoder->HandleRequest(socket, header.fType);
                     }
                 }
+            }
+
+            if (fSweepDead) {
+                KillDeadClients();
             }
 
             // Check the server request socket */

@@ -48,12 +48,14 @@ class JackSocketServerChannel : public JackRunnableInterface, public JackClientH
 
         pollfd* fPollTable;
         bool fRebuild;
+        bool fSweepDead;    // the engine took clients whose process died out of the graph
         std::map<int, std::pair<int, JackClientSocket*> > fSocketTable;
 
         void BuildPoolTable();
 
         void ClientCreate();
         void ClientKill(int fd);
+        void KillDeadClients();
   
         void ClientAdd(detail::JackChannelTransactionInterface* socket, JackClientOpenRequest* req, JackClientOpenResult *res);
         void ClientRemove(detail::JackChannelTransactionInterface* socket, int refnum);
@@ -70,6 +72,10 @@ class JackSocketServerChannel : public JackRunnableInterface, public JackClientH
 
         int Start();
         void Stop();
+
+        // Request thread: after this pass over the sockets, finish removing clients the
+        // engine found dead (JackEngine::CheckStuckClients)
+        void SweepDeadClients() { fSweepDead = true; }
 
         // JackRunnableInterface interface
         bool Init();

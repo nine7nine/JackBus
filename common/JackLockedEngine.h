@@ -167,6 +167,27 @@ class SERVER_EXPORT JackLockedEngine
             fEngine.ClientKill(refnum);
             CATCH_EXCEPTION
         }
+        void ClientSetPeerPid(int refnum, int pid, int uid)
+        {
+            TRY_CALL
+            JackLock lock(&fEngine);
+            fEngine.ClientSetPeerPid(refnum, pid, uid);
+            CATCH_EXCEPTION
+        }
+        bool IsClientDead(int refnum)
+        {
+            TRY_CALL
+            JackLock lock(&fEngine);
+            return fEngine.IsClientDead(refnum);
+            CATCH_EXCEPTION_RETURN
+        }
+        void CheckStuckClients()
+        {
+            TRY_CALL
+            JackLock lock(&fEngine);
+            fEngine.CheckStuckClients();
+            CATCH_EXCEPTION
+        }
 
         // Internal client management
         int GetInternalClientName(int int_ref, char* name_res)

@@ -24,6 +24,13 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <utility>
 #include <assert.h>
 #include <ctype.h>
+#include <errno.h>
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <sys/stat.h>
 
 #include "JackSystemDeps.h"
 #include "JackLockedEngine.h"
@@ -57,6 +64,9 @@ JackEngine::JackEngine(JackGraphManager* manager,
     fSelfConnectMode = self_connect_mode;
     for (int i = 0; i < CLIENT_NUM; i++) {
         fClientTable[i] = NULL;
+        fPeerPid[i] = 0;
+        fPeerStart[i] = 0;
+        fPeerNextCheck[i] = 0;
     }
     fRefNumBound = 0;
     fLastSwitchUsecs = 0;
@@ -125,7 +135,7 @@ void JackEngine::NotifyQuit()
 //-----------------------------
 
 JackEngineNotifier::JackEngineNotifier(JackServerNotifyChannel* channel)
-    : fChannel(channel), fThread(this), fDropped(0)
+    : fChannel(channel), fThread(this), fDropped(0), fStuck(0), fLastWake(0)
 {}
 
 int JackEngineNotifier::Start()
@@ -161,10 +171,18 @@ void JackEngineNotifier::Drain()
 
 bool JackEngineNotifier::Execute()
 {
-    // The realtime side never wakes us: poll. Notifications are asynchronous
-    // (graph order, xrun callbacks), 20 ms of extra delay is harmless.
+    // Poll: notifications are asynchronous (graph order, xrun callbacks), 20 ms of
+    // extra delay is harmless. The realtime side wakes us only when the graph did
+    // not finish in a cycle (MarkStuck), at most every 100 ms.
+#ifdef __linux__
+    fWake.TimedWait(20000);
+#else
     JackSleep(20000);
+#endif
     Drain();
+    if (__atomic_exchange_n(&fStuck, 0, __ATOMIC_RELAXED)) {
+        fChannel->Notify(ALL_CLIENTS, kCheckStuckClients, 0);
+    }
     return true;
 }
 
@@ -199,6 +217,9 @@ void JackEngine::UpdateRefNumBound()
 void JackEngine::ReleaseRefnum(int refnum)
 {
     fClientTable[refnum] = NULL;
+    fPeerPid[refnum] = 0;
+    fPeerStart[refnum] = 0;
+    fPeerNextCheck[refnum] = 0;
     UpdateRefNumBound();
 
     if (fEngineControl->fTemporary) {
@@ -252,6 +273,7 @@ bool JackEngine::Process(jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end
         res = true;
     } else {
         jack_log("Process: graph not finished!");
+        fNotifier.MarkStuck(cur_cycle_begin);  // the notifier thread asks the request thread to look
         jack_time_t last_switch = __atomic_load_n(&fLastSwitchUsecs, __ATOMIC_RELAXED);  // also reset by the request thread
         if (cur_cycle_begin > last_switch + fEngineControl->fTimeOutUsecs) {
             jack_log("Process: switch to next state delta = %ld", long(cur_cycle_begin - last_switch));
@@ -1043,17 +1065,208 @@ void JackEngine::ClientKill(int refnum)
      unregistration a second time (patchbays then report ports they cannot find).
      */
     JackExternalClient* external = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
-    if (external) {
-        external->SetDead();
+    if (!external || !external->IsDead()) {
+        if (external) {
+            external->SetDead();
+        }
+        if (ClientDeactivate(refnum, true) < 0) {
+            jack_error("JackEngine::ClientKill ref = %ld cannot be removed from the graph !!", refnum);
+        }
+        fClientTable[refnum]->GetClientControl()->fActive = false;
+    } else {
+        /*
+         Already taken out of the graph by CheckStuckClients, which does not wait for
+         the switch. Wait for it here, as ClientDeactivate(refnum, true) does: releasing
+         the ports below opens one write session per port, and the realtime thread
+         cannot switch while one is open, so it could keep running the graph that
+         still waits for this client.
+         */
+        if (!fSignal.TimedWait(fEngineControl->fTimeOutUsecs * 10)) {
+            jack_error("JackEngine::ClientKill ref = %ld wait error", refnum);
+        }
     }
-    if (ClientDeactivate(refnum, true) < 0) {
-        jack_error("JackEngine::ClientKill ref = %ld cannot be removed from the graph !!", refnum);
-    }
-    fClientTable[refnum]->GetClientControl()->fActive = false;
 
     if (ClientExternalClose(refnum) < 0) {
         jack_error("JackEngine::ClientKill ref = %ld cannot be closed", refnum);
     }
+}
+
+#ifdef __linux__
+/*
+ Process state from /proc, for clients the graph is waiting on. Read on the request
+ thread only, and only after a cycle in which the graph did not finish.
+
+ "tid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt
+ utime stime cutime cstime priority nice num_threads itrealvalue starttime ..." (comm
+ may contain spaces and parentheses: parse after the last ')').
+ */
+// 1: read; -1: no such task (ENOENT, or ESRCH once it is reaped); 0: anything else
+static int ReadTaskStat(const char* path, char* state, unsigned long* flags, unsigned long long* start)
+{
+    char buf[1024];
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return (errno == ENOENT || errno == ESRCH) ? -1 : 0;
+    }
+    ssize_t len = read(fd, buf, sizeof(buf) - 1);
+    int err = errno;
+    close(fd);
+    if (len < 0) {
+        return (err == ESRCH) ? -1 : 0;
+    }
+    if (len == 0) {
+        return 0;
+    }
+    buf[len] = 0;
+    const char* end = strrchr(buf, ')');
+    return (end && sscanf(end + 1, " %c %*d %*d %*d %*d %*d %lu %*u %*u %*u %*u %*u %*u %*d %*d %*d %*d %*d %*d %llu",
+                          state, flags, start) == 3) ? 1 : 0;
+}
+
+enum PeerState { kPeerAlive, kPeerExiting, kPeerGone };
+
+/*
+ kPeerGone: no process with this pid and start time any more. It exited and was
+ reaped, yet the server still has its request socket open: another process holds a
+ copy (libjack's sockets are not close-on-exec, so a child it spawned inherits them).
+ kPeerExiting: every thread has PF_EXITING (set when a thread enters do_exit: SIGKILL,
+ a crash, exit(); it never runs user code again) or is a zombie. A process whose main
+ thread called pthread_exit() still has live threads: alive.
+ Anything unreadable or unexpected: alive. Both other answers are certain.
+ */
+static PeerState ProcessState(int pid, unsigned long long start)
+{
+    const unsigned long kPFExiting = 0x00000004;    // include/linux/sched.h
+    char path[96];
+    char state;
+    unsigned long flags;
+    unsigned long long task_start;
+
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    int res = ReadTaskStat(path, &state, &flags, &task_start);
+    if (res <= 0) {
+        return (res < 0) ? kPeerGone : kPeerAlive;
+    }
+    if (task_start != start) {
+        return kPeerGone;   // the pid now belongs to another process
+    }
+
+    snprintf(path, sizeof(path), "/proc/%d/task", pid);
+    DIR* dir = opendir(path);
+    if (!dir) {
+        return kPeerAlive;
+    }
+    bool exiting = true;
+    int tasks = 0;
+    struct dirent* entry;
+    while (exiting && (entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+            continue;
+        }
+        char task_path[300];
+        snprintf(task_path, sizeof(task_path), "/proc/%d/task/%s/stat", pid, entry->d_name);
+        if (ReadTaskStat(task_path, &state, &flags, &task_start) <= 0) {
+            continue;   // this thread finished exiting since readdir (or unreadable)
+        }
+        tasks++;
+        if (!(flags & kPFExiting) && state != 'Z' && state != 'X') {
+            exiting = false;
+        }
+    }
+    closedir(dir);
+    return (exiting && tasks > 0) ? kPeerExiting : kPeerAlive;
+}
+#endif
+
+bool JackEngine::IsClientDead(int refnum)
+{
+    if (refnum < 0 || refnum >= CLIENT_NUM) {
+        return false;
+    }
+    JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
+    return client && client->IsDead();
+}
+
+void JackEngine::ClientSetPeerPid(int refnum, int pid, int uid)
+{
+#ifdef __linux__
+    if (refnum < 0 || refnum >= CLIENT_NUM || !fClientTable[refnum] || pid <= 0) {
+        return;
+    }
+    // Remember the process' start time. If /proc does not show this process (pid not
+    // visible from here, hidepid, a /proc of another pid namespace: owner not the
+    // socket peer's uid), leave the client unchecked.
+    char path[64];
+    char state;
+    unsigned long flags;
+    unsigned long long start;
+    struct stat st;
+    snprintf(path, sizeof(path), "/proc/%d", pid);
+    if (stat(path, &st) < 0 || (int)st.st_uid != uid) {
+        return;
+    }
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    if (ReadTaskStat(path, &state, &flags, &start) > 0) {
+        fPeerPid[refnum] = pid;
+        fPeerStart[refnum] = start;
+        fPeerNextCheck[refnum] = 0;
+    }
+#else
+    (void)refnum;
+    (void)pid;
+    (void)uid;
+#endif
+}
+
+/*
+ Request thread, when the realtime thread found the graph unfinished in a cycle.
+
+ A client whose process died stays in the graph until the server sees its request
+ socket close, and the kernel closes a dying process' files only after tearing down
+ its whole address space (exit_mm comes before exit_files): 100 ms or more for a big
+ process, every cycle of it with the client's successors not running and xruns
+ reported. If a child process inherited the socket, it stays open until the child
+ exits. The kernel marks the dying process' threads at once, though, and a reaped
+ process disappears from /proc: take such a client out of the graph now; the request
+ channel then removes it as if its socket had closed (KillDeadClients).
+
+ Only clients the graph is waiting on are looked at (not finished in the cycle), and
+ only certain death counts: a client that is merely late or hung is left alone. A
+ client found alive is not looked at again for 100 ms.
+ */
+void JackEngine::CheckStuckClients()
+{
+#ifdef __linux__
+    jack_time_t now = GetMicroSeconds();
+    for (int i = fEngineControl->fDriverNum; i < fRefNumBound; i++) {
+        JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
+        if (!client || client->IsDead() || fPeerPid[i] <= 0 || !client->GetClientControl()->fActive) {
+            continue;
+        }
+        if (fGraphManager->GetClientTiming(i)->fStatus == Finished || now < fPeerNextCheck[i]) {
+            continue;
+        }
+        PeerState state = ProcessState(fPeerPid[i], fPeerStart[i]);
+        if (state == kPeerAlive) {
+            fPeerNextCheck[i] = now + 100000;
+        } else {
+            jack_info("client %s: its process %s, taken out of the graph", client->GetClientControl()->fName,
+                      (state == kPeerExiting) ? "is exiting" : "is gone");
+            DetachDeadClient(i);
+        }
+    }
+#endif
+}
+
+// The client's process is exiting or gone: out of the graph now, without waiting for
+// the switch (other stuck clients may be found too). ClientKill, called next by the
+// request channel (KillDeadClients), waits for the switch and removes the client.
+void JackEngine::DetachDeadClient(int refnum)
+{
+    JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
+    client->SetDead();
+    ClientDeactivate(refnum, false);
+    client->GetClientControl()->fActive = false;
 }
 
 //-----------------

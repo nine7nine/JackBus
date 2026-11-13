@@ -41,6 +41,15 @@ class JackClientInterface;
 struct JackEngineControl;
 class JackExternalClient;
 
+/*
+ Server-internal notification, from the notifier thread to the request thread over
+ the server's own channel (JackServer::Notify): the graph did not finish in some
+ cycle, look for clients whose process is exiting or gone. Never sent to clients:
+ the value is above every client notification and below kMaxNotification, so it
+ fits the request encoding unchanged.
+ */
+#define kCheckStuckClients (kMaxNotification - 1)
+
 /*!
 \brief Carries notifications from the realtime thread to the server request thread.
 
@@ -67,6 +76,9 @@ class JackEngineNotifier : public JackRunnableInterface
         JackServerNotifyChannel* fChannel;
         JackThread fThread;
         alignas(SInt32) SInt32 fDropped;
+        alignas(SInt32) SInt32 fStuck;    // set by the realtime thread: a cycle found the graph unfinished
+        JackCycleSignal fWake;            // the realtime thread cuts the 20 ms sleep short (see MarkStuck)
+        jack_time_t fLastWake;            // realtime thread only
 
         void Drain();
 
@@ -79,6 +91,25 @@ class JackEngineNotifier : public JackRunnableInterface
 
         // Realtime thread.
         void Notify(int refnum, int notify, int value);
+        /*
+         A cycle found the graph unfinished: the request thread should look for clients
+         whose process died (JackEngine::CheckStuckClients). On Linux, the first such
+         cycle also wakes the notifier thread instead of letting it finish its 20 ms
+         sleep, so a dead client is found within a cycle or two: one FUTEX_WAKE at most
+         every 100 ms, only in cycles that already failed.
+         */
+        void MarkStuck(jack_time_t now)
+        {
+            __atomic_store_n(&fStuck, 1, __ATOMIC_RELAXED);
+        #ifdef __linux__
+            if (now - fLastWake > 100000) {
+                fLastWake = now;
+                fWake.Signal();
+            }
+        #else
+            (void)now;
+        #endif
+        }
 
         // JackRunnableInterface (notifier thread).
         bool Execute();
@@ -107,6 +138,13 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         // read by the RT thread): per-cycle loops over clients stop there
         int fRefNumBound;
         void UpdateRefNumBound();
+        // Each external client's process as seen from the server: pid in the server's
+        // pid namespace (SO_PEERCRED on its request socket; 0 = unknown, no checks) and
+        // the process start time, which tells it from a later process reusing the pid.
+        // fPeerNextCheck: earliest time to look again at a client found alive.
+        int fPeerPid[CLIENT_NUM];
+        unsigned long long fPeerStart[CLIENT_NUM];
+        jack_time_t fPeerNextCheck[CLIENT_NUM];
         JackMetadata fMetadata;
 
         int fSessionPendingReplies;
@@ -115,6 +153,7 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         std::map<int,std::string> fReservationMap;
 
         int ClientCloseAux(int refnum, bool wait);
+        void DetachDeadClient(int refnum);
         void DisconnectAllDeferred(jack_port_id_t port, std::vector<std::pair<jack_port_id_t, jack_port_id_t> >& removed);
         void CheckXRun(jack_time_t callback_usecs);
 
@@ -170,6 +209,9 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         int ClientDeactivate(int refnum, bool wait);
 
         void ClientKill(int refnum);
+        bool IsClientDead(int refnum);
+        void ClientSetPeerPid(int refnum, int pid, int uid);
+        void CheckStuckClients();
 
         int GetClientPID(const char* name);
         int GetClientRefNum(const char* name);
