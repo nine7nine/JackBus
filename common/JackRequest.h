@@ -1847,17 +1847,22 @@ struct JackClientNotification
         return 0;
     }
 
+    // One write of the fields in order, without padding: the same bytes as one write
+    // per field (what the client reads is unchanged), but a notification is never left
+    // half-written on the stream if a write fails, and it is one system call, not 8
     int Write(detail::JackChannelTransactionInterface* trans)
     {
-        CheckRes(trans->Write(&fSize, sizeof(int)));
-        CheckRes(trans->Write(&fName, sizeof(fName)));
-        CheckRes(trans->Write(&fRefNum, sizeof(int)));
-        CheckRes(trans->Write(&fNotify, sizeof(int)));
-        CheckRes(trans->Write(&fValue1, sizeof(int)));
-        CheckRes(trans->Write(&fValue2, sizeof(int)));
-        CheckRes(trans->Write(&fSync, sizeof(int)));
-        CheckRes(trans->Write(&fMessage, sizeof(fMessage)));
-        return 0;
+        char packet[sizeof(int) + sizeof(fName) + 5 * sizeof(int) + sizeof(fMessage)];
+        char* pos = packet;
+        memcpy(pos, &fSize, sizeof(int)); pos += sizeof(int);
+        memcpy(pos, fName, sizeof(fName)); pos += sizeof(fName);
+        memcpy(pos, &fRefNum, sizeof(int)); pos += sizeof(int);
+        memcpy(pos, &fNotify, sizeof(int)); pos += sizeof(int);
+        memcpy(pos, &fValue1, sizeof(int)); pos += sizeof(int);
+        memcpy(pos, &fValue2, sizeof(int)); pos += sizeof(int);
+        memcpy(pos, &fSync, sizeof(int)); pos += sizeof(int);
+        memcpy(pos, fMessage, sizeof(fMessage)); pos += sizeof(fMessage);
+        return trans->Write(packet, (int)(pos - packet));
     }
 
     int Size() const { return sizeof(int) + sizeof(fName) + 5 * sizeof(int) + sizeof(fMessage); }
