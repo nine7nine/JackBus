@@ -3,7 +3,10 @@
  * while the server is running, either by jack_client_close() or because its
  * process died without closing (killed, crashed, _exit).
  *
- *   client_kill <close|exit|kill|killfork|churn|late> <trials> [ports=40] [mem_mb=0]
+ *   client_kill <close|exit|kill|killfork|deactkill|churn|late> <trials> [ports=40] [mem_mb=0]
+ *
+ * deactkill: the victim calls jack_deactivate(), then is killed (its ports must
+ * be announced as gone once, not twice).
  *
  * killfork: like kill, but the victim first forks a child that sleeps 5 s: the
  * child inherits libjack's sockets (not close-on-exec), so the server's request
@@ -117,8 +120,11 @@ static int victim_main(int ports, long mem_mb)
     if (write(1, "R", 1) != 1) return 1;
     char cmd;
     if (read(0, &cmd, 1) != 1) _exit(3);
-    while (cmd == 'l') {
-        atomic_store(&late_once, 1);
+    while (cmd == 'l' || cmd == 'd') {
+        if (cmd == 'l')
+            atomic_store(&late_once, 1);
+        else
+            jack_deactivate(c);
         if (read(0, &cmd, 1) != 1) _exit(3);
     }
     if (cmd == 'c') {
@@ -319,7 +325,11 @@ int main(int argc, char **argv)
             usleep(200000);
             continue;
         }
-        if (strcmp(mode, "kill") == 0 || strcmp(mode, "killfork") == 0) {
+        if (strcmp(mode, "deactkill") == 0) {
+            if (write(to_child[1], "d", 1) != 1) return 1;
+            usleep(300000);
+            kill(pid, SIGKILL);
+        } else if (strcmp(mode, "kill") == 0 || strcmp(mode, "killfork") == 0) {
             kill(pid, SIGKILL);
         } else {
             char cmd = (strcmp(mode, "close") == 0 || churn) ? 'c' : 'e';

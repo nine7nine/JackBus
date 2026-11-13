@@ -1069,8 +1069,19 @@ void JackEngine::ClientKill(int refnum)
         if (external) {
             external->SetDead();
         }
-        if (ClientDeactivate(refnum, true) < 0) {
-            jack_error("JackEngine::ClientKill ref = %ld cannot be removed from the graph !!", refnum);
+        /*
+         A client that deactivated itself before it died (or was never activated) is
+         out of the graph and its ports were announced as gone already: deactivating
+         it again sent every port unregistration a second time. Still deactivate it if
+         it is active or still in the graph (it may have died after clearing its
+         fActive flag and before the server processed its deactivation).
+         */
+        bool in_graph = fGraphManager->IsDirectConnection(refnum, FREEWHEEL_DRIVER_REFNUM)
+                        || fGraphManager->IsDirectConnection(FREEWHEEL_DRIVER_REFNUM, refnum);
+        if (fClientTable[refnum]->GetClientControl()->fActive || in_graph) {
+            if (ClientDeactivate(refnum, true) < 0) {
+                jack_error("JackEngine::ClientKill ref = %ld cannot be removed from the graph !!", refnum);
+            }
         }
         fClientTable[refnum]->GetClientControl()->fActive = false;
     } else {
