@@ -47,6 +47,7 @@
 
 #include "params.h"
 #include "controller_internal.h"
+#include "jackdbus.h"
 
 #define PTNODE_ENGINE    "engine"
 #define PTNODE_DRIVER    "driver"
@@ -497,6 +498,182 @@ fail:
     return false;
 }
 
+/*
+ * jackdbus's log, as two engine parameters of its own (like engine/driver: they live in jackdbus,
+ * not in the server): what it writes (log-level) and how big the file may get before it is moved
+ * aside to jackdbus.log.1 (log-max-size). Saved in conf.xml with the rest.
+ */
+
+static const char * const g_log_level_names[] = {"off", "errors", "server", "all"};
+static const char * const g_log_level_descs[] = {
+    "Nothing (errors go to stderr)",
+    "Errors only",
+    "Errors and messages, without a line for every client and connection",
+    "Everything, a line for every client and connection too",
+};
+static bool g_log_level_set;
+static bool g_log_max_size_set;
+
+static bool engine_log_level_is_set(void * obj)
+{
+    return g_log_level_set;
+}
+
+static bool engine_log_level_reset(void * obj)
+{
+    __atomic_store_n(&g_jackdbus_log_level, JACKDBUS_LOG_LEVEL_DEFAULT, __ATOMIC_RELAXED);
+    g_log_level_set = false;
+    return true;
+}
+
+static union jackctl_parameter_value engine_log_level_get_value(void * obj)
+{
+    union jackctl_parameter_value value;
+    strcpy(value.str, g_log_level_names[__atomic_load_n(&g_jackdbus_log_level, __ATOMIC_RELAXED)]);
+    return value;
+}
+
+static bool engine_log_level_set_value(void * obj, const union jackctl_parameter_value * value_ptr)
+{
+    int i;
+
+    for (i = 0; i < (int)(sizeof(g_log_level_names) / sizeof(g_log_level_names[0])); i++)
+    {
+        if (strcmp(value_ptr->str, g_log_level_names[i]) == 0)
+        {
+            __atomic_store_n(&g_jackdbus_log_level, i, __ATOMIC_RELAXED);
+            g_log_level_set = true;
+            return true;
+        }
+    }
+
+    jack_error("Unknown log level \"%s\" (off, errors, server or all)", value_ptr->str);
+    return false;
+}
+
+static union jackctl_parameter_value engine_log_level_get_default_value(void * obj)
+{
+    union jackctl_parameter_value value;
+    strcpy(value.str, g_log_level_names[JACKDBUS_LOG_LEVEL_DEFAULT]);
+    return value;
+}
+
+static bool engine_log_max_size_is_set(void * obj)
+{
+    return g_log_max_size_set;
+}
+
+static bool engine_log_max_size_reset(void * obj)
+{
+    __atomic_store_n(&g_jackdbus_log_max_size, JACKDBUS_LOG_MAX_SIZE_DEFAULT, __ATOMIC_RELAXED);
+    g_log_max_size_set = false;
+    return true;
+}
+
+static union jackctl_parameter_value engine_log_max_size_get_value(void * obj)
+{
+    union jackctl_parameter_value value;
+    value.ui = __atomic_load_n(&g_jackdbus_log_max_size, __ATOMIC_RELAXED);
+    return value;
+}
+
+static bool engine_log_max_size_set_value(void * obj, const union jackctl_parameter_value * value_ptr)
+{
+    if (value_ptr->ui < 1 || value_ptr->ui > JACKDBUS_LOG_MAX_SIZE_LIMIT)
+    {
+        jack_error("Log size %u MiB is out of range (1 to %u)", value_ptr->ui, JACKDBUS_LOG_MAX_SIZE_LIMIT);
+        return false;
+    }
+
+    __atomic_store_n(&g_jackdbus_log_max_size, value_ptr->ui, __ATOMIC_RELAXED);
+    g_log_max_size_set = true;
+    return true;
+}
+
+static union jackctl_parameter_value engine_log_max_size_get_default_value(void * obj)
+{
+    union jackctl_parameter_value value;
+    value.ui = JACKDBUS_LOG_MAX_SIZE_DEFAULT;
+    return value;
+}
+
+static bool init_engine_log_parameters(struct jack_params * params_ptr)
+{
+    const char * address[PARAM_ADDRESS_SIZE] = {PTNODE_ENGINE, NULL};
+    struct jack_parameter_container * engine_ptr;
+    struct jack_parameter * level_ptr;
+    struct jack_parameter * size_ptr;
+    uint32_t i;
+
+    engine_ptr = find_container(&params_ptr->root, address, PARAM_ADDRESS_SIZE);
+    if (engine_ptr == NULL)
+    {
+        return false;
+    }
+
+    level_ptr = calloc(1, sizeof(struct jack_parameter));
+    size_ptr = calloc(1, sizeof(struct jack_parameter));
+    if (level_ptr == NULL || size_ptr == NULL)
+    {
+        goto fail;
+    }
+
+    level_ptr->ext = false;
+    level_ptr->obj = params_ptr;
+    level_ptr->vtable.is_set = engine_log_level_is_set;
+    level_ptr->vtable.reset = engine_log_level_reset;
+    level_ptr->vtable.get_value = engine_log_level_get_value;
+    level_ptr->vtable.set_value = engine_log_level_set_value;
+    level_ptr->vtable.get_default_value = engine_log_level_get_default_value;
+    level_ptr->type = JackParamString;
+    level_ptr->name = "log-level";
+    level_ptr->short_decr = "What jackdbus writes to its log";
+    level_ptr->long_descr = "What jackdbus writes to its log (~/.log/jack/jackdbus.log): off, errors, server (errors and messages, without a line for every client and connection) or all";
+    level_ptr->constraint_flags = JACK_CONSTRAINT_FLAG_VALID | JACK_CONSTRAINT_FLAG_STRICT;
+    level_ptr->constraint_range = false;
+    level_ptr->constraint.enumeration.count = sizeof(g_log_level_names) / sizeof(g_log_level_names[0]);
+    level_ptr->constraint.enumeration.possible_values_array = calloc(level_ptr->constraint.enumeration.count, sizeof(struct jack_parameter_enum));
+    if (level_ptr->constraint.enumeration.possible_values_array == NULL)
+    {
+        goto fail;
+    }
+    for (i = 0; i < level_ptr->constraint.enumeration.count; i++)
+    {
+        strcpy(level_ptr->constraint.enumeration.possible_values_array[i].value.str, g_log_level_names[i]);
+        level_ptr->constraint.enumeration.possible_values_array[i].short_desc = g_log_level_descs[i];
+    }
+
+    size_ptr->ext = false;
+    size_ptr->obj = params_ptr;
+    size_ptr->vtable.is_set = engine_log_max_size_is_set;
+    size_ptr->vtable.reset = engine_log_max_size_reset;
+    size_ptr->vtable.get_value = engine_log_max_size_get_value;
+    size_ptr->vtable.set_value = engine_log_max_size_set_value;
+    size_ptr->vtable.get_default_value = engine_log_max_size_get_default_value;
+    size_ptr->type = JackParamUInt;
+    size_ptr->name = "log-max-size";
+    size_ptr->short_decr = "Largest size of jackdbus's log, MiB";
+    size_ptr->long_descr = "Past this size jackdbus.log is moved to jackdbus.log.1 (replacing the one there) and a new one starts";
+    size_ptr->constraint_flags = JACK_CONSTRAINT_FLAG_VALID | JACK_CONSTRAINT_FLAG_STRICT;
+    size_ptr->constraint_range = true;
+    size_ptr->constraint.range.min.ui = 1;
+    size_ptr->constraint.range.max.ui = JACKDBUS_LOG_MAX_SIZE_LIMIT;
+
+    list_add_tail(&level_ptr->siblings, &engine_ptr->children);
+    list_add_tail(&size_ptr->siblings, &engine_ptr->children);
+    return true;
+
+fail:
+    jack_error("Ran out of memory trying to allocate the log parameters");
+    if (level_ptr != NULL)
+    {
+        free(level_ptr->constraint.enumeration.possible_values_array);
+    }
+    free(level_ptr);
+    free(size_ptr);
+    return false;
+}
+
 jack_params_handle jack_params_create(jackctl_server_t * server)
 {
     struct jack_params * params_ptr;
@@ -517,6 +694,7 @@ jack_params_handle jack_params_create(jackctl_server_t * server)
         !init_drivers(params_ptr) ||
         !init_driver(params_ptr) ||
         !init_engine_driver_parameter(params_ptr) ||
+        !init_engine_log_parameters(params_ptr) ||
         !jack_params_set_driver((jack_params_handle)params_ptr, DEFAULT_DRIVER) ||
         !init_internals(params_ptr))
     {

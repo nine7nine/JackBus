@@ -380,7 +380,7 @@ jack_controller_patchbay_create_client(
     client_ptr->name[client_name_len] = 0;
 
     client_ptr->pid = jack_get_client_pid(client_ptr->name);
-    jack_info("New client '%s' with PID %d", client_ptr->name, client_ptr->pid);
+    jack_dbus_info_chatter("New client '%s' with PID %d", client_ptr->name, client_ptr->pid);
 
     INIT_LIST_HEAD(&client_ptr->ports);
 
@@ -408,7 +408,7 @@ jack_controller_patchbay_destroy_client(
     struct jack_controller_patchbay *patchbay_ptr,
     struct jack_graph_client *client_ptr)
 {
-    jack_info("Client '%s' with PID %d is out", client_ptr->name, client_ptr->pid);
+    jack_dbus_info_chatter("Client '%s' with PID %d is out", client_ptr->name, client_ptr->pid);
 
     pthread_mutex_lock(&patchbay_ptr->lock);
     list_del(&client_ptr->siblings);
@@ -1674,7 +1674,7 @@ jack_controller_port_connect_callback(
 
     if (connect)
     {
-        jack_info("Connecting '%s' to '%s'", port1_name, port2_name);
+        jack_dbus_info_chatter("Connecting '%s' to '%s'", port1_name, port2_name);
         connection_ptr = jack_controller_patchbay_find_connection(patchbay_ptr, port1_ptr, port2_ptr);
         if (connection_ptr != NULL)
         {
@@ -1686,7 +1686,7 @@ jack_controller_port_connect_callback(
     }
     else
     {
-        jack_info("Disconnecting '%s' from '%s'", port1_name, port2_name);
+        jack_dbus_info_chatter("Disconnecting '%s' from '%s'", port1_name, port2_name);
         connection_ptr = jack_controller_patchbay_find_connection(patchbay_ptr, port1_ptr, port2_ptr);
         if (connection_ptr == NULL)
         {

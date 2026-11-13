@@ -45,6 +45,9 @@
 #include "sigsegv.h"
 
 static char * g_log_filename;
+static char * g_log_filename_old; /* jackdbus.log.1 */
+int g_jackdbus_log_level = JACKDBUS_LOG_LEVEL_DEFAULT;
+uint32_t g_jackdbus_log_max_size = JACKDBUS_LOG_MAX_SIZE_DEFAULT;
 static ino_t g_log_file_ino;
 FILE *g_logfile;
 char *g_jackdbus_config_dir;
@@ -566,6 +569,28 @@ fail:
 */
 static pthread_mutex_t g_log_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* Past engine/log-max-size MiB the log is too big. */
+static bool jack_dbus_log_too_big(const struct stat * st)
+{
+    uint32_t mib = __atomic_load_n(&g_jackdbus_log_max_size, __ATOMIC_RELAXED);
+    return mib != 0 && (uint64_t)st->st_size >= ((uint64_t)mib << 20);
+}
+
+/* A log that is too big moves to jackdbus.log.1 (replacing the one there); writing goes on in a
+   new file. One older file is kept, nothing more. */
+static void jack_dbus_log_rotate(void)
+{
+    struct stat st;
+
+    if (g_log_filename_old != NULL && stat(g_log_filename, &st) == 0 && jack_dbus_log_too_big(&st))
+    {
+        if (rename(g_log_filename, g_log_filename_old) != 0)
+        {
+            fprintf(stderr, "Cannot move jackdbus log file \"%s\" aside: %d (%s)\n", g_log_filename, errno, strerror(errno));
+        }
+    }
+}
+
 static bool jack_dbus_log_open(void)
 {
     struct stat st;
@@ -574,16 +599,18 @@ static bool jack_dbus_log_open(void)
 
     if (g_logfile != NULL)
     {
+        /* Reopen when the file went (moved or deleted from outside) or grew too big. */
         ret = stat(g_log_filename, &st);
-        if (ret != 0 || g_log_file_ino != st.st_ino)
-        {
-            fclose(g_logfile);
-        }
-        else
+        if (ret == 0 && g_log_file_ino == st.st_ino && !jack_dbus_log_too_big(&st))
         {
             return true;
         }
+
+        fclose(g_logfile);
+        g_logfile = NULL;
     }
+
+    jack_dbus_log_rotate();
 
     for (retry = 0; retry < 10; retry++)
     {
@@ -619,6 +646,11 @@ jack_dbus_info_callback(const char *msg)
     ctime_r(&timestamp, timestamp_str);
     timestamp_str[24] = 0;
 
+    if (__atomic_load_n(&g_jackdbus_log_level, __ATOMIC_RELAXED) < JACKDBUS_LOG_SERVER)
+    {
+        return;
+    }
+
     pthread_mutex_lock(&g_log_lock);
     if (jack_dbus_log_open())
     {
@@ -642,6 +674,13 @@ jack_dbus_error_callback(const char *msg)
     time(&timestamp);
     ctime_r(&timestamp, timestamp_str);
     timestamp_str[24] = 0;
+
+    if (__atomic_load_n(&g_jackdbus_log_level, __ATOMIC_RELAXED) < JACKDBUS_LOG_ERRORS)
+    {
+        /* No log file: errors still reach stderr (the journal, for a D-Bus started jackdbus). */
+        fprintf(stderr, "%s: ERROR: %s\n", timestamp_str, msg);
+        return;
+    }
 
     pthread_mutex_lock(&g_log_lock);
     if (jack_dbus_log_open())
@@ -781,6 +820,13 @@ static bool log_init(void)
     memcpy(g_log_filename + g_jackdbus_log_dir_len, JACKDBUS_LOG, log_len);
     g_log_filename[g_jackdbus_log_dir_len + log_len] = 0;
 
+    g_log_filename_old = malloc(g_jackdbus_log_dir_len + log_len + 3);
+    if (g_log_filename_old != NULL)
+    {
+        memcpy(g_log_filename_old, g_log_filename, g_jackdbus_log_dir_len + log_len);
+        memcpy(g_log_filename_old + g_jackdbus_log_dir_len + log_len, ".1", 3);
+    }
+
     if (!jack_dbus_log_open())
     {
         return false;
@@ -800,6 +846,7 @@ static void log_uninit(void)
     pthread_mutex_unlock(&g_log_lock);
 
     free(g_log_filename);
+    free(g_log_filename_old);
 }
 
 void

@@ -23,6 +23,7 @@
 #define DBUS_H__3DB2458F_44B2_43EA_882A_9F888DF71A88__INCLUDED
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #define JACK_DBUS_DEBUG
 
@@ -33,6 +34,31 @@
 #define JACKDBUS_DIR "/jack"
 #define JACKDBUS_LOG "/jackdbus.log"
 #define JACKDBUS_CONF "/conf.xml"
+
+/*
+ * What jackdbus writes to its log (the engine/log-level parameter), and how big the log may get
+ * before it is moved aside to jackdbus.log.1, replacing the one there (engine/log-max-size, MiB):
+ * the log never grows without end. Read without the log lock, so atomically.
+ */
+enum
+{
+    JACKDBUS_LOG_OFF,       /* nothing in the file; errors still go to stderr */
+    JACKDBUS_LOG_ERRORS,
+    JACKDBUS_LOG_SERVER,    /* errors and messages, without a line per client and connection */
+    JACKDBUS_LOG_ALL,       /* upstream's: everything */
+};
+#define JACKDBUS_LOG_LEVEL_DEFAULT JACKDBUS_LOG_SERVER
+#define JACKDBUS_LOG_MAX_SIZE_DEFAULT 4
+#define JACKDBUS_LOG_MAX_SIZE_LIMIT 1024
+extern int g_jackdbus_log_level;
+extern uint32_t g_jackdbus_log_max_size;
+
+/* The patchbay's line for each client and connection: written at log level "all" only. */
+#define jack_dbus_info_chatter(...)                                                         \
+    do {                                                                                    \
+        if (__atomic_load_n(&g_jackdbus_log_level, __ATOMIC_RELAXED) >= JACKDBUS_LOG_ALL)   \
+            jack_info(__VA_ARGS__);                                                         \
+    } while (0)
 
 extern char *g_jackdbus_config_dir;
 extern size_t g_jackdbus_config_dir_len; /* without terminating '\0' char */

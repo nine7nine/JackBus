@@ -98,6 +98,11 @@ doesn't hold up under measurement is reverted.
   - Control operations are serialized.
   - Device-reservation bookkeeping is bounded.
   - Log-file writes are serialized.
+  - The log no longer grows without end: past `log-max-size` MiB (default 4)
+    `jackdbus.log` moves to `jackdbus.log.1`, replacing the one there. The
+    `log-level` engine parameter sets what is written: `off`, `errors`,
+    `server` (the default: errors and messages, without a line for every
+    client and connection) or `all` (upstream's). Both are saved in conf.xml.
 - **Metadata:** builds against Berkeley DB 5.3, like Arch's `jack2`, so the
   shared metadata database stays readable by every client's libjack.
 
