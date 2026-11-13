@@ -290,26 +290,66 @@ static const char* State2String(jack_client_state_t state)
     }
 }
 
+/*
+ Realtime thread, first failing cycle(s) after a graph switch. One failing cycle is one
+ xrun: 1.9.22 sent one xrun notification per client found unfinished, so a client that
+ died or hung in the middle of a chain counted as several xruns (it, and each client
+ the engine had already triggered behind it), each with its own log line. Now: one
+ notification, one line naming the clients (state, and how long since each was
+ triggered), and jack_get_xrun_delayed_usecs() reports this xrun instead of whatever
+ the driver measured for its last one: the longest time an unfinished client had been
+ in its cycle, or how late a client finished after the cycle's deadline.
+ */
 void JackEngine::CheckXRun(jack_time_t callback_usecs)  // REVOIR les conditions de fin
 {
     const int bound = __atomic_load_n(&fRefNumBound, __ATOMIC_ACQUIRE);
+    char clients[256];
+    int len = 0;
+    int named = 0;
+    int unnamed = 0;
+    jack_time_t delay = 0;
+
+    clients[0] = 0;
     for (int i = fEngineControl->fDriverNum; i < bound; i++) {
         JackClientInterface* client = fClientTable[i];
         if (client && client->GetClientControl()->fActive) {
             JackClientTiming* timing = fGraphManager->GetClientTiming(i);
             jack_client_state_t status = timing->fStatus;
+            jack_time_t signaled_date = timing->fSignaledAt;
             jack_time_t finished_date = timing->fFinishedAt;
+            jack_time_t late;
 
             if (status != NotTriggered && status != Finished) {
-                jack_error("JackEngine::XRun: client = %s was not finished, state = %s", client->GetClientControl()->fName, State2String(status));
-                fNotifier.Notify(ALL_CLIENTS, kXRunCallback, 0);  // Notify all clients
+                late = (callback_usecs > signaled_date) ? callback_usecs - signaled_date : 0;
+            } else if (status == Finished && (long)(finished_date - callback_usecs) > 0) {
+                late = finished_date - callback_usecs;
+            } else {
+                continue;
             }
 
-            if (status == Finished && (long)(finished_date - callback_usecs) > 0) {
-                jack_error("JackEngine::XRun: client %s finished after current callback", client->GetClientControl()->fName);
-                fNotifier.Notify(ALL_CLIENTS, kXRunCallback, 0);  // Notify all clients
+            if (late > delay) {
+                delay = late;
+            }
+            if (named < 4 && len < (int)sizeof(clients)) {
+                int n = snprintf(clients + len, sizeof(clients) - len, "%s%s (%s, %ld us)", named ? ", " : "",
+                                 client->GetClientControl()->fName,
+                                 (status == Finished) ? "finished late" : State2String(status), long(late));
+                len += (n > 0) ? n : 0;
+                named++;
+            } else {
+                unnamed++;
             }
         }
+    }
+
+    if (named > 0) {
+        if (unnamed > 0) {
+            jack_error("JackEngine::XRun: not finished in time: %s and %d more", clients, unnamed);
+        } else {
+            jack_error("JackEngine::XRun: not finished in time: %s", clients);
+        }
+        fEngineControl->fXrunDelayedUsecs = float(delay);
+        fNotifier.Notify(ALL_CLIENTS, kXRunCallback, 0);  // Notify all clients
     }
 }
 
