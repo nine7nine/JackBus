@@ -20,7 +20,7 @@
 # Environment: NSPA_BUILD_DIR (default ./build), NSPA_HW_OUT (default
 # /tmp/jack2-nspa-hw), NSPA_HW_SERVERS (default "fork system"), NSPA_HW_LOW
 # (low-latency configurations, default "64x2 64x3 128x2"), NSPA_HW_ONLY
-# (subset of: load capture seq lowlat sync midi; default all).
+# (subset of: load capture seq lowlat sync midi kill; default all).
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"
@@ -100,6 +100,7 @@ if [ "${NSPA_HW_INNER:-0}" != 1 ]; then
     cc -O2 -Wall -I"$root/common" -o "$out/hwutil" "$here/hwutil.c" -L"$fl" -ljack || exit 1
     cc -O2 -Wall -o "$out/seq_ports" "$here/seq_ports.c" -lasound || exit 1
     cc -O2 -Wall -I"$root/common" -o "$out/seq_loop" "$here/seq_loop.c" -L"$fl" -ljack -lasound -lpthread || exit 1
+    cc -O2 -Wall -I"$root/common" -o "$out/client_kill" "$root/nspa/tests/client_kill.c" -L"$fl" -ljack || exit 1
 
     mixer_state="$out/mixer.state"
     alsactl -f "$mixer_state" store "$card" || { echo "cannot save the mixer state of $card, not running" >&2; exit 1; }
@@ -420,6 +421,38 @@ for which in ${NSPA_HW_SERVERS:-fork system}; do
         result INFO "$tag driver thread syscalls per cycle (512x2, -X seq, no MIDI, $n cycles): ${per%, }; seq queue-status ioctls $(awk -v a="$seqio" -v n="$n" 'BEGIN {printf "%.2f", n ? a / n : 0}')/cycle"
     fi
     STRACE_OUT=
+    fi
+
+    # 6. a client (40+40 ports, between two others) goes away while the card
+    # runs: jack_client_close, SIGKILL with 256 MB locked (slow teardown),
+    # SIGKILL while a child holds its sockets
+    if want kill; then
+    for cfg in 512x2 256x2; do
+        tag=$which-kill-$cfg
+        if start_server "$which" "$out/$tag.server.log" -r 48000 -p "${cfg%x*}" -n "${cfg#*x}"; then
+            for m in "close 4 0" "kill 4 256" "killfork 3 0"; do
+                set -- $m
+                client "$which" "$out/client_kill" "$1" "$2" 40 "$3" >"$out/$tag-$1.log" 2>&1
+                line="$(grep '^total' "$out/$tag-$1.log" | sed 's/^total: //')"
+                if [ "$which" = fork ]; then
+                    # close: nothing; gone without closing: one xrun per kill, a couple of cycles
+                    case $1 in
+                        close) lim_x=0 lim_c=0 ;;
+                        *) lim_x=$(( $2 * 2 )) lim_c=4 ;;
+                    esac
+                    x=$(sed -n 's/^total: xruns \([0-9]*\).*/\1/p' "$out/$tag-$1.log")
+                    c=$(sed -n 's/.*(max \([0-9]*\) = .*/\1/p' "$out/$tag-$1.log")
+                    u=$(sed -n 's/.*unreg wrong in \([0-9]*\).*/\1/p' "$out/$tag-$1.log")
+                    if [ -n "$x" ] && [ "$x" -le $lim_x ] && [ "${c:-99}" -le $lim_c ] && [ "${u:-1}" = 0 ]; then r=PASS; else r=FAIL; fi
+                else
+                    r=INFO
+                fi
+                result $r "$tag $1 ($2 trials, ${3} MB): $line"
+            done
+            alive || result FAIL "$tag server died"
+            alive && stop_server
+        fi
+    done
     fi
 done
 exit $fail

@@ -343,17 +343,23 @@ fi
 # A client (40 in + 40 out ports, between two others) that goes away while the
 # graph runs: closed, or its process gone without jack_client_close (exit,
 # SIGKILL, SIGKILL while a child it forked holds libjack's sockets, SIGKILL with
-# 256 MB locked so the kernel takes a while to tear it down). Limits: xruns for
+# 256 MB locked so the kernel takes a while to tear it down, SIGKILL after
+# jack_deactivate). Limits: xruns for
 # all trials, cycles the client behind it may miss, port-unregistration
 # callbacks exactly once per port.
 kill_case() {  # kill_case <server> <mode> <trials> <mem_mb> <gating 1|0> "<xruns> <cycles> <unreg>"
     name="client-kill-$2_$1-server"
     [ "$4" != 0 ] && name="$name-$4MB"
     skip_system "$name" "$1" fork && return
+    limits="$6"
+    if [ -n "$san" ]; then
+        # sanitizers slow everything down: twice the xruns (and 2 more), 8 cycles
+        limits=$(echo "$6" | awk '{print $1 * 2 + 2, ($2 > 0 ? 8 : 0), $3}')
+    fi
     saved_period=${SERVER_PERIOD:-}
     [ "$san" = tsan ] || SERVER_PERIOD=256     # TSan keeps its long periods
     if start_server "$1" "$out/$name.server.log"; then
-        if NSPA_KILL_LIMITS="$6" LD_LIBRARY_PATH="$fork_lib" timeout 180 "$out/client_kill" "$2" "$3" 40 "$4" >"$out/$name.log" 2>&1; then
+        if NSPA_KILL_LIMITS="$limits" LD_LIBRARY_PATH="$fork_lib" timeout 180 "$out/client_kill" "$2" "$3" 40 "$4" >"$out/$name.log" 2>&1; then
             echo "PASS $name: $(tail -1 "$out/$name.log" | sed 's/^PASS: //')"
         elif [ "$5" = 1 ]; then
             echo "FAIL $name: $(tail -1 "$out/$name.log")"; fail=1
@@ -371,6 +377,7 @@ kill_case fork churn    6 0   1 "0 0 1"
 kill_case fork exit     6 0   1 "12 4 1"
 kill_case fork kill     6 0   1 "12 4 1"
 kill_case fork killfork 4 0   1 "8 4 1"
+kill_case fork deactkill 4 0  1 "0 0 1"
 if [ -z "$san" ]; then
     kill_case fork kill 4 256 1 "8 4 1"
 fi
