@@ -5,8 +5,8 @@
  *
  *   client_kill <close|exit|kill|killfork|deactkill|churn|late> <trials> [ports=40] [mem_mb=0]
  *
- * deactkill: the victim calls jack_deactivate(), then is killed (its ports must
- * be announced as gone once, not twice).
+ * deactkill: the victim calls jack_deactivate(), then is killed (its ports are
+ * announced as gone twice, as in 1.9.22: unregistration count 160/80).
  *
  * killfork: like kill, but the victim first forks a child that sleeps 5 s: the
  * child inherits libjack's sockets (not close-on-exec), so the server's request

@@ -377,7 +377,9 @@ kill_case fork churn    6 0   1 "0 0 1"
 kill_case fork exit     6 0   1 "12 4 1"
 kill_case fork kill     6 0   1 "12 4 1"
 kill_case fork killfork 4 0   1 "8 4 1"
-kill_case fork deactkill 4 0  1 "0 0 1"
+# deactkill: its ports are announced as gone twice (as 1.9.22: clients that
+# found them with jack_get_ports() rely on the second time), so no unreg check
+kill_case fork deactkill 4 0  1 "0 0 0"
 if [ -z "$san" ]; then
     kill_case fork kill 4 256 1 "8 4 1"
 fi
