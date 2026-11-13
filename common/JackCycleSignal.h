@@ -30,6 +30,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <linux/futex.h>
+#include <linux/time_types.h>
 #if !defined(SYS_futex) && defined(SYS_futex_time64)
 #define SYS_futex SYS_futex_time64
 #endif
@@ -108,6 +109,61 @@ class JackCycleSignal
             __atomic_fetch_sub(&fWaiters, 1, __ATOMIC_SEQ_CST);
             return signalled;
         }
+
+    #if defined(SYS_futex_waitv) && defined(FUTEX_WAITV_MAX)
+        /*
+         TimedWait that also returns as soon as one of the caller's futexes no longer
+         holds its expected value, or is woken (futex_waitv, Linux 5.16). waiters[0]
+         is this signal's own word (filled in here), waiters[1..count] the caller's.
+         Returns 1 if signalled, woken or a value changed, 0 on timeout, -1 if
+         futex_waitv is not available (the caller then uses TimedWait).
+         */
+        int TimedWaitV(long usec, struct futex_waitv* waiters, unsigned int count)
+        {
+            if (count + 1 > FUTEX_WAITV_MAX) {
+                count = FUTEX_WAITV_MAX - 1;
+            }
+            uint32_t seq = __atomic_load_n(&fSequence, __ATOMIC_SEQ_CST);
+            __atomic_fetch_add(&fWaiters, 1, __ATOMIC_SEQ_CST);
+
+            waiters[0].val = seq;
+            waiters[0].uaddr = (uintptr_t)&fSequence;
+            waiters[0].flags = FUTEX_32 | FUTEX_PRIVATE_FLAG;   // Signal() wakes it private
+            waiters[0].__reserved = 0;
+
+            // absolute CLOCK_MONOTONIC deadline, 64-bit on every ABI
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            long long nsec = (long long)now.tv_nsec + (long long)usec * 1000;
+            struct __kernel_timespec deadline;
+            deadline.tv_sec = (long long)now.tv_sec + nsec / 1000000000LL;
+            deadline.tv_nsec = nsec % 1000000000LL;
+
+            int result;
+            for (;;) {
+                if (__atomic_load_n(&fSequence, __ATOMIC_SEQ_CST) != seq) {
+                    result = 1;
+                    break;
+                }
+                long res = ::syscall(SYS_futex_waitv, waiters, count + 1, 0, &deadline, CLOCK_MONOTONIC);
+                if (res >= 0 || errno == EAGAIN) {
+                    result = 1;     // woken, or a value already differed
+                    break;
+                }
+                if (errno == ETIMEDOUT) {
+                    result = (__atomic_load_n(&fSequence, __ATOMIC_SEQ_CST) != seq) ? 1 : 0;
+                    break;
+                }
+                if (errno != EINTR) {
+                    result = -1;    // ENOSYS (older kernel), or anything unexpected
+                    break;
+                }
+            }
+
+            __atomic_fetch_sub(&fWaiters, 1, __ATOMIC_SEQ_CST);
+            return result;
+        }
+    #endif
 };
 
 #else
