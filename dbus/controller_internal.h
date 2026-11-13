@@ -142,6 +142,10 @@ void
 jack_controller_patchbay_uninit(
     struct jack_controller *controller_ptr);
 
+void
+jack_controller_patchbay_free(
+    struct jack_controller *controller_ptr);
+
 void *
 jack_controller_patchbay_client_appeared_callback(
     void * server_context,

@@ -265,6 +265,7 @@ fail_close_client:
     }
 
     controller_ptr->client = NULL;
+    jack_controller_patchbay_free(controller_ptr);
 
 fail_stop_server:
     if (!jackctl_server_stop(controller_ptr->server))
@@ -319,6 +320,7 @@ jack_controller_stop_server(
     }
 
     controller_ptr->client = NULL;
+    jack_controller_patchbay_free(controller_ptr);
 
     if (!jackctl_server_stop(controller_ptr->server))
     {

@@ -402,6 +402,9 @@ fail:
     return NULL;
 }
 
+static void jack_controller_patchbay_remove_port(struct jack_controller_patchbay *patchbay_ptr, struct jack_graph_port *port_ptr);
+static void jack_controller_patchbay_destroy_connection(struct jack_controller_patchbay *patchbay_ptr, struct jack_graph_connection *connection_ptr);
+
 static
 void
 jack_controller_patchbay_destroy_client(
@@ -411,6 +414,18 @@ jack_controller_patchbay_destroy_client(
     jack_dbus_info_chatter("Client '%s' with PID %d is out", client_ptr->name, client_ptr->pid);
 
     pthread_mutex_lock(&patchbay_ptr->lock);
+    /*
+     A client is normally gone only after all its ports (the server announces each
+     one), but a driver that closes (master switch, server stop) announces no port
+     unregistration: its ports would stay in the graph, pointing at the client freed
+     below (found by ThreadSanitizer, use after free in GetGraph or at server stop).
+     */
+    while (!list_empty(&client_ptr->ports))
+    {
+        jack_controller_patchbay_remove_port(
+            patchbay_ptr,
+            list_entry(client_ptr->ports.next, struct jack_graph_port, siblings_client));
+    }
     list_del(&client_ptr->siblings);
     patchbay_ptr->graph.version++;
     jack_controller_patchbay_send_signal_client_disappeared(patchbay_ptr->graph.version, client_ptr->id, client_ptr->name);
@@ -523,9 +538,23 @@ jack_controller_patchbay_remove_port(
     struct jack_controller_patchbay *patchbay_ptr,
     struct jack_graph_port *port_ptr)
 {
+    struct list_head *node_ptr;
+    struct list_head *next_ptr;
+    struct jack_graph_connection *connection_ptr;
+
     //jack_info("remove port: %s", port_ptr->name);
 
     pthread_mutex_lock(&patchbay_ptr->lock);
+    /* connections are normally removed first (the server announces disconnections
+       before a port goes away), but not when the port goes with its client */
+    list_for_each_safe(node_ptr, next_ptr, &patchbay_ptr->graph.connections)
+    {
+        connection_ptr = list_entry(node_ptr, struct jack_graph_connection, siblings);
+        if (connection_ptr->port1 == port_ptr || connection_ptr->port2 == port_ptr)
+        {
+            jack_controller_patchbay_destroy_connection(patchbay_ptr, connection_ptr);
+        }
+    }
     list_del(&port_ptr->siblings_client);
     list_del(&port_ptr->siblings_graph);
     patchbay_ptr->graph.version++;
@@ -1456,6 +1485,16 @@ jack_controller_dbus_disconnect_ports_by_connection_id(
         return;
     }
 
+    if (!controller_ptr->started)
+    {
+        /* the patchbay exists only while the server runs */
+        jack_dbus_error(
+            call,
+            JACK_DBUS_ERROR_SERVER_NOT_RUNNING,
+            "Can't execute this method with stopped JACK server");
+        return;
+    }
+
     pthread_mutex_lock(&patchbay_ptr->lock);
 
     connection_ptr = jack_controller_patchbay_find_connection_by_id(patchbay_ptr, connection_id);
@@ -1505,6 +1544,16 @@ jack_controller_dbus_get_client_pid(
         /* The method call had invalid arguments meaning that
          * jack_dbus_get_method_args() has constructed an error for us.
          */
+        return;
+    }
+
+    if (!controller_ptr->started)
+    {
+        /* the patchbay exists only while the server runs */
+        jack_dbus_error(
+            call,
+            JACK_DBUS_ERROR_SERVER_NOT_RUNNING,
+            "Can't execute this method with stopped JACK server");
         return;
     }
 
@@ -1773,6 +1822,24 @@ jack_controller_patchbay_uninit(
 
 /*     jack_info("jack_controller_patchbay_uninit() called"); */
 
+    /*
+     The dbusapi client is deactivated, not yet closed: a notification callback
+     already running (a port or client going away, e.g. after a master switch) may
+     still change the graph. Tear it down under the lock, so such a callback either
+     finishes first or then finds nothing; the lock itself goes with the client
+     (jack_controller_patchbay_free, after jack_client_close). 1.9.22 walked the
+     lists unlocked and destroyed the lock here: ThreadSanitizer found the callback
+     freeing entries the walk was about to use.
+     */
+    pthread_mutex_lock(&patchbay_ptr->lock);
+
+    while (!list_empty(&patchbay_ptr->graph.connections))
+    {
+        jack_controller_patchbay_destroy_connection(
+            patchbay_ptr,
+            list_entry(patchbay_ptr->graph.connections.next, struct jack_graph_connection, siblings));
+    }
+
     while (!list_empty(&patchbay_ptr->graph.ports))
     {
         port_ptr = list_entry(patchbay_ptr->graph.ports.next, struct jack_graph_port, siblings_graph);
@@ -1785,7 +1852,20 @@ jack_controller_patchbay_uninit(
         jack_controller_patchbay_destroy_client(patchbay_ptr, client_ptr);
     }
 
-    pthread_mutex_destroy(&patchbay_ptr->lock);
+    pthread_mutex_unlock(&patchbay_ptr->lock);
+}
+
+// After jack_client_close: no notification callback can run any more
+void
+jack_controller_patchbay_free(
+    struct jack_controller * controller_ptr)
+{
+    if (controller_ptr->patchbay_context != NULL)
+    {
+        pthread_mutex_destroy(&patchbay_ptr->lock);
+        free(controller_ptr->patchbay_context);
+        controller_ptr->patchbay_context = NULL;
+    }
 }
 
 #undef patchbay_ptr
@@ -1869,8 +1949,12 @@ jack_controller_patchbay_init(
 
 fail_uninit_mutex:
     pthread_mutex_destroy(&patchbay_ptr->lock);
+    controller_ptr->patchbay_context = NULL;
+    free(patchbay_ptr);
+    return false;
 
 fail:
+    free(patchbay_ptr);
     return false;
 }
 
