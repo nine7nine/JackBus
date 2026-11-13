@@ -344,11 +344,15 @@ fi
 # graph runs: closed, or its process gone without jack_client_close (exit,
 # SIGKILL, SIGKILL while a child it forked holds libjack's sockets, SIGKILL with
 # 256 MB locked so the kernel takes a while to tear it down, SIGKILL after
-# jack_deactivate). Limits: xruns for
-# all trials, cycles the client behind it may miss, port-unregistration
-# callbacks exactly once per port.
-kill_case() {  # kill_case <server> <mode> <trials> <mem_mb> <gating 1|0> "<xruns> <cycles> <unreg>"
-    name="client-kill-$2_$1-server"
+# jack_deactivate), deactivated and activated again (react), or its own process
+# thread returning while the process goes on (threadend). Limits: xruns for all
+# trials, cycles the client behind it may miss, port-unregistration callbacks
+# exactly once per port; and how many times the server must log that a client's
+# realtime thread ended (JackAliveTable: once per death with our libjack, never
+# otherwise; "-" = not checked).
+# KILL_LIB / KILL_BIN: the client's libjack and test binary (default: the fork's).
+kill_case() {  # kill_case <server> <mode> <trials> <mem_mb> <gating 1|0> "<xruns> <cycles> <unreg>" [ended]
+    name="client-kill-$2_$1-server${KILL_TAG:-}"
     [ "$4" != 0 ] && name="$name-$4MB"
     skip_system "$name" "$1" fork && return
     limits="$6"
@@ -359,30 +363,59 @@ kill_case() {  # kill_case <server> <mode> <trials> <mem_mb> <gating 1|0> "<xrun
     saved_period=${SERVER_PERIOD:-}
     [ "$san" = tsan ] || SERVER_PERIOD=256     # TSan keeps its long periods
     if start_server "$1" "$out/$name.server.log"; then
-        if NSPA_KILL_LIMITS="$limits" LD_LIBRARY_PATH="$fork_lib" timeout 180 "$out/client_kill" "$2" "$3" 40 "$4" >"$out/$name.log" 2>&1; then
-            echo "PASS $name: $(tail -1 "$out/$name.log" | sed 's/^PASS: //')"
-        elif [ "$5" = 1 ]; then
-            echo "FAIL $name: $(tail -1 "$out/$name.log")"; fail=1
-        else
-            echo "INFO $name (expected to fail on unfixed servers): $(tail -1 "$out/$name.log" | sed 's/^FAIL: //')"
-        fi
+        rc=0
+        NSPA_KILL_LIMITS="$limits" LD_LIBRARY_PATH="${KILL_LIB:-$fork_lib}" timeout 180 "${KILL_BIN:-$out/client_kill}" "$2" "$3" 40 "$4" >"$out/$name.log" 2>&1 || rc=1
         stop_server || fail=1
+        line="$(tail -1 "$out/$name.log" | sed 's/^PASS: //; s/^FAIL: //')"
+        ended=$(grep -c 'realtime thread ended' "$out/$name.server.log")
+        # under TSan, clients abort when they close (their threads end): not counted
+        if [ -n "${7:-}" ] && [ "$7" != - ] && [ "$san" != tsan ] && [ "$ended" != "$7" ]; then
+            rc=1; line="$line; realtime thread ended logged $ended times, expected $7"
+        fi
+        if [ $rc = 0 ]; then
+            echo "PASS $name: $line"
+        elif [ "$5" = 1 ]; then
+            echo "FAIL $name: $line"; fail=1
+        else
+            echo "INFO $name (expected to fail on unfixed servers): $line"
+        fi
     else
         echo "FAIL $name: server"; fail=1
     fi
     SERVER_PERIOD=$saved_period
 }
-kill_case fork close    6 0   1 "0 0 1"
-kill_case fork churn    6 0   1 "0 0 1"
-kill_case fork exit     6 0   1 "12 4 1"
-kill_case fork kill     6 0   1 "12 4 1"
-kill_case fork killfork 4 0   1 "8 4 1"
+# the fork's libjack: dying clients found through their slot, before their next cycle
+kill_case fork close     6 0   1 "0 0 1" 0
+kill_case fork churn     6 0   1 "0 0 1" 0
+kill_case fork exit      6 0   1 "3 2 1" 6
+kill_case fork kill      6 0   1 "3 2 1" 6
+kill_case fork killfork  4 0   1 "2 2 1" 4
 # deactkill: its ports are announced as gone twice (as 1.9.22: clients that
 # found them with jack_get_ports() rely on the second time), so no unreg check
-kill_case fork deactkill 4 0  1 "0 0 0"
+kill_case fork deactkill 4 0   1 "0 0 0" 0
+kill_case fork react     4 0   1 "0 0 0" 0
+kill_case fork threadend 4 0   1 "0 0 0" 4
 if [ -z "$san" ]; then
-    kill_case fork kill 4 256 1 "8 4 1"
+    kill_case fork kill  4 256 1 "2 2 1" 4
 fi
+# a kernel without futex_waitv: slots looked at every 20 ms
+SERVER_ENV=JACK_NO_FUTEX_WAITV=1 KILL_TAG=-nowaitv kill_case fork kill 6 0 1 "12 4 1" 6
+SERVER_ENV=
+# another libjack (the system one, without slots, or with): found through
+# /proc when the graph does not finish, or through its slot
+KILL_LIB=/usr/lib KILL_TAG=-systemlib kill_case fork kill 4 0 1 "8 4 1" -
+KILL_LIB=/usr/lib KILL_TAG=-systemlib kill_case fork react 4 0 1 "0 0 0" 0
+# the fork's 32-bit libjack against the 64-bit server: the slot laid out by
+# 32-bit glibc, the kernel's compat robust list
+lib32="$root/build-mixed/lib32/common"
+if [ -z "$san" ] && [ -f "$lib32/libjack.so" ] && nm -D "$lib32/libjack.so" 2>/dev/null | grep -q pthread_mutex_consistent \
+   && cc -m32 -O2 -Wall -I"$root/common" -o "$out/client_kill32" "$here/client_kill.c" -L"$lib32" -ljack 2>/dev/null; then
+    KILL_LIB=$lib32 KILL_BIN=$out/client_kill32 KILL_TAG=-lib32 kill_case fork kill  4 0 1 "2 2 1" 4
+    KILL_LIB=$lib32 KILL_BIN=$out/client_kill32 KILL_TAG=-lib32 kill_case fork react 4 0 1 "0 0 0" 0
+else
+    echo "SKIP client-kill lib32 (no 32-bit build of this libjack in build-mixed)"
+fi
+KILL_LIB= KILL_BIN= KILL_TAG=
 kill_case system kill     4 0 0 "8 4 1"
 kill_case system killfork 2 0 0 "4 4 1"
 

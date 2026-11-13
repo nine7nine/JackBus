@@ -3,10 +3,16 @@
  * while the server is running, either by jack_client_close() or because its
  * process died without closing (killed, crashed, _exit).
  *
- *   client_kill <close|exit|kill|killfork|deactkill|churn|late> <trials> [ports=40] [mem_mb=0]
+ *   client_kill <close|exit|kill|killfork|deactkill|react|threadend|churn|late> <trials> [ports=40] [mem_mb=0]
  *
  * deactkill: the victim calls jack_deactivate(), then is killed (its ports are
  * announced as gone twice, as in 1.9.22: unregistration count 160/80).
+ *
+ * react: the victim deactivates and activates again 5 times (reconnecting): it
+ * must run after each activation, with no xrun.
+ * threadend: the victim's process thread is its own (jack_set_process_thread)
+ * and returns while the client is active, the process going on: the graph must
+ * not stall.
  *
  * killfork: like kill, but the victim first forks a child that sleeps 5 s: the
  * child inherits libjack's sockets (not close-on-exec), so the server's request
@@ -59,6 +65,8 @@ static jack_port_t *vin[MAXP], *vout[MAXP];
 static int vports;
 static atomic_int late_once;
 static double late_us;
+static atomic_uint vruns;
+static atomic_int thread_quit;
 
 static void spin_us(double us)
 {
@@ -79,7 +87,33 @@ static int victim_process(jack_nframes_t n, void *arg)
         float *out = jack_port_get_buffer(vout[i], n);
         memcpy(out, in, n * sizeof(float));
     }
+    atomic_fetch_add(&vruns, 1);
     return 0;
+}
+
+/* threadend: a process thread of the client's own, which returns when told to,
+   at the end of a cycle */
+static void *victim_thread(void *arg)
+{
+    jack_client_t *c = arg;
+    for (;;) {
+        jack_nframes_t n = jack_cycle_wait(c);
+        victim_process(n, NULL);
+        jack_cycle_signal(c, 0);
+        if (atomic_load(&thread_quit))
+            return NULL;
+    }
+}
+
+static void connect_all(jack_client_t *c)
+{
+    for (int i = 0; i < vports; i++) {
+        char a[128];
+        snprintf(a, sizeof a, "victim:in_%d", i);
+        jack_connect(c, "src:out", a);
+        snprintf(a, sizeof a, "victim:out_%d", i);
+        jack_connect(c, a, "sink:in");
+    }
 }
 
 static int victim_main(int ports, long mem_mb)
@@ -104,15 +138,12 @@ static int victim_main(int ports, long mem_mb)
     }
     const char *lp = getenv("NSPA_LATE_PERIODS");
     late_us = (lp ? atof(lp) : 1.5) * jack_get_buffer_size(c) * 1e6 / jack_get_sample_rate(c);
-    jack_set_process_callback(c, victim_process, NULL);
+    if (getenv("NSPA_KILL_THREADFN"))
+        jack_set_process_thread(c, victim_thread, c);
+    else
+        jack_set_process_callback(c, victim_process, NULL);
     if (jack_activate(c)) return 1;
-    for (int i = 0; i < ports; i++) {
-        char a[128];
-        snprintf(a, sizeof a, "victim:in_%d", i);
-        jack_connect(c, "src:out", a);
-        snprintf(a, sizeof a, "victim:out_%d", i);
-        jack_connect(c, a, "sink:in");
-    }
+    connect_all(c);
     if (getenv("NSPA_KILL_FORK") && fork() == 0) {
         sleep(5);
         _exit(0);
@@ -120,11 +151,27 @@ static int victim_main(int ports, long mem_mb)
     if (write(1, "R", 1) != 1) return 1;
     char cmd;
     if (read(0, &cmd, 1) != 1) _exit(3);
-    while (cmd == 'l' || cmd == 'd') {
-        if (cmd == 'l')
+    while (cmd == 'l' || cmd == 'd' || cmd == 'a' || cmd == 't') {
+        if (cmd == 'l') {
             atomic_store(&late_once, 1);
-        else
+        } else if (cmd == 'd') {
             jack_deactivate(c);
+        } else if (cmd == 't') {
+            atomic_store(&thread_quit, 1);
+        } else {
+            /* 'a': 5 x deactivate, activate, reconnect; did it run again each time? */
+            char ok = 0;
+            for (int k = 0; k < 5; k++) {
+                jack_deactivate(c);
+                usleep(50000);
+                if (jack_activate(c)) break;
+                connect_all(c);
+                unsigned base = atomic_load(&vruns);
+                usleep(100000);
+                if (atomic_load(&vruns) > base) ok++;
+            }
+            if (write(1, &ok, 1) != 1) return 1;
+        }
         if (read(0, &cmd, 1) != 1) _exit(3);
     }
     if (cmd == 'c') {
@@ -277,6 +324,8 @@ int main(int argc, char **argv)
         if (pid == 0) {
             if (strcmp(mode, "killfork") == 0)
                 setenv("NSPA_KILL_FORK", "1", 1);
+            if (strcmp(mode, "threadend") == 0)
+                setenv("NSPA_KILL_THREADFN", "1", 1);
             dup2(to_child[0], 0);
             dup2(from_child[1], 1);
             close(to_child[1]);
@@ -302,6 +351,33 @@ int main(int argc, char **argv)
         }
 
         double t0 = now_ms();
+        if (strcmp(mode, "react") == 0 || strcmp(mode, "threadend") == 0) {
+            int react = strcmp(mode, "react") == 0;
+            char ok = 0;
+            if (react) {
+                if (write(to_child[1], "a", 1) != 1 || read(from_child[0], &ok, 1) != 1) return 1;
+            } else {
+                if (write(to_child[1], "t", 1) != 1) return 1;
+                usleep(600000);
+            }
+            jack_nframes_t f1 = jack_frame_time(sink.c);
+            unsigned cyc = (f1 - f0) / period, sr = atomic_load(&sink.runs);
+            unsigned x = atomic_load(&xruns), s = cyc > sr ? cyc - sr : 0;
+            if (react)
+                printf("trial %2d: %d/5 activations ran, xruns %u\n", t, ok, x);
+            else
+                printf("trial %2d: after the thread ended: xruns %u, sink missed %u of %u cycles\n", t, x, s, cyc);
+            tot_x += x;
+            if (s > max_s) max_s = s;
+            if ((react && (ok != 5 || x)) || (!react && (x > 1 || s > 4))) fail = 1;
+            if (write(to_child[1], "c", 1) != 1) return 1;
+            waitpid(pid, NULL, 0);
+            while (!atomic_load(&victim_gone) && now_ms() - t0 < 10000) usleep(1000);
+            close(to_child[1]);
+            close(from_child[0]);
+            usleep(200000);
+            continue;
+        }
         int late = strcmp(mode, "late") == 0;
         if (late) {
             if (write(to_child[1], "l", 1) != 1) return 1;
@@ -361,10 +437,16 @@ int main(int argc, char **argv)
         if ((int)u != 2 * ports) bad_unreg++;
         if (gone < 0) fail = 1;
     }
+    if (strcmp(mode, "react") == 0 || strcmp(mode, "threadend") == 0) {
+        printf("%s: %s, %d trials: %u xruns, sink starved up to %u cycles\n", fail ? "FAIL" : "PASS",
+               mode, trials, tot_x, max_s);
+        goto done;
+    }
     if (strcmp(mode, "late") == 0) {
         printf("total: xruns %u  double runs %u  extra runs %u  sink short %u\n", tot_x, tot_dups, tot_extra, tot_short);
         printf("%s: late, %d trials\n", tot_extra ? "FAIL" : "PASS", trials);
-        return tot_extra ? 1 : 0;
+        fail = tot_extra ? 1 : 0;
+        goto done;
     }
     printf("total: xruns %u  sink missed %u (max %u = %.1f ms)  bystander missed %u"
            "  reap avg %.1f ms  gone avg %.1f max %.1f ms  unreg wrong in %u/%d\n",
@@ -377,6 +459,9 @@ int main(int argc, char **argv)
     printf("%s: %s, %d trials: %u xruns, sink starved up to %u cycles, bystander %u, "
            "unregistration count wrong in %u\n", fail ? "FAIL" : "PASS", mode, trials,
            tot_x, max_s, tot_b, bad_unreg);
+done:
+    /* closed on every path: a client left open when the process exits counts,
+       for the server, as one whose realtime thread ended */
     jack_client_close(src.c);
     jack_client_close(sink.c);
     jack_client_close(bys.c);

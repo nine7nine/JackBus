@@ -449,6 +449,9 @@ for which in ${NSPA_HW_SERVERS:-fork system}; do
                 fi
                 result $r "$tag $1 ($2 trials, ${3} MB): $line"
             done
+            # with the fork's libjack, each kill is found through the client's
+            # slot (JackAliveTable) before its next cycle
+            result INFO "$tag realtime thread ended logged $(grep -c 'realtime thread ended' "$out/$tag.server.log") times, process found exiting $(grep -c 'its process is' "$out/$tag.server.log") times"
             alive || result FAIL "$tag server died"
             alive && stop_server
         fi
