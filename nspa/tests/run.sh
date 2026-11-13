@@ -351,7 +351,7 @@ kill_case() {  # kill_case <server> <mode> <trials> <mem_mb> <gating 1|0> "<xrun
     [ "$4" != 0 ] && name="$name-$4MB"
     skip_system "$name" "$1" fork && return
     saved_period=${SERVER_PERIOD:-}
-    SERVER_PERIOD=256
+    [ "$san" = tsan ] || SERVER_PERIOD=256     # TSan keeps its long periods
     if start_server "$1" "$out/$name.server.log"; then
         if NSPA_KILL_LIMITS="$6" LD_LIBRARY_PATH="$fork_lib" timeout 180 "$out/client_kill" "$2" "$3" 40 "$4" >"$out/$name.log" 2>&1; then
             echo "PASS $name: $(tail -1 "$out/$name.log" | sed 's/^PASS: //')"
@@ -385,7 +385,7 @@ lag_case() {  # lag_case <server> <mode> <gating 1|0>
     name="notify-lag-$2_$1-server"
     skip_system "$name" "$1" fork && return
     saved_period=${SERVER_PERIOD:-}
-    SERVER_PERIOD=256
+    [ "$san" = tsan ] || SERVER_PERIOD=256     # TSan keeps its long periods
     if start_server "$1" "$out/$name.server.log"; then
         if LD_LIBRARY_PATH="$fork_lib" timeout 120 "$out/notify_lag" "$2" >"$out/$name.log" 2>&1; then
             echo "PASS $name: $(tail -1 "$out/$name.log" | sed 's/^PASS: //')"
