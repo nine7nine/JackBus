@@ -1249,7 +1249,7 @@ void JackEngine::CheckStuckClients()
 {
 #ifdef __linux__
     jack_time_t now = GetMicroSeconds();
-    for (int i = fEngineControl->fDriverNum; i < fRefNumBound; i++) {
+    for (int i = 0; i < fRefNumBound; i++) {   // drivers are skipped (not external clients)
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
         if (!client || client->IsDead() || fPeerPid[i] <= 0 || !client->GetClientControl()->fActive) {
             continue;
@@ -1274,7 +1274,9 @@ void JackEngine::CheckStuckClients()
 int JackEngine::FlushNotifications()
 {
     int lagging = 0;
-    for (int i = fEngineControl->fDriverNum; i < fRefNumBound; i++) {
+    // from 0, not fDriverNum: drivers are not external clients, and fDriverNum is
+    // written without the engine lock when a driver is opened (master switch)
+    for (int i = 0; i < fRefNumBound; i++) {
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
         if (client && client->FlushNotifications()) {
             lagging++;
