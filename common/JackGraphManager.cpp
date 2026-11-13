@@ -628,7 +628,9 @@ int JackGraphManager::Connect(jack_port_id_t port_src, jack_port_id_t port_dst)
         goto end;
     }
     if (manager->IsConnected(port_src, port_dst)) {
-        jack_error("JackGraphManager::Connect already connected port_src = %ld port_dst = %ld", port_src, port_dst);
+        // Not an error of the server's: the caller gets EEXIST and decides (session
+        // managers and apps commonly restore the same connections)
+        jack_log("JackGraphManager::Connect already connected port_src = %ld port_dst = %ld", port_src, port_dst);
         res = EEXIST;
         goto end;
     }
