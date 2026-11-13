@@ -27,7 +27,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 namespace Jack
 {
 
-JackExternalClient::JackExternalClient(): fClientControl(NULL)
+JackExternalClient::JackExternalClient(): fClientControl(NULL), fDead(false)
 {}
 
 JackExternalClient::~JackExternalClient()
@@ -35,6 +35,9 @@ JackExternalClient::~JackExternalClient()
 
 int JackExternalClient::ClientNotify(int refnum, const char* name, int notify, int sync, const char* message, int value1, int value2)
 {
+    if (fDead) {
+        return 0;   // its sockets are gone: every write would fail (and be logged)
+    }
     int result = -1;
     jack_log("JackExternalClient::ClientNotify ref = %ld client = %s name = %s notify = %ld", refnum, fClientControl->fName, name, notify);
     fChannel.ClientNotify(refnum, name, notify, sync, message, value1, value2, &result);

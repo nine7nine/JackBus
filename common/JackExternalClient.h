@@ -40,6 +40,7 @@ class JackExternalClient : public JackClientInterface
 
         JackNotifyChannel fChannel;           /*! Server/client communication channel */
         JackClientControl* fClientControl;    /*! Client control in shared memory     */
+        bool fDead;                           /*! Request socket gone: its process died (or closed it) */
 
     public:
 
@@ -52,6 +53,11 @@ class JackExternalClient : public JackClientInterface
         int ClientNotify(int refnum, const char* name, int notify, int sync, const char* message, int value1, int value2);
 
         JackClientControl* GetClientControl() const;
+
+        // Nothing is sent to a client whose process died (request socket gone, or found
+        // exiting): every write to its notification socket would fail, and be logged
+        void SetDead() { fDead = true; }
+        bool IsDead() const { return fDead; }
 };
 
 

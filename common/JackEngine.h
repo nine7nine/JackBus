@@ -30,6 +30,8 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackChannel.h"
 #include "JackBoundedQueue.h"
 #include "JackCycleSignal.h"
+#include <utility>
+#include <vector>
 #include <map>
 
 namespace Jack
@@ -113,6 +115,7 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         std::map<int,std::string> fReservationMap;
 
         int ClientCloseAux(int refnum, bool wait);
+        void DisconnectAllDeferred(jack_port_id_t port, std::vector<std::pair<jack_port_id_t, jack_port_id_t> >& removed);
         void CheckXRun(jack_time_t callback_usecs);
 
         int NotifyAddClient(JackClientInterface* new_client, const char* new_name, int refnum);

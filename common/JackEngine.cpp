@@ -20,6 +20,8 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include <iostream>
 #include <fstream>
 #include <set>
+#include <vector>
+#include <utility>
 #include <assert.h>
 #include <ctype.h>
 
@@ -928,12 +930,31 @@ int JackEngine::ClientDeactivate(int refnum, bool wait)
     fGraphManager->GetInputPorts(refnum, input_ports);
     fGraphManager->GetOutputPorts(refnum, output_ports);
 
-    // First disconnect all ports
+    /*
+     Take the client out of the graph in one step, then notify. 1.9.22 published
+     each disconnection separately, sent its notification to every client, and
+     removed the client's activation edges last: until then every cycle waited for
+     the client. For a client whose process died, that is how long its successors
+     stop running, and each cycle the graph does not finish is reported as an
+     xrun. All edits now go into one write session (nothing is published until
+     the outermost WriteNextStateStop, so the realtime thread switches to the whole
+     change at once), the switch is forced at the next cycle, and the same
+     notifications follow.
+     */
+    std::vector<std::pair<jack_port_id_t, jack_port_id_t> > removed;
+    fGraphManager->WriteNextStateStart();
     for (int i = 0; (i < PORT_NUM_FOR_CLIENT) && (input_ports[i] != EMPTY); i++) {
-        PortDisconnect(-1, input_ports[i], ALL_PORTS);
+        DisconnectAllDeferred(input_ports[i], removed);
     }
     for (int i = 0; (i < PORT_NUM_FOR_CLIENT) && (output_ports[i] != EMPTY); i++) {
-        PortDisconnect(-1, output_ports[i], ALL_PORTS);
+        DisconnectAllDeferred(output_ports[i], removed);
+    }
+    fGraphManager->Deactivate(refnum);
+    fGraphManager->WriteNextStateStop();
+    __atomic_store_n(&fLastSwitchUsecs, (jack_time_t)0, __ATOMIC_RELAXED); // Force switch to occur next cycle, even when called with "dead" clients
+
+    for (size_t i = 0; i < removed.size(); i++) {
+        NotifyPortConnect(removed[i].first, removed[i].second, false);
     }
 
     // Then issue port registration notification
@@ -944,9 +965,6 @@ int JackEngine::ClientDeactivate(int refnum, bool wait)
         NotifyPortRegistation(output_ports[i], false);
     }
 
-    fGraphManager->Deactivate(refnum);
-    __atomic_store_n(&fLastSwitchUsecs, (jack_time_t)0, __ATOMIC_RELAXED); // Force switch to occur next cycle, even when called with "dead" clients
-
     // Wait for graph state change to be effective
     if (wait && !fSignal.TimedWait(fEngineControl->fTimeOutUsecs * 10)) {
         jack_error("JackEngine::ClientDeactivate wait error ref = %ld name = %s", refnum, client->GetClientControl()->fName);
@@ -956,12 +974,43 @@ int JackEngine::ClientDeactivate(int refnum, bool wait)
     }
 }
 
+// PortDisconnect(-1, port, ALL_PORTS) without the notifications: the pairs actually
+// disconnected are appended to "removed", for the caller to notify
+void JackEngine::DisconnectAllDeferred(jack_port_id_t port, std::vector<std::pair<jack_port_id_t, jack_port_id_t> >& removed)
+{
+    jack_int_t connections[CONNECTION_NUM_FOR_PORT];
+    fGraphManager->GetConnections(port, connections);
+    bool output = (fGraphManager->GetPort(port)->GetFlags() & JackPortIsOutput) != 0;
+
+    for (int i = 0; (i < CONNECTION_NUM_FOR_PORT) && (connections[i] != EMPTY); i++) {
+        jack_port_id_t src = output ? port : (jack_port_id_t)connections[i];
+        jack_port_id_t dst = output ? (jack_port_id_t)connections[i] : port;
+        if (fGraphManager->CheckPorts(src, dst) == 0 && fGraphManager->Disconnect(src, dst) == 0) {
+            removed.push_back(std::make_pair(src, dst));
+        }
+    }
+}
+
 void JackEngine::ClientKill(int refnum)
 {
     jack_log("JackEngine::ClientKill ref = %ld", refnum);
+
+    /*
+     The client's request socket is gone, so is its process (or it closed the
+     socket): notifications to it can only fail, each one logged (four lines per
+     port and per connection). And as the client did not deactivate itself, its
+     fActive flag is still set, which made ClientCloseAux send every port
+     unregistration a second time (patchbays then report ports they cannot find).
+     */
+    JackExternalClient* external = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
+    if (external) {
+        external->SetDead();
+    }
     if (ClientDeactivate(refnum, true) < 0) {
         jack_error("JackEngine::ClientKill ref = %ld cannot be removed from the graph !!", refnum);
     }
+    fClientTable[refnum]->GetClientControl()->fActive = false;
+
     if (ClientExternalClose(refnum) < 0) {
         jack_error("JackEngine::ClientKill ref = %ld cannot be closed", refnum);
     }
