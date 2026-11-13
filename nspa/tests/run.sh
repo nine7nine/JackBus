@@ -398,8 +398,9 @@ kill_case fork threadend 4 0   1 "0 0 0" 4
 if [ -z "$san" ]; then
     kill_case fork kill  4 256 1 "2 2 1" 4
 fi
-# a kernel without futex_waitv: slots looked at every 20 ms
-SERVER_ENV=JACK_NO_FUTEX_WAITV=1 KILL_TAG=-nowaitv kill_case fork kill 6 0 1 "12 4 1" 6
+# a kernel without futex_waitv: slots looked at every 20 ms, so the socket
+# closing may come first (either way the client is removed): no count
+SERVER_ENV=JACK_NO_FUTEX_WAITV=1 KILL_TAG=-nowaitv kill_case fork kill 6 0 1 "12 4 1" -
 SERVER_ENV=
 # another libjack (the system one, without slots, or with): found through
 # /proc when the graph does not finish, or through its slot
