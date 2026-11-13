@@ -1576,6 +1576,20 @@ SERVER_EXPORT bool jackctl_server_remove_slave(jackctl_server * server_ptr, jack
     }
 }
 
+/*
+ jack2-nspa: a session manager takes an application's clients out of the graph before
+ stopping it (JackEngine::DetachClients), the one named client_name or, if NULL, every
+ client of process pid. Returns how many were taken out, -1 for an unknown client name
+ or without a server.
+ */
+SERVER_EXPORT int jackctl_server_detach_clients(jackctl_server * server_ptr, const char * client_name, int pid)
+{
+    if (!server_ptr || !server_ptr->engine) {
+        return -1;
+    }
+    return server_ptr->engine->GetEngine()->DetachClients(client_name, pid);
+}
+
 SERVER_EXPORT bool jackctl_server_switch_master(jackctl_server * server_ptr, jackctl_driver * driver_ptr)
 {
     if (server_ptr && server_ptr->engine) {

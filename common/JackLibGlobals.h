@@ -33,6 +33,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackAliveTable.h"
 #endif
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include <signal.h>
 
@@ -128,7 +129,10 @@ struct JackLibGlobals
             fAliveTried = true;
             strncpy(fAliveServer, server_name, JACK_SERVER_NAME_SIZE);
             fAliveServer[JACK_SERVER_NAME_SIZE] = 0;
-            fAliveTable.Connect(server_name);
+            // tests: behave as a libjack without slots
+            if (getenv("JACK_NO_ALIVE_SLOT") == NULL) {
+                fAliveTable.Connect(server_name);
+            }
         }
         if (!fAliveTable.IsMapped() || strcmp(fAliveServer, server_name) != 0) {
             return NULL;

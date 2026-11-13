@@ -24,6 +24,15 @@
 #include <stdbool.h>
 #include "jslist.h"
 #include "jack/control.h"
+
+/* jack2-nspa extension of the server control API (common/JackControlAPI.h): take the
+   client client_name, or every client of process pid, out of the graph. Returns how
+   many were taken out, -1 for an unknown client name. */
+int
+jackctl_server_detach_clients(
+    jackctl_server_t * server,
+    const char * client_name,
+    int pid);
 #include "jack/jack.h"
 #include "jack/session.h"
 #include "jackdbus.h"

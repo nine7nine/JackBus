@@ -1574,6 +1574,96 @@ unlock:
     pthread_mutex_unlock(&patchbay_ptr->lock);
 }
 
+/*
+ jack2-nspa: for session managers, before they stop an application. Its clients are
+ taken out of the graph (as by jack_deactivate) and the switch is in effect when the
+ reply comes: the application's process can then be stopped without the graph missing
+ a cycle, whatever its libjack, even if it is killed in the middle of its callback.
+ The clients stay registered until the process goes. Replies with how many clients
+ were taken out (0: none active).
+ */
+static
+void
+jack_controller_dbus_detach_client(
+    struct jack_dbus_method_call * call)
+{
+    const char * client_name;
+    message_arg_t arg;
+    int count;
+
+    if (!controller_ptr->started)
+    {
+        jack_dbus_error(
+            call,
+            JACK_DBUS_ERROR_SERVER_NOT_RUNNING,
+            "Can't execute this method with stopped JACK server");
+        return;
+    }
+
+    if (!jack_dbus_get_method_args(
+            call,
+            DBUS_TYPE_STRING,
+            &client_name,
+            DBUS_TYPE_INVALID))
+    {
+        /* The method call had invalid arguments meaning that
+         * jack_dbus_get_method_args() has constructed an error for us.
+         */
+        return;
+    }
+
+    /* not under the patchbay lock: the server's notifications of the clients'
+       ports going are handled by our own client, which takes it */
+    count = jackctl_server_detach_clients(controller_ptr->server, client_name, 0);
+    if (count < 0)
+    {
+        jack_dbus_error(call, JACK_DBUS_ERROR_INVALID_ARGS, "cannot find client '%s'", client_name);
+        return;
+    }
+
+    arg.uint32 = (dbus_uint32_t)count;
+    jack_dbus_construct_method_return_single(call, DBUS_TYPE_UINT32, arg);
+}
+
+// Every client of a process (the pid the session manager started)
+static
+void
+jack_controller_dbus_detach_process(
+    struct jack_dbus_method_call * call)
+{
+    dbus_int64_t pid;
+    message_arg_t arg;
+    int count;
+
+    if (!controller_ptr->started)
+    {
+        jack_dbus_error(
+            call,
+            JACK_DBUS_ERROR_SERVER_NOT_RUNNING,
+            "Can't execute this method with stopped JACK server");
+        return;
+    }
+
+    if (!jack_dbus_get_method_args(
+            call,
+            DBUS_TYPE_INT64,
+            &pid,
+            DBUS_TYPE_INVALID))
+    {
+        return;
+    }
+
+    if (pid <= 0 || pid > INT32_MAX)
+    {
+        jack_dbus_error(call, JACK_DBUS_ERROR_INVALID_ARGS, "invalid process id %" PRId64, (int64_t)pid);
+        return;
+    }
+
+    count = jackctl_server_detach_clients(controller_ptr->server, NULL, (int)pid);
+    arg.uint32 = (dbus_uint32_t)(count > 0 ? count : 0);
+    jack_dbus_construct_method_return_single(call, DBUS_TYPE_UINT32, arg);
+}
+
 #undef controller_ptr
 #define controller_ptr ((struct jack_controller *)context)
 
@@ -2002,6 +2092,16 @@ JACK_DBUS_METHOD_ARGUMENTS_BEGIN(GetClientPID)
     JACK_DBUS_METHOD_ARGUMENT("process_id", DBUS_TYPE_INT64_AS_STRING, true)
 JACK_DBUS_METHOD_ARGUMENTS_END
 
+JACK_DBUS_METHOD_ARGUMENTS_BEGIN(DetachClient)
+    JACK_DBUS_METHOD_ARGUMENT("client_name", DBUS_TYPE_STRING_AS_STRING, false)
+    JACK_DBUS_METHOD_ARGUMENT("detached", DBUS_TYPE_UINT32_AS_STRING, true)
+JACK_DBUS_METHOD_ARGUMENTS_END
+
+JACK_DBUS_METHOD_ARGUMENTS_BEGIN(DetachProcess)
+    JACK_DBUS_METHOD_ARGUMENT("process_id", DBUS_TYPE_INT64_AS_STRING, false)
+    JACK_DBUS_METHOD_ARGUMENT("detached", DBUS_TYPE_UINT32_AS_STRING, true)
+JACK_DBUS_METHOD_ARGUMENTS_END
+
 JACK_DBUS_METHODS_BEGIN
     JACK_DBUS_METHOD_DESCRIBE(GetAllPorts, jack_controller_dbus_get_all_ports)
     JACK_DBUS_METHOD_DESCRIBE(GetGraph, jack_controller_dbus_get_graph)
@@ -2011,6 +2111,8 @@ JACK_DBUS_METHODS_BEGIN
     JACK_DBUS_METHOD_DESCRIBE(DisconnectPortsByID, jack_controller_dbus_disconnect_ports_by_id)
     JACK_DBUS_METHOD_DESCRIBE(DisconnectPortsByConnectionID, jack_controller_dbus_disconnect_ports_by_connection_id)
     JACK_DBUS_METHOD_DESCRIBE(GetClientPID, jack_controller_dbus_get_client_pid)
+    JACK_DBUS_METHOD_DESCRIBE(DetachClient, jack_controller_dbus_detach_client)
+    JACK_DBUS_METHOD_DESCRIBE(DetachProcess, jack_controller_dbus_detach_process)
 JACK_DBUS_METHODS_END
 
 JACK_DBUS_SIGNAL_ARGUMENTS_BEGIN(GraphChanged)

@@ -174,10 +174,12 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         // Active external clients whose slot the notifier watches (request thread
         // writes, notifier thread reads)
         alignas(8) uint64_t fAliveWatch[(CLIENT_NUM + 63) / 64];
-        // Taken out of the graph because their realtime thread ended; removed when
-        // their process is found exiting or gone, or their socket closes
-        bool fThreadDead[CLIENT_NUM];
-        jack_time_t fThreadDeadSince[CLIENT_NUM];
+        // Taken out of the graph while still registered: their realtime thread ended
+        // (DetachThreadEndedClient), or a session manager is about to stop their
+        // process (DetachClients). Removed when their process is found exiting or
+        // gone, or their socket closes; back in the graph if they activate again.
+        bool fDetached[CLIENT_NUM];
+        jack_time_t fDetachedSince[CLIENT_NUM];
         void WatchClient(int refnum, bool on);
         bool IsWatched(int refnum) const;
         void DetachThreadEndedClient(int refnum);
@@ -249,6 +251,7 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         void ClientSetPeerPid(int refnum, int pid, int uid);
         void CheckStuckClients();
         int FlushNotifications();
+        int DetachClients(const char* client_name, int pid);
 
         int GetClientPID(const char* name);
         int GetClientRefNum(const char* name);

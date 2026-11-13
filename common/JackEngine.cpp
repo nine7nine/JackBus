@@ -68,8 +68,8 @@ JackEngine::JackEngine(JackGraphManager* manager,
         fPeerPid[i] = 0;
         fPeerStart[i] = 0;
         fPeerNextCheck[i] = 0;
-        fThreadDead[i] = false;
-        fThreadDeadSince[i] = 0;
+        fDetached[i] = false;
+        fDetachedSince[i] = 0;
     }
     memset(fAliveWatch, 0, sizeof(fAliveWatch));
     fRefNumBound = 0;
@@ -324,7 +324,7 @@ void JackEngine::UpdateRefNumBound()
 void JackEngine::ReleaseRefnum(int refnum)
 {
     WatchClient(refnum, false);
-    fThreadDead[refnum] = false;
+    fDetached[refnum] = false;
 #ifdef __linux__
     fAliveTable.ClearSlot(refnum);
 #endif
@@ -889,7 +889,7 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
     // A fresh slot: the client (its libjack) makes it its own, and nothing of an
     // earlier client of this refnum may be taken for this one's
     WatchClient(refnum, false);
-    fThreadDead[refnum] = false;
+    fDetached[refnum] = false;
 #ifdef __linux__
     fAliveTable.ClearSlot(refnum);
 #endif
@@ -1076,7 +1076,7 @@ int JackEngine::ClientActivate(int refnum, bool is_real_time, bool wait)
         fGraphManager->Activate(refnum);
         // Its realtime thread is running and holds its slot (if its libjack has
         // one): libjack starts the thread before asking for activation
-        fThreadDead[refnum] = false;
+        fDetached[refnum] = false;
         if (dynamic_cast<JackExternalClient*>(client)) {
             WatchClient(refnum, true);
         }
@@ -1117,9 +1117,9 @@ int JackEngine::ClientDeactivate(int refnum, bool wait)
     // which is no reason for the notifier to report it
     WatchClient(refnum, false);
 
-    if (fThreadDead[refnum]) {
-        // Already out of the graph (DetachThreadEndedClient), its connections and
-        // ports announced as gone then
+    if (fDetached[refnum]) {
+        // Already out of the graph (DetachThreadEndedClient, DetachClients), its
+        // connections and ports announced as gone then
         return 0;
     }
 
@@ -1201,7 +1201,7 @@ void JackEngine::ClientKill(int refnum)
      unregistration a second time (patchbays then report ports they cannot find).
      */
     JackExternalClient* external = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
-    bool detached = (external && external->IsDead()) || fThreadDead[refnum];
+    bool detached = (external && external->IsDead()) || fDetached[refnum];
     if (external) {
         external->SetDead();
     }
@@ -1398,14 +1398,14 @@ void JackEngine::CheckStuckClients()
      */
     for (int i = 0; i < fRefNumBound; i++) {
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
-        if (!client || client->IsDead() || fThreadDead[i] || !IsWatched(i) || !client->GetClientControl()->fActive) {
+        if (!client || client->IsDead() || fDetached[i] || !IsWatched(i) || !client->GetClientControl()->fActive) {
             continue;
         }
         uint32_t* word = fAliveTable.Word(i);
         if (word && (__atomic_load_n(word, __ATOMIC_ACQUIRE) & FUTEX_OWNER_DIED)) {
             jack_info("client %s: its realtime thread ended, taken out of the graph", client->GetClientControl()->fName);
             DetachThreadEndedClient(i);
-            fThreadDeadSince[i] = now;
+            fDetachedSince[i] = now;
         }
     }
 
@@ -1419,12 +1419,12 @@ void JackEngine::CheckStuckClients()
     bool pending = false;
     for (int i = 0; i < fRefNumBound; i++) {
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
-        if (!client || client->IsDead() || !fThreadDead[i] || fPeerPid[i] <= 0) {
+        if (!client || client->IsDead() || !fDetached[i] || fPeerPid[i] <= 0) {
             continue;
         }
         if (ProcessState(fPeerPid[i], fPeerStart[i]) != kPeerAlive) {
             client->SetDead();  // the request channel removes it (KillDeadClients)
-        } else if (now - fThreadDeadSince[i] < 2000000) {
+        } else if (now - fDetachedSince[i] < 2000000) {
             pending = true;
         }
     }
@@ -1435,7 +1435,7 @@ void JackEngine::CheckStuckClients()
     // Clients without such a slot (another libjack): when the graph did not finish
     for (int i = 0; i < fRefNumBound; i++) {   // drivers are skipped (not external clients)
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
-        if (!client || client->IsDead() || fThreadDead[i] || fPeerPid[i] <= 0 || !client->GetClientControl()->fActive) {
+        if (!client || client->IsDead() || fDetached[i] || fPeerPid[i] <= 0 || !client->GetClientControl()->fActive) {
             continue;
         }
         if (fGraphManager->GetClientTiming(i)->fStatus == Finished || now < fPeerNextCheck[i]) {
@@ -1499,7 +1499,62 @@ bool JackEngine::IsWatched(int refnum) const
 void JackEngine::DetachThreadEndedClient(int refnum)
 {
     ClientDeactivate(refnum, false);
-    fThreadDead[refnum] = true;
+    fDetached[refnum] = true;
+}
+
+/*
+ For session managers (jackdbus DetachClient, DetachProcess): take an application's
+ clients out of the graph before stopping its process. Stopped while still in the
+ graph, an application misses the cycle it is due in whenever its realtime thread
+ cannot tell the server first (another libjack, or killed in the middle of its
+ callback); out of it beforehand, its departure costs the graph nothing.
+
+ Matches the client named client_name, or (client_name NULL) every client of the
+ process pid, as the server sees it (SO_PEERCRED: the pid the session manager
+ started, in its pid namespace), or as the client reports it if that is unknown.
+ Each one is deactivated as jack_deactivate does (connections and ports announced
+ as gone), and the switch is in effect when this returns. It stays registered and
+ its libjack still sees it active: if its process goes on after all, it is back in
+ the graph after jack_deactivate and jack_activate. Removed once its process is
+ found exiting or gone (CheckStuckClients) or its socket closes.
+
+ Returns how many clients were taken out (0: already out, inactive, or gone), -1
+ for an unknown client name.
+ */
+int JackEngine::DetachClients(const char* client_name, int pid)
+{
+    int count = 0;
+    bool found = false;
+    jack_time_t now = GetMicroSeconds();
+    for (int i = 0; i < fRefNumBound; i++) {
+        JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
+        if (!client) {
+            continue;
+        }
+        if (client_name) {
+            if (strcmp(client->GetClientControl()->fName, client_name) != 0) {
+                continue;
+            }
+        } else {
+            int client_pid = (fPeerPid[i] > 0) ? fPeerPid[i] : client->GetClientControl()->fPID;
+            if (pid <= 0 || client_pid != pid) {
+                continue;
+            }
+        }
+        found = true;
+        if (client->IsDead() || fDetached[i] || !client->GetClientControl()->fActive) {
+            continue;
+        }
+        jack_info("client %s: taken out of the graph on request", client->GetClientControl()->fName);
+        ClientDeactivate(i, true);
+        fDetached[i] = true;
+        fDetachedSince[i] = now;
+        count++;
+    }
+    if (count > 0) {
+        fNotifier.RequestCheck();   // its process is about to go: removed soon after
+    }
+    return (client_name && !found) ? -1 : count;
 }
 
 // The client's process is exiting or gone: out of the graph now, without waiting for
