@@ -44,6 +44,7 @@ cc -O2 $tcf -Wall -I"$root/common" -o "$out/mixdown" "$here/mixdown.c" -L"$fork_
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/metadata" "$here/metadata.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/refnum_bound" "$here/refnum_bound.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/client_kill" "$here/client_kill.c" -L"$fork_lib" -ljack || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/notify_lag" "$here/notify_lag.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -375,6 +376,34 @@ if [ -z "$san" ]; then
 fi
 kill_case system kill     4 0 0 "8 4 1"
 kill_case system killfork 2 0 0 "4 4 1"
+
+# One client's notification thread is slow (1.5 s latency callback) or stuck
+# (6 s, while another client registers 1500 ports): other clients' requests
+# must not wait for it, it must still get its notifications in order, and a
+# buffer-size change must still wait until it has handled it.
+lag_case() {  # lag_case <server> <mode> <gating 1|0>
+    name="notify-lag-$2_$1-server"
+    skip_system "$name" "$1" fork && return
+    saved_period=${SERVER_PERIOD:-}
+    SERVER_PERIOD=256
+    if start_server "$1" "$out/$name.server.log"; then
+        if LD_LIBRARY_PATH="$fork_lib" timeout 120 "$out/notify_lag" "$2" >"$out/$name.log" 2>&1; then
+            echo "PASS $name: $(tail -1 "$out/$name.log" | sed 's/^PASS: //')"
+        elif [ "$3" = 1 ]; then
+            echo "FAIL $name: $(tail -1 "$out/$name.log")"; fail=1
+        else
+            echo "INFO $name (expected to fail on unfixed servers): $(tail -1 "$out/$name.log" | sed 's/^FAIL: //')"
+        fi
+        stop_server || fail=1
+    else
+        echo "FAIL $name: server"; fail=1
+    fi
+    SERVER_PERIOD=$saved_period
+}
+lag_case fork slow    1
+lag_case fork hung    1
+lag_case fork bufsize 1
+lag_case system slow  0
 
 if [ -n "$san" ]; then
     echo "SKIP rt-syscalls (sanitizer run)"
