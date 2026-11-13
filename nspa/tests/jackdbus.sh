@@ -164,6 +164,53 @@ else
 fi
 rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 
+# 1d. a session manager takes an application's clients out of the graph before
+# stopping it (org.jackaudio.JackPatchbay.DetachClient / DetachProcess): killed
+# afterwards, its departure costs the graph nothing, whatever its libjack (here
+# without its JackAliveTable slot, JACK_NO_ALIVE_SLOT=1, so only the detach helps)
+kill_bin="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/client_kill"
+if [ ! -x "$kill_bin" ]; then
+    echo "SKIP jackdbus-detach: no client_kill"
+elif start_jackdbus; then
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
+    call org.jackaudio.Configure.SetParameterValue array:string:driver,period variant:uint32:256
+    if call org.jackaudio.JackControl.StartServer; then
+        for mode in detachkill detachpid; do
+            before=$(grep -c 'taken out of the graph on request' "$log")
+            if JACK_NO_ALIVE_SLOT=1 NSPA_KILL_LIMITS="0 0 1" LD_LIBRARY_PATH="$(dirname "$jackdbus")/../common" \
+               timeout 120 "$kill_bin" $mode 4 40 0 >"$work/$mode.log" 2>&1; then
+                rc=0
+            else
+                rc=1
+            fi
+            n=$(( $(grep -c 'taken out of the graph on request' "$log") - before ))
+            [ "$n" = 4 ] || rc=1
+            result jackdbus-$mode $rc "$(tail -1 "$work/$mode.log" | sed 's/^PASS: //; s/^FAIL: //'); taken out on request $n of 4"
+        done
+        if dbus-send --session --print-reply --dest=org.jackaudio.service /org/jackaudio/Controller \
+               org.jackaudio.JackPatchbay.DetachClient string:nspa_no_such_client >/dev/null 2>&1; then
+            result jackdbus-detach-unknown 1 "DetachClient of an unknown client succeeded"
+        else
+            result jackdbus-detach-unknown 0 "DetachClient of an unknown client is an error"
+        fi
+        call org.jackaudio.JackControl.StopServer
+        if call org.jackaudio.JackPatchbay.DetachProcess int64:1; then
+            result jackdbus-detach-stopped 1 "DetachProcess with the server stopped succeeded"
+        elif ! kill -0 $JD_PID 2>/dev/null; then
+            result jackdbus-detach-stopped 1 "jackdbus died"
+        else
+            result jackdbus-detach-stopped 0 "DetachProcess with the server stopped is an error"
+        fi
+    else
+        echo "FAIL jackdbus-detach: StartServer failed"; fail=1
+    fi
+    kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
+else
+    echo "FAIL jackdbus-detach: jackdbus did not come up"; fail=1
+fi
+rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
+rm -rf "$HOME/.config/jack"
+
 # 2. crash handler
 if start_jackdbus; then
     kill -SEGV $JD_PID

@@ -3,7 +3,7 @@
  * while the server is running, either by jack_client_close() or because its
  * process died without closing (killed, crashed, _exit).
  *
- *   client_kill <close|exit|kill|killfork|deactkill|react|threadend|churn|late> <trials> [ports=40] [mem_mb=0]
+ *   client_kill <close|exit|kill|killfork|deactkill|detachkill|detachpid|react|threadend|churn|late> <trials> [ports=40] [mem_mb=0]
  *
  * deactkill: the victim calls jack_deactivate(), then is killed (its ports are
  * announced as gone twice, as in 1.9.22: unregistration count 160/80).
@@ -13,6 +13,10 @@
  * threadend: the victim's process thread is its own (jack_set_process_thread)
  * and returns while the client is active, the process going on: the graph must
  * not stall.
+ * detachkill / detachpid: as a session manager would, ask jackdbus to take the
+ * victim out of the graph (org.jackaudio.JackPatchbay.DetachClient by name, or
+ * DetachProcess by pid; needs DBUS_SESSION_BUS_ADDRESS of a jackdbus), then
+ * SIGKILL it: no xrun, whatever its libjack.
  *
  * killfork: like kill, but the victim first forks a child that sleeps 5 s: the
  * child inherits libjack's sockets (not close-on-exec), so the server's request
@@ -401,7 +405,20 @@ int main(int argc, char **argv)
             usleep(200000);
             continue;
         }
-        if (strcmp(mode, "deactkill") == 0) {
+        if (strcmp(mode, "detachkill") == 0 || strcmp(mode, "detachpid") == 0) {
+            char cmd[256];
+            if (strcmp(mode, "detachkill") == 0)
+                snprintf(cmd, sizeof cmd, "dbus-send --session --print-reply --dest=org.jackaudio.service "
+                         "/org/jackaudio/Controller org.jackaudio.JackPatchbay.DetachClient string:victim >/dev/null");
+            else
+                snprintf(cmd, sizeof cmd, "dbus-send --session --print-reply --dest=org.jackaudio.service "
+                         "/org/jackaudio/Controller org.jackaudio.JackPatchbay.DetachProcess int64:%d >/dev/null", (int)pid);
+            if (system(cmd) != 0) {
+                fprintf(stderr, "DetachClient/DetachProcess failed\n");
+                fail = 1;
+            }
+            kill(pid, SIGKILL);
+        } else if (strcmp(mode, "deactkill") == 0) {
             if (write(to_child[1], "d", 1) != 1) return 1;
             usleep(300000);
             kill(pid, SIGKILL);
