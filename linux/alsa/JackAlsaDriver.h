@@ -39,6 +39,10 @@ class JackAlsaDriver : public JackAudioDriver
     private:
 
         jack_driver_t* fDriver;
+        /* jack2-nspa: the cards whose device reservations Open took (-1: none), released by
+           Close. Not looked up again at Close: a card that was unplugged has no index left. */
+        int fReservedCaptureCard;
+        int fReservedPlaybackCard;
         jack_native_thread_t fReservationLoopThread;
 
         void UpdateLatencies();
@@ -46,7 +50,8 @@ class JackAlsaDriver : public JackAudioDriver
     public:
 
         JackAlsaDriver(const char* name, const char* alias, JackLockedEngine* engine, JackSynchro* table)
-		: JackAudioDriver(name, alias, engine, table),fDriver(NULL)
+		: JackAudioDriver(name, alias, engine, table),fDriver(NULL),
+          fReservedCaptureCard(-1), fReservedPlaybackCard(-1)
         {}
         virtual ~JackAlsaDriver()
         {}
@@ -82,6 +87,11 @@ class JackAlsaDriver : public JackAudioDriver
         int Write();
 
         // BufferSize can be changed
+        bool IsDeviceLost()
+        {
+            return fDriver != NULL && ((alsa_driver_t *)fDriver)->device_lost;
+        }
+
         bool IsFixedBufferSize()
         {
             return false;

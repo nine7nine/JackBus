@@ -332,6 +332,8 @@ int JackAlsaDriver::Open(jack_nframes_t nframes,
                 return -1;
             }
         }
+        fReservedCaptureCard = capture_card;
+        fReservedPlaybackCard = (playback_card != capture_card) ? playback_card : -1;
     }
 
     fDriver = alsa_driver_new ((char*)"alsa_pcm", (char*)playback_driver_name, (char*)capture_driver_name,
@@ -387,18 +389,17 @@ int JackAlsaDriver::Close()
     if (JackServerGlobals::on_device_release != NULL)
     {
         char audio_name[32];
-        int capture_card = card_to_num(fCaptureDriverName);
-        if (capture_card >= 0) {
-            snprintf(audio_name, sizeof(audio_name), "Audio%d", capture_card);
+        if (fReservedCaptureCard >= 0) {
+            snprintf(audio_name, sizeof(audio_name), "Audio%d", fReservedCaptureCard);
             JackServerGlobals::on_device_release(audio_name);
         }
-
-        int playback_card = card_to_num(fPlaybackDriverName);
-        if (playback_card >= 0 && playback_card != capture_card) {
-            snprintf(audio_name, sizeof(audio_name), "Audio%d", playback_card);
+        if (fReservedPlaybackCard >= 0) {
+            snprintf(audio_name, sizeof(audio_name), "Audio%d", fReservedPlaybackCard);
             JackServerGlobals::on_device_release(audio_name);
         }
     }
+    fReservedCaptureCard = -1;
+    fReservedPlaybackCard = -1;
 
     return res;
 }
