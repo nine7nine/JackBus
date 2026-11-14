@@ -619,8 +619,15 @@ enum_alsa_devices()
     {
         snprintf(card_id.str, sizeof(card_id.str), "hw:%d", card_no);
 
-        if (snd_ctl_open(&handle, card_id.str, 0) >= 0 &&
-            snd_ctl_card_info(handle, info) >= 0)
+        if (snd_ctl_open(&handle, card_id.str, 0) < 0)
+            continue;
+        if (snd_ctl_card_info(handle, info) < 0)
+        {
+            /* jack2-nspa: closed on every path; the list is rebuilt on hotplug */
+            snd_ctl_close(handle);
+            continue;
+        }
+
         {
             snprintf(card_id.str, sizeof(card_id.str), "hw:%s", snd_ctl_card_info_get_id(info));
             if (!jack_constraint_add_enum(
@@ -628,7 +635,10 @@ enum_alsa_devices()
                     &array_size,
                     &card_id,
                     snd_ctl_card_info_get_name(info)))
+            {
+                snd_ctl_close(handle);
                 goto fail;
+            }
 
             device_no = -1;
 
@@ -668,7 +678,10 @@ enum_alsa_devices()
                         &array_size,
                         &device_id,
                         description))
+                {
+                    snd_ctl_close(handle);
                     goto fail;
+                }
             }
 
             snd_ctl_close(handle);
