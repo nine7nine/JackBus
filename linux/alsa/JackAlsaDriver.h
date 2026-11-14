@@ -87,6 +87,21 @@ class JackAlsaDriver : public JackAudioDriver
         int Write();
 
         // BufferSize can be changed
+        /* jack2-nspa: -1 off, 0 auto, else the margin in us (alsa_driver_wait) */
+        void SetWakeTimer(int us)
+        {
+            if (fDriver == NULL) {
+                return;
+            }
+            alsa_driver_t* d = (alsa_driver_t *)fDriver;
+            d->wake_timer_us = us;
+            if (us >= 0 && d->batch) {
+                jack_info("ALSA: wake timer not used: a batch device (its position moves only when it reports)");
+            } else if (us >= 0) {
+                jack_info("ALSA: wake timer on, %d us after a period is due", us > 0 ? us : (int)(d->period_usecs / 8 > 50 ? d->period_usecs / 8 : 50));
+            }
+        }
+
         bool IsDeviceLost()
         {
             return fDriver != NULL && ((alsa_driver_t *)fDriver)->device_lost;

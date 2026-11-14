@@ -791,6 +791,14 @@ SERVER_EXPORT const jack_driver_desc_t* driver_get_descriptor ()
     jack_driver_descriptor_add_parameter(desc, &filler, "input-latency", 'I', JackDriverParamUInt, &value, NULL, "Extra input latency (frames)", NULL);
     jack_driver_descriptor_add_parameter(desc, &filler, "output-latency", 'O', JackDriverParamUInt, &value, NULL, "Extra output latency (frames)", NULL);
 
+    value.i = -1;
+    jack_driver_descriptor_add_parameter(desc, &filler, "wake-timer", 'w', JackDriverParamInt, &value, NULL,
+        "Wake on a timer too (us after a period is due; 0 auto, -1 off)",
+        "Wake when the card's position says a period is due, plus this margin in us, even if its period interrupt "
+        "has not come: some cards' interrupts arrive late or are dropped while their position is right "
+        "(Intel HDA at small buffer sizes). 0: an eighth of a period (at least 50 us). -1: off, the interrupt only. "
+        "Not used with batch devices (USB), whose position moves only when they report.");
+
     strcpy(value.str, "none");
     jack_driver_descriptor_add_parameter(
         desc,
@@ -827,6 +835,7 @@ SERVER_EXPORT Jack::JackDriverClientInterface* driver_initialize(Jack::JackLocke
     int user_capture_nchnls = 0;
     int user_playback_nchnls = 0;
     int shorts_first = FALSE;
+    int wake_timer = -1;
     jack_nframes_t systemic_input_latency = 0;
     jack_nframes_t systemic_output_latency = 0;
     const JSList * node;
@@ -930,6 +939,10 @@ SERVER_EXPORT Jack::JackDriverClientInterface* driver_initialize(Jack::JackLocke
             case 'X':
                 midi_driver = strdup(param->value.str);
                 break;
+
+            case 'w':
+                wake_timer = param->value.i;
+                break;
         }
     }
 
@@ -945,6 +958,7 @@ SERVER_EXPORT Jack::JackDriverClientInterface* driver_initialize(Jack::JackLocke
     if (g_alsa_driver->Open(frames_per_interrupt, user_nperiods, srate, hw_monitoring, hw_metering, capture, playback, dither, soft_mode, monitor,
                           user_capture_nchnls, user_playback_nchnls, shorts_first, capture_pcm_name, playback_pcm_name,
                           systemic_input_latency, systemic_output_latency, midi_driver) == 0) {
+        g_alsa_driver->SetWakeTimer(wake_timer);
         return threaded_driver;
     } else {
         delete threaded_driver; // Delete the decorated driver

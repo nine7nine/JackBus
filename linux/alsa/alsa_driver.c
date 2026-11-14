@@ -23,6 +23,7 @@
 #define _GNU_SOURCE            /* for strcasestr() from string.h */
 
 #include <math.h>
+#include <poll.h>
 #include <stdio.h>
 #include <memory.h>
 #include <unistd.h>
@@ -604,6 +605,9 @@ alsa_driver_configure_stream (alsa_driver_t *driver, char *device_name,
 		jack_error ("ALSA: cannot set hardware parameters for %s",
 			    stream_name);
 		return -1;
+	}
+	if (snd_pcm_hw_params_is_batch (hw_params)) {
+		driver->batch = 1;
 	}
 
 	snd_pcm_sw_params_current (handle, sw_params);
@@ -1382,6 +1386,7 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 	unsigned int i;
 	jack_time_t poll_enter;
 	jack_time_t poll_ret = 0;
+	const jack_time_t wait_start = jack_get_microseconds ();
 
 	*status = -1;
 	*delayed_usecs = 0;
@@ -1448,7 +1453,42 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 #ifdef __ANDROID__
 		poll_result = poll (driver->pfd, nfds, -1);  //fix for sleep issue
 #else
-		poll_result = poll (driver->pfd, nfds, driver->poll_timeout);
+		/* jack2-nspa: the wake timer. Some cards' period interrupts arrive late or are
+		   dropped (Intel HDA: an interrupt after a late one is taken as "too early"; a
+		   deferred one waits for a kworker), while the position itself is right. So wait
+		   for the interrupt only until the position says the period is due, plus a
+		   margin, then look at the position: a timeout here is not a stall. Not for
+		   batch devices (USB), whose position moves only when the device reports. */
+		int wake_timer = 0;
+		if (driver->wake_timer_us >= 0 && !driver->batch && extra_fd < 0) {
+			snd_pcm_sframes_t need = 0, a;
+			if (need_playback && (a = snd_pcm_avail (driver->playback_handle)) >= 0) {
+				snd_pcm_sframes_t m = (snd_pcm_sframes_t) driver->frames_per_cycle
+					* (driver->playback_nperiods - driver->user_nperiods + 1) - a;
+				if (m > need) need = m;
+			}
+			if (need_capture && (a = snd_pcm_avail (driver->capture_handle)) >= 0) {
+				snd_pcm_sframes_t m = (snd_pcm_sframes_t) driver->frames_per_cycle - a;
+				if (m > need) need = m;
+			}
+			int64_t margin = driver->wake_timer_us > 0 ? driver->wake_timer_us
+				: (driver->period_usecs / 8 > 50 ? driver->period_usecs / 8 : 50);
+			int64_t us = (int64_t) need * 1000000 / driver->frame_rate + margin;
+			int64_t left = (int64_t) driver->poll_timeout * 1000
+				- (int64_t) (jack_get_microseconds () - wait_start);
+			if (us < left) {
+				struct timespec ts = { us / 1000000, (us % 1000000) * 1000 };
+				wake_timer = 1;
+				poll_result = ppoll (driver->pfd, nfds, &ts, NULL);
+			}
+		}
+		if (!wake_timer) {
+			poll_result = poll (driver->pfd, nfds, driver->poll_timeout);
+		} else if (poll_result == 0) {
+			/* no interrupt by the time the period was due: the loop reads the position */
+			driver->wake_timer_wakes++;
+			continue;
+		}
 #endif
 		if (poll_result < 0) {
 
@@ -2175,6 +2215,9 @@ alsa_driver_new (char *name, char *playback_alsa_device,
 	driver->midi = midi_driver;
 	driver->xrun_recovery = 0;
 	driver->device_lost = 0;
+	driver->wake_timer_us = -1;
+	driver->batch = 0;
+	driver->wake_timer_wakes = 0;
 
 	if (alsa_driver_check_card_type (driver)) {
 		alsa_driver_delete (driver);
