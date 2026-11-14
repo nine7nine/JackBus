@@ -40,8 +40,8 @@ T=/sys/kernel/tracing; [ -d "$T/events" ] || T=/sys/kernel/debug/tracing
 KP="$T/kprobe_events"
 pcm_events=""
 # simplest definitions that this kernel accepts: with the stream argument, then without
-for entry in 'p:nspa/pos_in snd_hda_intel:azx_position_ok dev=%di:x64' \
-             'p:nspa/pos_in azx_position_ok dev=%di:x64' \
+for entry in 'p:nspa/pos_in snd_hda_intel:azx_position_ok dev=%si:x64' \
+             'p:nspa/pos_in azx_position_ok dev=%si:x64' \
              'p:nspa/pos_in azx_position_ok'; do
     if echo "$entry" >> "$KP" 2>>"$out/perf.log"; then
         pcm_events="-e nspa:pos_in"; break
