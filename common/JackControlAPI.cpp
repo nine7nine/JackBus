@@ -1661,6 +1661,89 @@ SERVER_EXPORT int jackctl_server_get_client_timings(jackctl_server * server_ptr,
     return count;
 }
 
+/* jack2-nspa: two values of a parameter of this type are the same (a string up to its end:
+   the bytes after it are not set) */
+static bool jackctl_constraint_value_equal(jackctl_param_type_t type,
+    const jack_driver_param_value_t * a, const jack_driver_param_value_t * b)
+{
+    switch (type) {
+    case JackParamInt:
+    case JackParamBool:
+        return a->i == b->i;
+    case JackParamUInt:
+        return a->ui == b->ui;
+    case JackParamChar:
+        return a->c == b->c;
+    case JackParamString:
+        return strcmp(a->str, b->str) == 0;
+    }
+    return false;
+}
+
+static bool jackctl_constraint_equal(jackctl_param_type_t type,
+    const jack_driver_param_constraint_desc_t * a, const jack_driver_param_constraint_desc_t * b)
+{
+    if (a == NULL || b == NULL) {
+        return a == b;
+    }
+    if (a->flags != b->flags) {
+        return false;
+    }
+    if (a->flags & JACK_CONSTRAINT_FLAG_RANGE) {
+        return jackctl_constraint_value_equal(type, &a->constraint.range.min, &b->constraint.range.min)
+            && jackctl_constraint_value_equal(type, &a->constraint.range.max, &b->constraint.range.max);
+    }
+    if (a->constraint.enumeration.count != b->constraint.enumeration.count) {
+        return false;
+    }
+    for (uint32_t i = 0; i < a->constraint.enumeration.count; i++) {
+        const jack_driver_param_value_enum_t * x = a->constraint.enumeration.possible_values_array + i;
+        const jack_driver_param_value_enum_t * y = b->constraint.enumeration.possible_values_array + i;
+        if (!jackctl_constraint_value_equal(type, &x->value, &y->value) || strcmp(x->short_desc, y->short_desc) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+SERVER_EXPORT int jackctl_driver_refresh_constraints(jackctl_driver * driver_ptr)
+{
+    if (driver_ptr == NULL) {
+        return -1;
+    }
+    jack_driver_desc_t * fresh = jack_driver_descriptor_reload(driver_ptr->desc_ptr, "driver_get_descriptor");
+    if (fresh == NULL) {
+        return -1;
+    }
+    int changed = 0;
+    for (JSList * node = driver_ptr->parameters; node != NULL; node = jack_slist_next(node)) {
+        struct jackctl_parameter * param_ptr = (struct jackctl_parameter *)node->data;
+        for (uint32_t i = 0; i < fresh->nparams; i++) {
+            jack_driver_param_desc_t * fresh_param = fresh->params + i;
+            if (strcmp(fresh_param->name, param_ptr->name) != 0) {
+                continue;
+            }
+            if (!jackctl_constraint_equal(param_ptr->type, param_ptr->constraint_ptr, fresh_param->constraint)) {
+                /* The parameter and the driver's descriptor share one list (it is freed once,
+                   with the parameter): both take the new one, and the old one goes with
+                   `fresh` below. */
+                jack_driver_param_constraint_desc_t * old = param_ptr->constraint_ptr;
+                param_ptr->constraint_ptr = fresh_param->constraint;
+                fresh_param->constraint = old;
+                for (uint32_t j = 0; j < driver_ptr->desc_ptr->nparams; j++) {
+                    if (strcmp(driver_ptr->desc_ptr->params[j].name, param_ptr->name) == 0) {
+                        driver_ptr->desc_ptr->params[j].constraint = param_ptr->constraint_ptr;
+                    }
+                }
+                changed++;
+            }
+            break;
+        }
+    }
+    jack_driver_descriptor_free(fresh);
+    return changed;
+}
+
 SERVER_EXPORT bool jackctl_server_reset_client_timings(jackctl_server * server_ptr)
 {
     if (!server_ptr || !server_ptr->engine) {

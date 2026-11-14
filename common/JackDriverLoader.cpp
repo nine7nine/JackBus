@@ -812,6 +812,46 @@ JackDriverInfo::~JackDriverInfo()
     }
 }
 
+jack_driver_desc_t* jack_driver_descriptor_reload(const jack_driver_desc_t* desc, const char* symbol)
+{
+#ifdef WIN32
+    (void)desc;
+    (void)symbol;
+    return NULL;
+#else
+    void* handle = LoadDriverModule(desc->file);
+    if (handle == NULL) {
+        jack_error("Cannot load '%s' again to refresh its parameters: %s", desc->file, dlerror());
+        return NULL;
+    }
+    jack_driver_desc_t* fresh = NULL;
+    JackDriverDescFunction get_descriptor = (JackDriverDescFunction)GetDriverProc(handle, symbol);
+    if (get_descriptor != NULL) {
+        fresh = get_descriptor();
+    }
+    /* the descriptor holds no pointers into the module (names, descriptions and value lists
+       are copied), so the module can go */
+    UnloadDriverModule(handle);
+    if (fresh != NULL && strcmp(fresh->name, desc->name) != 0) {
+        jack_driver_descriptor_free(fresh);
+        fresh = NULL;
+    }
+    return fresh;
+#endif
+}
+
+void jack_driver_descriptor_free(jack_driver_desc_t* desc)
+{
+    if (desc == NULL) {
+        return;
+    }
+    for (uint32_t i = 0; i < desc->nparams; i++) {
+        jack_constraint_free(desc->params[i].constraint);
+    }
+    free(desc->params);
+    free(desc);
+}
+
 SERVER_EXPORT jack_driver_desc_t* jack_driver_descriptor_construct(
     const char * name,
     jack_driver_type_t type,

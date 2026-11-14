@@ -32,6 +32,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 /* jack/control.h (C) and JackControlAPI.h (libjackserver's C++ copy) both name the
    server jackctl_server_t: struct jackctl_server here suits either */
 struct jackctl_server;
+struct jackctl_driver;
 
 #ifdef __cplusplus
 extern "C" {
@@ -69,6 +70,14 @@ jackctl_server_get_client_timings(struct jackctl_server * server, jackctl_client
 /* Starts every client's counts afresh (from the next cycle). */
 JACK_NSPA_CONTROL_EXPORT bool
 jackctl_server_reset_client_timings(struct jackctl_server * server);
+
+/* Build the driver's descriptor again from its module and take the value lists (enumeration
+   and range constraints) that changed: the ALSA driver's device list after a card was plugged
+   in or removed. Parameter values are untouched. Returns how many parameters changed, -1 if
+   the module could not be asked. Call it from the thread that uses the control API (jackdbus's
+   main loop): a list taken from a parameter before the call must not be used after it. */
+JACK_NSPA_CONTROL_EXPORT int
+jackctl_driver_refresh_constraints(struct jackctl_driver * driver);
 
 #ifdef __cplusplus
 }
