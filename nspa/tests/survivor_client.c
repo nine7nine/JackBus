@@ -6,25 +6,24 @@
  *   survivor_client [seconds=120]
  */
 #include <jack/jack.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 static jack_port_t *in, *out;
-static volatile unsigned long cycles;
-static volatile int shut;
+static unsigned long cycles;   /* written by the process thread, read by main: atomics */
+static int shut;
 
 static int process(jack_nframes_t n, void *arg)
 {
 	(void)arg;
 	memset(jack_port_get_buffer(out, n), 0, n * sizeof(float));
-	cycles++;
+	__atomic_add_fetch(&cycles, 1, __ATOMIC_RELAXED);
 	return 0;
 }
 
-static void shutdown_cb(void *arg) { (void)arg; shut = 1; }
+static void shutdown_cb(void *arg) { (void)arg; __atomic_store_n(&shut, 1, __ATOMIC_RELAXED); }
 
 int main(int argc, char **argv)
 {
@@ -41,15 +40,17 @@ int main(int argc, char **argv)
 	unsigned long last = 0;
 	for (int t = 0; t < seconds; t++) {
 		sleep(1);
-		unsigned long now = cycles;
+		unsigned long now = __atomic_load_n(&cycles, __ATOMIC_RELAXED);
+		int sh = __atomic_load_n(&shut, __ATOMIC_RELAXED);
 		printf("t=%d cycles=%lu rate=%lu in=%d out=%d shutdown=%d\n", t + 1, now, now - last,
-		       jack_port_connected(in), jack_port_connected(out), shut);
+		       jack_port_connected(in), jack_port_connected(out), sh);
 		fflush(stdout);
 		last = now;
-		if (shut)
+		if (sh)
 			break;
 	}
-	if (!shut)
+	int sh = __atomic_load_n(&shut, __ATOMIC_RELAXED);
+	if (!sh)
 		jack_client_close(c);
-	return shut;
+	return sh;
 }

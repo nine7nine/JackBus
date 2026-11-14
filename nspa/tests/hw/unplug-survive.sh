@@ -22,7 +22,7 @@ fail=0
 result() { if [ "$2" = 0 ]; then echo "PASS $1: $3"; else echo "FAIL $1: $3"; fail=1; fi; }
 [ -e "/proc/asound/$card" ] || { echo "SKIP: no card $card"; exit 0; }
 
-cc -O2 -Wall -I"$root/common" -o "$work/survivor" "$root/nspa/tests/survivor_client.c" -L"$JACK_BUILD/common" -ljack || exit 1
+cc -O2 -Wall ${NSPA_TEST_CFLAGS:-} -I"$root/common" -o "$work/survivor" "$root/nspa/tests/survivor_client.c" -L"$JACK_BUILD/common" -ljack || exit 1
 export HOME="$work/home" XDG_CONFIG_HOME="$work/home/.config"; mkdir -p "$HOME"
 log="$HOME/.log/jack/jackdbus.log"
 cat >"$work/bus.conf" <<'CONF'
