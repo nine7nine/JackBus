@@ -182,7 +182,8 @@ jack_controller_dbus_get_parameter_address_ex(
     DBusMessageIter * iter_ptr,
     const char ** address_array)
 {
-    const char * signature;
+    char * signature;
+    bool as;
     DBusMessageIter array_iter;
     int type;
     int index;
@@ -204,7 +205,9 @@ jack_controller_dbus_get_parameter_address_ex(
         return false;
     }
 
-    if (strcmp(signature, "as") != 0)
+    /* jack2-nspa: the signature is allocated (dbus_free): it leaked on every parameter call */
+    as = strcmp(signature, "as") == 0;
+    if (!as)
     {
         jack_dbus_error(
             call,
@@ -212,6 +215,10 @@ jack_controller_dbus_get_parameter_address_ex(
             "Invalid arguments to method '%s'. Input arguments signature '%s', must begin with 'as'.",
             call->method_name,
             signature);
+    }
+    dbus_free(signature);
+    if (!as)
+    {
         return false;
     }
 
@@ -226,8 +233,8 @@ jack_controller_dbus_get_parameter_address_ex(
                 call,
                 JACK_DBUS_ERROR_INVALID_ARGS,
                 "Invalid arguments to method '%s'. Parameter address array must contain not more than %u elements.",
-                (unsigned int)PARAM_ADDRESS_SIZE,
-                call->method_name);
+                call->method_name,
+                (unsigned int)PARAM_ADDRESS_SIZE);  /* jack2-nspa: were swapped (%s read an integer) */
             return false;
         }
 

@@ -747,6 +747,7 @@ bool
 paths_init()
 {
 	const char *home_dir, *xdg_config_home, *xdg_log_home;
+	char *config_home_alloc = NULL, *log_home_alloc = NULL;  /* jack2-nspa: freed below */
     
     home_dir = getenv("HOME");
     if (home_dir == NULL)
@@ -758,10 +759,10 @@ paths_init()
 	xdg_config_home = getenv("XDG_CONFIG_HOME");
 	if (xdg_config_home == NULL)
 	{
-	    if (!(xdg_config_home = pathname_cat(home_dir, DEFAULT_XDG_CONFIG))) goto fail;
+	    if (!(xdg_config_home = config_home_alloc = pathname_cat(home_dir, DEFAULT_XDG_CONFIG))) goto fail;
 	}
 
-    if (!(xdg_log_home = pathname_cat(home_dir, DEFAULT_XDG_LOG))) goto fail;
+    if (!(xdg_log_home = log_home_alloc = pathname_cat(home_dir, DEFAULT_XDG_LOG))) goto fail;
 
 	if (!(g_jackdbus_config_dir = pathname_cat(xdg_config_home, JACKDBUS_DIR))) goto fail;
 	if (!(g_jackdbus_log_dir = pathname_cat(xdg_log_home, JACKDBUS_DIR))) goto fail;
@@ -790,9 +791,13 @@ paths_init()
     }
     g_jackdbus_log_dir_len = strlen(g_jackdbus_log_dir);
 
+    free(config_home_alloc);
+    free(log_home_alloc);
     return true;
 
 fail:
+    free(config_home_alloc);
+    free(log_home_alloc);
     return false;
 }
 

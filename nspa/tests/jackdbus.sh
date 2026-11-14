@@ -208,6 +208,22 @@ else
 fi
 rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 
+# 1c3. a parameter address longer than jackdbus takes is an error reply, not a crash (the
+# message's arguments were swapped: %s read an integer)
+if start_jackdbus; then
+    call org.jackaudio.Configure.GetParameterValue array:string:a,b,c,d
+    if ! kill -0 $JD_PID 2>/dev/null; then
+        result jackdbus-long-address 1 "jackdbus died on a 4-element parameter address"
+    elif ! call org.jackaudio.JackControl.IsStarted; then
+        result jackdbus-long-address 1 "jackdbus stopped answering after a 4-element parameter address"
+    else
+        result jackdbus-long-address 0 "a 4-element parameter address is refused, jackdbus answers"
+    fi
+    kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
+else
+    echo "FAIL jackdbus-long-address: jackdbus did not come up"; fail=1
+fi
+
 # 1d. a session manager takes an application's clients out of the graph before
 # stopping it (org.jackaudio.JackPatchbay.DetachClient / DetachProcess): killed
 # afterwards, its departure costs the graph nothing, whatever its libjack (here
