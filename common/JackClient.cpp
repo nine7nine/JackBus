@@ -1175,8 +1175,10 @@ int JackClient::SetInitCallback(JackThreadInitCallback callback, void *arg)
     } else {
         fInitArg = arg;
         fInit = callback;
-        /* make sure that the message buffer thread is initialized too */
-        return JackMessageBuffer::fInstance->SetInitCallback(callback, arg);
+        /* make sure that the message buffer thread is initialized too (jack2-nspa: if there is
+           one; read once, it is unpublished when the server stops) */
+        JackMessageBuffer* buffer = __atomic_load_n(&JackMessageBuffer::fInstance, __ATOMIC_ACQUIRE);
+        return buffer ? buffer->SetInitCallback(callback, arg) : 0;
     }
 }
 

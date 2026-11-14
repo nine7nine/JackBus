@@ -131,16 +131,29 @@ bool JackMessageBuffer::Execute()
     return false;
 }
 
+/*
+ jack2-nspa: the instance is never freed. Destroy() used to delete it while a thread whose log
+ function is JackMessageBufferAdd (a realtime thread still finishing) could have read the pointer
+ and be writing into it: a use after free, and with the next Create() at the same address, two
+ threads on one cell (seen by ThreadSanitizer as a race between AddMessage and the log
+ callback). Destroy() now stops the thread, flushes and unpublishes the instance; the next
+ Create() starts the same one again (a message pushed after the last flush is printed then).
+ fInstance is read by realtime threads: atomic accesses, no lock.
+*/
+static JackMessageBuffer* gKeptMessageBuffer = NULL;   // Create/Destroy: the server's control thread
+
 bool JackMessageBuffer::Create()
 {
-    if (fInstance == NULL) {
-        fInstance = new JackMessageBuffer();
-        if (!fInstance->Start()) {
+    if (__atomic_load_n(&fInstance, __ATOMIC_ACQUIRE) == NULL) {
+        if (gKeptMessageBuffer == NULL) {
+            gKeptMessageBuffer = new JackMessageBuffer();
+        }
+        __atomic_store_n(&gKeptMessageBuffer->fOverruns, 0, __ATOMIC_RELAXED);
+        if (!gKeptMessageBuffer->Start()) {
             jack_error("JackMessageBuffer::Create cannot start thread");
-            delete fInstance;
-            fInstance = NULL;
             return false;
         }
+        __atomic_store_n(&fInstance, gKeptMessageBuffer, __ATOMIC_RELEASE);
     }
 
     return true;
@@ -148,10 +161,10 @@ bool JackMessageBuffer::Create()
 
 bool JackMessageBuffer::Destroy()
 {
-    if (fInstance != NULL) {
-        fInstance->Stop();
-        delete fInstance;
-        fInstance = NULL;
+    JackMessageBuffer* instance = __atomic_load_n(&fInstance, __ATOMIC_ACQUIRE);
+    if (instance != NULL) {
+        instance->Stop();
+        __atomic_store_n(&fInstance, (JackMessageBuffer*)NULL, __ATOMIC_RELEASE);
         return true;
     } else {
         return false;
@@ -160,17 +173,18 @@ bool JackMessageBuffer::Destroy()
 
 void JackMessageBufferAdd(int level, const char *message)
 {
-    if (Jack::JackMessageBuffer::fInstance == NULL) {
+    Jack::JackMessageBuffer* instance = __atomic_load_n(&Jack::JackMessageBuffer::fInstance, __ATOMIC_ACQUIRE);
+    if (instance == NULL) {
         /* Unable to print message with realtime safety. Complain and print it anyway. */
         jack_log_function(LOG_LEVEL_ERROR, "messagebuffer not initialized, skip message");
     } else {
-        Jack::JackMessageBuffer::fInstance->AddMessage(level, message);
+        instance->AddMessage(level, message);
     }
 }
 
 int JackMessageBuffer::SetInitCallback(JackThreadInitCallback callback, void *arg)
 {
-    if (fInstance && callback && fRunning && fGuard.Lock()) {
+    if (__atomic_load_n(&fInstance, __ATOMIC_ACQUIRE) && callback && fRunning && fGuard.Lock()) {
         /* set up the callback */
         fInitArg = arg;
         fInit = callback;
