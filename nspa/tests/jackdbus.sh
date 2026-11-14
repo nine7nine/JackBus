@@ -211,6 +211,115 @@ fi
 rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 rm -rf "$HOME/.config/jack"
 
+# 1e. per-client cycle statistics (org.jackaudio.JackControl.GetClientTimings,
+# ResetClientTimings): late cycles are counted whether or not anyone asks, cycle
+# lengths only once asked for; the late client is found and measured, the client
+# waiting for it and an independent one are not counted late, jackdbus' own client
+# (not in the graph) is not listed, a reset or a new activation starts afresh,
+# clients gone are no longer listed, and a stopped server is an error for Get only
+timings_bin="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/client_timings"
+timings() {  # one line per client: name late_cycles max_callback_usecs
+    dbus-send --session --print-reply --dest=org.jackaudio.service /org/jackaudio/Controller \
+        org.jackaudio.JackControl.GetClientTimings 2>/dev/null \
+      | awk '/string "/ { n = $2; gsub(/"/, "", n); k = 0; next }
+             /uint32/ { v[k++] = $2; if (k == 2) print n, v[0], v[1] }'
+}
+field() {  # field <timings> <client> <2|3>
+    printf '%s\n' "$1" | awk -v c="$2" -v f="$3" '$1 == c { print $f }'
+}
+run_timings() {  # run_timings <args>: starts client_timings, waits for "ready"
+    rm -f "$work/tfifo"; mkfifo "$work/tfifo"
+    LD_LIBRARY_PATH="$(dirname "$jackdbus")/../common" "$timings_bin" "$@" <"$work/tfifo" >"$work/timings.out" 2>&1 &
+    T_PID=$!
+    exec 7>"$work/tfifo"
+    i=0
+    while ! grep -q '^ready' "$work/timings.out" && kill -0 $T_PID 2>/dev/null && [ $i -lt 200 ]; do
+        sleep 0.1; i=$((i + 1))
+    done
+    grep -q '^ready' "$work/timings.out"
+}
+stop_timings() {
+    exec 7>&-
+    wait_exit $T_PID 50; [ "$st" = alive ] && kill -KILL $T_PID
+}
+if [ ! -x "$timings_bin" ]; then
+    echo "SKIP jackdbus-timings: no client_timings"
+elif start_jackdbus; then
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
+    call org.jackaudio.Configure.SetParameterValue array:string:driver,period variant:uint32:256
+    call org.jackaudio.Configure.SetParameterValue array:string:driver,rate variant:uint32:48000
+    p_us=5333   # 256 frames at 48 kHz
+    if call org.jackaudio.JackControl.StartServer; then
+        # nobody has asked yet: late cycles counted, lengths not measured
+        if run_timings 2 1.5; then
+            t=$(timings)
+            l=$(field "$t" nspa_late 2); m=$(field "$t" nspa_late 3)
+            [ -n "$l" ] && [ "$l" -ge 2 ] && [ "$l" -le 4 ] && [ "$m" = 0 ] && rc=0 || rc=1
+            result jackdbus-timings-unasked $rc "2 callbacks of 1.5 periods, before any request: nspa_late late $l, longest $m us"
+        else
+            result jackdbus-timings-unasked 1 "client_timings: $(cat "$work/timings.out")"
+        fi
+        stop_timings
+        sleep 0.3
+
+        if run_timings 3 1.5; then
+            t=$(timings)
+            l=$(field "$t" nspa_late 2); m=$(field "$t" nspa_late 3)
+            a=$(field "$t" nspa_after 2); s=$(field "$t" nspa_steady 2)
+            names=$(printf '%s\n' "$t" | awk '{ print $1 }' | sort | tr '\n' ' ')
+            rc=0
+            [ "$names" = "nspa_after nspa_late nspa_steady " ] || rc=1
+            [ -n "$l" ] && [ "$l" -ge 3 ] && [ "$l" -le 6 ] || rc=1
+            [ -n "$m" ] && [ "$m" -ge $((p_us * 135 / 100)) ] && [ "$m" -le $((p_us * 3)) ] || rc=1
+            [ "$a" = 0 ] && [ "$s" = 0 ] || rc=1
+            result jackdbus-timings $rc "3 callbacks of 1.5 periods: nspa_late late $l, longest $m us; nspa_after late $a, nspa_steady late $s; listed: $names"
+
+            call org.jackaudio.JackControl.ResetClientTimings
+            sleep 0.3
+            t=$(timings)
+            l=$(field "$t" nspa_late 2); m=$(field "$t" nspa_late 3)
+            rc=0
+            [ "$l" = 0 ] && [ -n "$m" ] && [ "$m" -lt $((p_us / 2)) ] || rc=1
+            [ "$(printf '%s\n' "$t" | awk '$2 != 0' | wc -l)" = 0 ] || rc=1
+            result jackdbus-timings-reset $rc "after ResetClientTimings: nspa_late late $l, longest $m us"
+            stop_timings
+            sleep 0.3
+            t=$(timings)
+            [ -z "$t" ] && rc=0 || rc=1
+            result jackdbus-timings-gone $rc "listed once the clients closed: '$(printf '%s' "$t" | tr '\n' ' ')'"
+        else
+            result jackdbus-timings 1 "client_timings: $(cat "$work/timings.out")"
+            stop_timings
+        fi
+
+        if run_timings 2 1.5 reactivate; then
+            t=$(timings)
+            l=$(field "$t" nspa_late 2); m=$(field "$t" nspa_late 3)
+            [ "$l" = 0 ] && [ -n "$m" ] && [ "$m" -lt $((p_us / 2)) ] && rc=0 || rc=1
+            result jackdbus-timings-reactivate $rc "late twice, then activated again: nspa_late late $l, longest $m us"
+        else
+            result jackdbus-timings-reactivate 1 "client_timings: $(cat "$work/timings.out")"
+        fi
+        stop_timings
+
+        call org.jackaudio.JackControl.StopServer
+        if call org.jackaudio.JackControl.GetClientTimings; then
+            result jackdbus-timings-stopped 1 "GetClientTimings with the server stopped succeeded"
+        elif ! call org.jackaudio.JackControl.ResetClientTimings || ! kill -0 $JD_PID 2>/dev/null; then
+            result jackdbus-timings-stopped 1 "ResetClientTimings with the server stopped failed, or jackdbus died"
+        else
+            result jackdbus-timings-stopped 0 "GetClientTimings with the server stopped is an error, ResetClientTimings is not"
+        fi
+    else
+        echo "FAIL jackdbus-timings: StartServer failed"; fail=1
+    fi
+    kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
+else
+    echo "FAIL jackdbus-timings: jackdbus did not come up"; fail=1
+fi
+rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
+rm -rf "$HOME/.config/jack"
+
 # 2. crash handler
 if start_jackdbus; then
     kill -SEGV $JD_PID
