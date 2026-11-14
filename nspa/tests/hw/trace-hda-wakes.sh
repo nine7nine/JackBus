@@ -33,21 +33,17 @@ as_user env UNDERRUN_OUT="$out/probe" UNDERRUN_CONFIGS="spare:2" UNDERRUN_PERIOD
 runner=$!
 sleep 3   # the server stopped and the probe running
 
-# Period updates as they happen: the ALSA core's tracepoints that this kernel has, and a probe on
-# snd_pcm_period_elapsed (exported, so not inlined; removed again at the end). An HDA interrupt
-# followed by neither an update nor the deferred work is one the driver dropped.
+# The HDA driver's verdict on every interrupt: azx_position_ok returns 1 (update the period), 0
+# (defer to the worker) or -1 (drop as "too early"). Probes written to tracefs (no debug info
+# needed): the entry with the stream (azx_dev) and the return value; removed at the end.
 T=/sys/kernel/tracing; [ -d "$T/events" ] || T=/sys/kernel/debug/tracing
+KP="$T/kprobe_events"
 pcm_events=""
-for e in hwptr xrun hw_ptr_error; do
-    [ -d "$T/events/snd_pcm/$e" ] && pcm_events="$pcm_events -e snd_pcm:$e"
-done
-probe=""
-if perf probe -q -a snd_pcm_period_elapsed >> "$out/perf.log" 2>&1 \
-   || perf probe -q -m snd_pcm -a snd_pcm_period_elapsed >> "$out/perf.log" 2>&1; then
-    probe=probe:snd_pcm_period_elapsed
-    pcm_events="$pcm_events -e $probe"
+if echo 'p:nspa/pos_in snd_hda_intel:azx_position_ok dev=$arg2:x64' >> "$KP" 2>>"$out/perf.log" &&
+   echo 'r:nspa/pos_ret snd_hda_intel:azx_position_ok ret=$retval:s32' >> "$KP" 2>>"$out/perf.log"; then
+    pcm_events="-e nspa:pos_in -e nspa:pos_ret"
 fi
-echo "ALSA events: ${pcm_events:-none}" > "$out/tracepoints.txt"
+echo "HDA events: ${pcm_events:-none (kprobes refused: see perf.log)}" > "$out/tracepoints.txt"
 
 # shellcheck disable=SC2086
 perf record -o "$out/perf.data" -a $pcm_events \
@@ -59,9 +55,9 @@ perf record -o "$out/perf.data" -a $pcm_events \
     -e sched:sched_wakeup --filter 'comm == "underrun_probe"' \
     -- sleep 20 >> "$out/perf.log" 2>&1 || echo "perf record failed: see $out/perf.log"
 wait "$runner" || true
-[ -n "$probe" ] && perf probe -q -d "$probe" >> "$out/perf.log" 2>&1
+echo '-:nspa/pos_in' >> "$KP" 2>/dev/null; echo '-:nspa/pos_ret' >> "$KP" 2>/dev/null
 
 perf script -i "$out/perf.data" -F comm,tid,cpu,time,event,trace 2>/dev/null \
-    | grep -E "irq_handler|azx_|underrun_probe|snd_|pcmC|period_elapsed" > "$out/events.txt" || true
+    | grep -E "irq_handler|azx_|underrun_probe|snd_|pcmC|nspa:pos_" > "$out/events.txt" || true
 chown -R "$user" "$out"
 echo "done: $(wc -l < "$out/events.txt") events in $out/events.txt; JACK: $(as_user jack_control status 2>/dev/null | tail -1)"
