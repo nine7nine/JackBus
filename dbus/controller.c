@@ -29,6 +29,10 @@
 #include <assert.h>
 #include <unistd.h>
 #include <errno.h>
+#include <dirent.h>
+#include <limits.h>
+#include <time.h>
+#include <sys/inotify.h>
 
 #include "controller.h"
 #include "controller_internal.h"
@@ -550,6 +554,194 @@ static union jackctl_parameter_value slave_drivers_parameter_get_default_value(v
 
 #undef controller_ptr
 
+/* jack2-nspa: sound card hotplug. The ALSA driver's device list was built once, when jackdbus
+   started; a card plugged in later never appeared. jackdbus watches /dev/snd (inotify, read
+   without blocking from the main loop, which wakes every 200 ms anyway) and, once the changes
+   have settled, rebuilds the list (jackctl_driver_refresh_constraints), copies it again into
+   the D-Bus parameter tree and tells clients (Configure.ConstraintsChanged). Nothing here
+   touches the server or its real-time thread. */
+
+#define SND_DIR "/dev/snd"
+#define SND_SETTLE_MS 500       /* quiet time after the last change */
+#define SND_READY_MAX_MS 5000   /* longest wait for a card's nodes to become usable */
+#define SND_REWATCH_MS 1000     /* how often to retry watching a missing /dev/snd */
+
+static int64_t monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void jack_controller_snd_watch_add(struct jack_controller * controller_ptr)
+{
+    controller_ptr->snd_last_rewatch = monotonic_ms();
+    controller_ptr->snd_watch_wd = inotify_add_watch(
+        controller_ptr->snd_watch_fd,
+        SND_DIR,
+        IN_CREATE | IN_DELETE | IN_ATTRIB | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF | IN_MOVE_SELF);
+}
+
+static void jack_controller_snd_watch_init(struct jack_controller * controller_ptr)
+{
+    controller_ptr->snd_watch_wd = -1;
+    controller_ptr->snd_first_change = 0;
+    controller_ptr->snd_last_change = 0;
+    controller_ptr->snd_last_rewatch = 0;
+    controller_ptr->snd_watch_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (controller_ptr->snd_watch_fd < 0)
+    {
+        jack_info("Sound cards plugged in later won't be listed (inotify: %s)", strerror(errno));
+        return;
+    }
+    jack_controller_snd_watch_add(controller_ptr);
+}
+
+/* Every card's nodes are present and usable: a PCM node's card has its control node (the
+   kernel registers that one last), and each node can be opened for reading and writing (udev
+   and logind set permissions after the node appears). */
+static bool jack_controller_snd_nodes_ready(void)
+{
+    DIR * dir = opendir(SND_DIR);
+    struct dirent * entry;
+    char path[PATH_MAX];
+    unsigned int card, device;
+    char direction;
+    bool ready = true;
+
+    if (dir == NULL)
+    {
+        return true;
+    }
+    while (ready && (entry = readdir(dir)) != NULL)
+    {
+        if (sscanf(entry->d_name, "controlC%u", &card) == 1)
+        {
+            snprintf(path, sizeof(path), SND_DIR "/%s", entry->d_name);
+            ready = access(path, R_OK | W_OK) == 0;
+        }
+        else if (sscanf(entry->d_name, "pcmC%uD%u%c", &card, &device, &direction) == 3)
+        {
+            snprintf(path, sizeof(path), SND_DIR "/%s", entry->d_name);
+            ready = access(path, R_OK | W_OK) == 0;
+            snprintf(path, sizeof(path), SND_DIR "/controlC%u", card);
+            ready = ready && access(path, F_OK) == 0;
+        }
+    }
+    closedir(dir);
+    return ready;
+}
+
+static void jack_controller_snd_refresh(struct jack_controller * controller_ptr)
+{
+    const JSList * node;
+    jackctl_driver_t * driver = NULL;
+    int changed;
+    const char * address[2] = { "drivers", "alsa" };
+
+    for (node = jackctl_server_get_drivers_list(controller_ptr->server); node != NULL; node = jack_slist_next(node))
+    {
+        if (strcmp(jackctl_driver_get_name(node->data), "alsa") == 0)
+        {
+            driver = node->data;
+        }
+    }
+    if (driver == NULL)
+    {
+        return;
+    }
+
+    changed = jackctl_driver_refresh_constraints(driver);
+    if (changed < 0)
+    {
+        jack_error("Could not read the ALSA devices again");
+        return;
+    }
+    if (changed == 0)
+    {
+        return;
+    }
+    /* the tree's copies point into the lists just replaced: copy them again before any D-Bus
+       message is handled */
+    if (!jack_params_reload_driver_constraints(controller_ptr->params, driver))
+    {
+        jack_error("Could not copy the new ALSA device list");
+    }
+    jack_info("Sound cards changed: the ALSA device list was read again");
+    jack_controller_configure_send_signal_constraints_changed(address, 2);
+}
+
+static void jack_controller_snd_watch_run(struct jack_controller * controller_ptr)
+{
+    char buffer[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    const struct inotify_event * event;
+    ssize_t len;
+    char * ptr;
+    bool changed = false;
+    int64_t now;
+
+    if (controller_ptr->snd_watch_fd < 0)
+    {
+        return;
+    }
+    now = monotonic_ms();
+
+    if (controller_ptr->snd_watch_wd < 0 && now - controller_ptr->snd_last_rewatch >= SND_REWATCH_MS)
+    {
+        jack_controller_snd_watch_add(controller_ptr);
+        if (controller_ptr->snd_watch_wd >= 0)
+        {
+            changed = true;     /* /dev/snd (re)appeared: whatever is in it is new */
+        }
+    }
+
+    while ((len = read(controller_ptr->snd_watch_fd, buffer, sizeof(buffer))) > 0)
+    {
+        for (ptr = buffer; ptr < buffer + len; ptr += sizeof(struct inotify_event) + event->len)
+        {
+            event = (const struct inotify_event *)ptr;
+            if (event->mask & IN_Q_OVERFLOW)
+            {
+                changed = true;
+            }
+            else if (event->mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF))
+            {
+                controller_ptr->snd_watch_wd = -1;      /* gone: watch it again when it is back */
+                changed = true;
+            }
+            else if (event->len > 0 &&
+                     (strncmp(event->name, "controlC", 8) == 0 || strncmp(event->name, "pcmC", 4) == 0))
+            {
+                changed = true;
+            }
+        }
+    }
+
+    if (changed)
+    {
+        if (controller_ptr->snd_first_change == 0)
+        {
+            controller_ptr->snd_first_change = now;
+        }
+        controller_ptr->snd_last_change = now;
+    }
+
+    if (controller_ptr->snd_first_change == 0 ||
+        now - controller_ptr->snd_last_change < SND_SETTLE_MS)
+    {
+        return;
+    }
+    if (!jack_controller_snd_nodes_ready() &&
+        now - controller_ptr->snd_first_change < SND_READY_MAX_MS)
+    {
+        return;
+    }
+
+    controller_ptr->snd_first_change = 0;
+    controller_ptr->snd_last_change = 0;
+    jack_controller_snd_refresh(controller_ptr);
+}
+
 void *
 jack_controller_create(
         DBusConnection *connection)
@@ -599,6 +791,8 @@ jack_controller_create(
 
     controller_ptr->pending_save = 0;
 
+    jack_controller_snd_watch_init(controller_ptr);
+
     INIT_LIST_HEAD(&controller_ptr->slave_drivers);
     controller_ptr->slave_drivers_set = false;
     controller_ptr->slave_drivers_vparam_value.str[0] = 0;
@@ -639,6 +833,10 @@ jack_controller_create(
     return controller_ptr;
 
 fail_destroy_params:
+    if (controller_ptr->snd_watch_fd >= 0)
+    {
+        close(controller_ptr->snd_watch_fd);
+    }
     jack_params_destroy(controller_ptr->params);
 
 fail_destroy_server:
@@ -816,6 +1014,10 @@ jack_controller_destroy(
     }
 
     jack_controller_remove_slave_drivers(controller_ptr);
+    if (controller_ptr->snd_watch_fd >= 0)
+    {
+        close(controller_ptr->snd_watch_fd);
+    }
     jack_params_destroy(controller_ptr->params);
     jackctl_server_destroy(controller_ptr->server);
     pthread_mutex_destroy(&controller_ptr->lock);
@@ -827,6 +1029,8 @@ jack_controller_run(
     void * context)
 {
     long ut;
+
+    jack_controller_snd_watch_run(controller_ptr);
 
     if (controller_ptr->pending_save == 0)
     {

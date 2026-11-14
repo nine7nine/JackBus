@@ -1025,6 +1025,29 @@ JACK_DBUS_METHODS_END
  *
  */
 
+/* jack2-nspa: the value lists of the parameters under a container changed (the ALSA driver's
+   device list after a sound card was plugged in or removed). Clients that show those lists read
+   them again (GetParameterConstraint); values are untouched. */
+JACK_DBUS_SIGNAL_ARGUMENTS_BEGIN(ConstraintsChanged)
+    JACK_DBUS_SIGNAL_ARGUMENT("container", "as")
+JACK_DBUS_SIGNAL_ARGUMENTS_END
+
+JACK_DBUS_SIGNALS_BEGIN
+    JACK_DBUS_SIGNAL_DESCRIBE(ConstraintsChanged)
+JACK_DBUS_SIGNALS_END
+
+void
+jack_controller_configure_send_signal_constraints_changed(const char * const * address, int count)
+{
+    jack_dbus_send_signal(
+        JACK_CONTROLLER_OBJECT_PATH,
+        "org.jackaudio.Configure",
+        "ConstraintsChanged",
+        DBUS_TYPE_ARRAY, DBUS_TYPE_STRING, &address, count,
+        DBUS_TYPE_INVALID);
+}
+
 JACK_DBUS_IFACE_BEGIN(g_jack_controller_iface_configure, "org.jackaudio.Configure")
     JACK_DBUS_IFACE_EXPOSE_METHODS
+    JACK_DBUS_IFACE_EXPOSE_SIGNALS
 JACK_DBUS_IFACE_END

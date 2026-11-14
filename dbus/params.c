@@ -131,10 +131,68 @@ fail:
     return NULL;
 }
 
+/* Copy a control API parameter's constraint (its range, or its list of values: values copied,
+   descriptions pointing into the control API's list). false: out of memory. */
+static bool copy_controlapi_constraint(struct jack_parameter * param_ptr, jackctl_parameter_t * param)
+{
+    uint32_t i;
+
+    if (jackctl_parameter_has_range_constraint(param))
+    {
+        param_ptr->constraint_flags = JACK_CONSTRAINT_FLAG_VALID;
+        param_ptr->constraint_range = true;
+        jackctl_parameter_get_range_constraint(param, &param_ptr->constraint.range.min, &param_ptr->constraint.range.max);
+    }
+    else if (jackctl_parameter_has_enum_constraint(param))
+    {
+        param_ptr->constraint_flags = JACK_CONSTRAINT_FLAG_VALID;
+        param_ptr->constraint_range = false;
+        param_ptr->constraint.enumeration.count = jackctl_parameter_get_enum_constraints_count(param);
+        param_ptr->constraint.enumeration.possible_values_array = malloc(sizeof(struct jack_parameter_enum) * param_ptr->constraint.enumeration.count);
+        if (param_ptr->constraint.enumeration.possible_values_array == NULL)
+        {
+            return false;
+        }
+
+        for (i = 0; i < param_ptr->constraint.enumeration.count; i++)
+        {
+            param_ptr->constraint.enumeration.possible_values_array[i].value = jackctl_parameter_get_enum_constraint_value(param, i);
+            param_ptr->constraint.enumeration.possible_values_array[i].short_desc = jackctl_parameter_get_enum_constraint_description(param, i);
+        }
+    }
+    else
+    {
+        param_ptr->constraint_flags = 0;
+        return true;
+    }
+
+    if (jackctl_parameter_constraint_is_strict(param))
+    {
+        param_ptr->constraint_flags |= JACK_CONSTRAINT_FLAG_STRICT;
+    }
+
+    if (jackctl_parameter_constraint_is_fake_value(param))
+    {
+        param_ptr->constraint_flags |= JACK_CONSTRAINT_FLAG_FAKE_VALUE;
+    }
+
+    return true;
+}
+
+static void free_constraint_copy(struct jack_parameter * param_ptr)
+{
+    if ((param_ptr->constraint_flags & JACK_CONSTRAINT_FLAG_VALID) != 0 &&
+        !param_ptr->constraint_range &&
+        param_ptr->constraint.enumeration.possible_values_array != NULL)
+    {
+        free(param_ptr->constraint.enumeration.possible_values_array);
+    }
+    param_ptr->constraint_flags = 0;
+}
+
 static bool add_controlapi_param(struct list_head * parent_list_ptr, jackctl_parameter_t * param)
 {
     struct jack_parameter * param_ptr;
-    uint32_t i;
 
     param_ptr = malloc(sizeof(struct jack_parameter));
     if (param_ptr == NULL)
@@ -156,46 +214,11 @@ static bool add_controlapi_param(struct list_head * parent_list_ptr, jackctl_par
     param_ptr->short_decr = jackctl_parameter_get_short_description(param);
     param_ptr->long_descr = jackctl_parameter_get_long_description(param);
 
-    if (jackctl_parameter_has_range_constraint(param))
+    if (!copy_controlapi_constraint(param_ptr, param))
     {
-        param_ptr->constraint_flags = JACK_CONSTRAINT_FLAG_VALID;
-        param_ptr->constraint_range = true;
-        jackctl_parameter_get_range_constraint(param, &param_ptr->constraint.range.min, &param_ptr->constraint.range.max);
-    }
-    else if (jackctl_parameter_has_enum_constraint(param))
-    {
-        param_ptr->constraint_flags = JACK_CONSTRAINT_FLAG_VALID;
-        param_ptr->constraint_range = false;
-        param_ptr->constraint.enumeration.count = jackctl_parameter_get_enum_constraints_count(param);
-        param_ptr->constraint.enumeration.possible_values_array = malloc(sizeof(struct jack_parameter_enum) * param_ptr->constraint.enumeration.count);
-        if (param_ptr->constraint.enumeration.possible_values_array == NULL)
-        {
-            goto free;
-        }
-
-        for (i = 0; i < param_ptr->constraint.enumeration.count; i++)
-        {
-            param_ptr->constraint.enumeration.possible_values_array[i].value = jackctl_parameter_get_enum_constraint_value(param, i);
-            param_ptr->constraint.enumeration.possible_values_array[i].short_desc = jackctl_parameter_get_enum_constraint_description(param, i);
-        }
-    }
-    else
-    {
-        param_ptr->constraint_flags = 0;
-        goto add;
+        goto free;
     }
 
-    if (jackctl_parameter_constraint_is_strict(param))
-    {
-        param_ptr->constraint_flags |= JACK_CONSTRAINT_FLAG_STRICT;
-    }
-
-    if (jackctl_parameter_constraint_is_fake_value(param))
-    {
-        param_ptr->constraint_flags |= JACK_CONSTRAINT_FLAG_FAKE_VALUE;
-    }
-
-add:
     list_add_tail(&param_ptr->siblings, parent_list_ptr);
     return true;
 
@@ -219,13 +242,7 @@ static void free_params(struct list_head * parent_list_ptr)
             continue;
         }
 
-        if ((param_ptr->constraint_flags & JACK_CONSTRAINT_FLAG_VALID) != 0 &&
-            !param_ptr->constraint_range &&
-            param_ptr->constraint.enumeration.possible_values_array != NULL)
-        {
-            free(param_ptr->constraint.enumeration.possible_values_array);
-        }
-
+        free_constraint_copy(param_ptr);
         free(param_ptr);
     }
 }
@@ -731,6 +748,44 @@ bool jack_params_set_driver(jack_params_handle params, const char * name)
             params_ptr->driver_set = true;
             return true;
         }
+    }
+
+    return false;
+}
+
+bool jack_params_reload_driver_constraints(jack_params_handle params, jackctl_driver_t * driver)
+{
+    struct list_head * node_ptr;
+    struct list_head * param_node_ptr;
+    struct jack_parameter_container * container_ptr;
+    struct jack_parameter * param_ptr;
+    bool ok = true;
+
+    list_for_each(node_ptr, params_ptr->drivers_ptr)
+    {
+        container_ptr = list_entry(node_ptr, struct jack_parameter_container, siblings);
+        if (container_ptr->obj != driver)
+        {
+            continue;
+        }
+
+        /* "driver" links to this container when it is the selected driver: one copy to redo */
+        list_for_each(param_node_ptr, &container_ptr->children)
+        {
+            param_ptr = list_entry(param_node_ptr, struct jack_parameter, siblings);
+            if (param_ptr->ext)
+            {
+                continue;
+            }
+            free_constraint_copy(param_ptr);
+            if (!copy_controlapi_constraint(param_ptr, param_ptr->obj))
+            {
+                /* out of memory: no list rather than one pointing into freed memory */
+                param_ptr->constraint_flags = 0;
+                ok = false;
+            }
+        }
+        return ok;
     }
 
     return false;

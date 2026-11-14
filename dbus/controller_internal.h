@@ -71,6 +71,14 @@ struct jack_controller
     struct list_head session_pending_commands;
 
     long pending_save;          /* uptime seconds */
+
+    /* jack2-nspa: sound cards coming and going (inotify on /dev/snd), so the ALSA driver's
+       device list follows them without restarting jackdbus */
+    int snd_watch_fd;           /* -1: no inotify */
+    int snd_watch_wd;           /* -1: /dev/snd not watched (yet, or any more) */
+    int64_t snd_first_change;   /* ms (monotonic) of the first unhandled change, 0: none */
+    int64_t snd_last_change;    /* ms of the latest one */
+    int64_t snd_last_rewatch;   /* ms of the last attempt to watch /dev/snd */
 };
 
 #define DEFAULT_DRIVER "dummy"
@@ -210,5 +218,10 @@ extern struct jack_dbus_interface_descriptor g_jack_controller_iface_configure;
 extern struct jack_dbus_interface_descriptor g_jack_controller_iface_patchbay;
 extern struct jack_dbus_interface_descriptor g_jack_controller_iface_session_manager;
 extern struct jack_dbus_interface_descriptor g_jack_controller_iface_transport;
+
+/* jack2-nspa: org.jackaudio.Configure.ConstraintsChanged(as container): the value lists of
+   the parameters under this container changed (ALSA devices after a card came or went) */
+void
+jack_controller_configure_send_signal_constraints_changed(const char * const * address, int count);
 
 #endif /* #ifndef CONTROLLER_INTERNAL_H__04D54D51_3D79_49A2_A1DA_F8587E9E7F42__INCLUDED */
