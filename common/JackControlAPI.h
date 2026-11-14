@@ -240,13 +240,6 @@ SERVER_EXPORT bool
 jackctl_server_switch_master(jackctl_server_t * server,
                             jackctl_driver_t * driver);
 
-/* jack2-nspa: take clients out of the graph before a session manager stops their
-   process (see JackEngine::DetachClients). */
-SERVER_EXPORT int
-jackctl_server_detach_clients(jackctl_server_t * server,
-                              const char * client_name,
-                              int pid);
-
 SERVER_EXPORT int
 jackctl_parse_driver_params(jackctl_driver * driver_ptr, int argc, char* argv[]);
 

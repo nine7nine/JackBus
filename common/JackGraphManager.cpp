@@ -109,6 +109,14 @@ bool JackGraphManager::RunNextGraph(int refnum_bound)
     return res;
 }
 
+// RT, before RunNextGraph or RunCurrentGraph: all of the client's inputs signalled it
+// in the current cycle, so it was triggered (its activation count got down to 0)
+bool JackGraphManager::IsActivated(int refnum)
+{
+    JackConnectionManager* manager = ReadCurrentState();
+    return (manager->GetActivation(refnum) == 0);
+}
+
 // RT
 bool JackGraphManager::IsFinishedGraph()
 {

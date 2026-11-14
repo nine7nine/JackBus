@@ -188,6 +188,19 @@ class SERVER_EXPORT JackLockedEngine
             return fEngine.DetachClients(client_name, pid);
             CATCH_EXCEPTION_RETURN
         }
+        int GetClientCycleStats(JackClientCycleStats* stats, int max)
+        {
+            TRY_CALL
+            JackLock lock(&fEngine);
+            return fEngine.GetClientCycleStats(stats, max);
+            CATCH_EXCEPTION_RETURN
+        }
+        void ResetClientCycleStats()
+        {
+            TRY_CALL
+            fEngine.ResetClientCycleStats();     // no lock: one atomic increment
+            CATCH_EXCEPTION
+        }
         int FlushNotifications()
         {
             TRY_CALL

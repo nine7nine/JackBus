@@ -44,6 +44,13 @@ class JackClientInterface;
 struct JackEngineControl;
 class JackExternalClient;
 
+// How a client in the graph keeps up (JackEngine::GetClientCycleStats)
+struct JackClientCycleStats {
+    char fName[JACK_CLIENT_NAME_SIZE + 1];
+    uint32_t fLateCycles;       // cycles it had not finished when the next one began
+    uint32_t fMaxUsecs;         // its longest cycle, woken to finished, while asked for
+};
+
 /*
  Server-internal notification, from the notifier thread to the request thread over
  the server's own channel (JackServer::Notify): the graph did not finish in some
@@ -182,6 +189,30 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         jack_time_t fDetachedSince[CLIENT_NUM];
         void WatchClient(int refnum, bool on);
         bool IsWatched(int refnum) const;
+
+        /*
+         How each client in the graph keeps up (UpdateClientCycles, realtime thread).
+         fCycleMember[i]: written by WatchClient, under the engine lock, whenever
+         client i joins or leaves the graph: bit 0 set while it is in it, the rest
+         counts the changes, so the realtime thread knows when what it noted belongs
+         to another client or an earlier activation.
+         */
+        struct ClientCycle {
+            uint32_t fMember;           // the fCycleMember value the rest belongs to
+            jack_time_t fFinishedAt;    // the client's fFinishedAt when last looked at
+            jack_time_t fLateAwakeAt;   // found in its cycle at a cycle start, measuring: when it woke
+            uint32_t fLateCycles;       // statistics, read by other threads
+            uint32_t fMaxUsecs;
+        };
+        uint32_t fCycleMember[CLIENT_NUM];
+        ClientCycle fClientCycle[CLIENT_NUM];
+        uint32_t fCycleStatsReset;      // asked (any thread) ...
+        uint32_t fCycleStatsResetDone;  // ... and done (realtime thread)
+        jack_time_t fCycleStatsAskedAt; // last GetClientCycleStats: measure until kMeasureUsecs after
+        jack_time_t fLastCycleLook;     // realtime thread: last cycle it looked at the clients
+        static const jack_time_t kMeasureUsecs = 60000000;
+        bool fFreewheeling;             // no statistics then (NotifyFreewheel)
+        void UpdateClientCycles(jack_time_t cur_cycle_begin, int bound, bool graph_finished);
         void DetachThreadEndedClient(int refnum);
         JackMetadata fMetadata;
 
@@ -252,6 +283,8 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         void CheckStuckClients();
         int FlushNotifications();
         int DetachClients(const char* client_name, int pid);
+        int GetClientCycleStats(JackClientCycleStats* stats, int max);
+        void ResetClientCycleStats();
 
         int GetClientPID(const char* name);
         int GetClientRefNum(const char* name);

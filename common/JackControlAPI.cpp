@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <signal.h>
+#include <vector>
 
 #include "jslist.h"
 #include "driver_interface.h"
@@ -40,6 +41,7 @@
 #include "shm.h"
 #include "JackTools.h"
 #include "JackControlAPI.h"
+#include "JackControlNspa.h"
 #include "JackLockedEngine.h"
 #include "JackConstants.h"
 #include "JackDriverLoader.h"
@@ -1588,6 +1590,36 @@ SERVER_EXPORT int jackctl_server_detach_clients(jackctl_server * server_ptr, con
         return -1;
     }
     return server_ptr->engine->GetEngine()->DetachClients(client_name, pid);
+}
+
+/*
+ jack2-nspa: how each client in the graph keeps up (JackEngine::UpdateClientCycles):
+ the cycles it had not finished when the next one began, and its longest cycle, since
+ it was activated or the last reset. Fills up to max entries; returns how many, -1
+ without a server.
+ */
+SERVER_EXPORT int jackctl_server_get_client_timings(jackctl_server * server_ptr, jackctl_client_timing_t * timings, int max)
+{
+    if (!server_ptr || !server_ptr->engine || !timings || max < 0) {
+        return -1;
+    }
+    std::vector<JackClientCycleStats> stats(CLIENT_NUM);
+    int count = server_ptr->engine->GetEngine()->GetClientCycleStats(&stats[0], (max < CLIENT_NUM) ? max : CLIENT_NUM);
+    for (int i = 0; i < count; i++) {
+        memcpy(timings[i].name, stats[i].fName, sizeof(timings[i].name));
+        timings[i].late_cycles = stats[i].fLateCycles;
+        timings[i].max_callback_usecs = stats[i].fMaxUsecs;
+    }
+    return count;
+}
+
+SERVER_EXPORT bool jackctl_server_reset_client_timings(jackctl_server * server_ptr)
+{
+    if (!server_ptr || !server_ptr->engine) {
+        return false;
+    }
+    server_ptr->engine->GetEngine()->ResetClientCycleStats();
+    return true;
 }
 
 SERVER_EXPORT bool jackctl_server_switch_master(jackctl_server * server_ptr, jackctl_driver * driver_ptr)

@@ -72,6 +72,13 @@ JackEngine::JackEngine(JackGraphManager* manager,
         fDetachedSince[i] = 0;
     }
     memset(fAliveWatch, 0, sizeof(fAliveWatch));
+    memset(fCycleMember, 0, sizeof(fCycleMember));
+    memset(fClientCycle, 0, sizeof(fClientCycle));
+    fCycleStatsReset = 0;
+    fCycleStatsResetDone = 0;
+    fFreewheeling = false;
+    fCycleStatsAskedAt = 0;
+    fLastCycleLook = 0;
     fRefNumBound = 0;
     fLastSwitchUsecs = 0;
     fSessionPendingReplies = 0;
@@ -374,13 +381,15 @@ void JackEngine::ProcessCurrent(jack_time_t cur_cycle_begin)
 bool JackEngine::Process(jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end)
 {
     bool res = true;
+    const int bound = __atomic_load_n(&fRefNumBound, __ATOMIC_ACQUIRE);
 
     // Cycle  begin
-    fEngineControl->CycleBegin(fClientTable, fGraphManager, cur_cycle_begin, prev_cycle_end,
-                               __atomic_load_n(&fRefNumBound, __ATOMIC_ACQUIRE));
+    fEngineControl->CycleBegin(fClientTable, fGraphManager, cur_cycle_begin, prev_cycle_end, bound);
+    const bool finished = fGraphManager->IsFinishedGraph();
+    UpdateClientCycles(cur_cycle_begin, bound, finished);     // the cycle that ends, before the graph is reset
 
     // Graph
-    if (fGraphManager->IsFinishedGraph()) {
+    if (finished) {
         ProcessNext(cur_cycle_begin);
         res = true;
     } else {
@@ -401,6 +410,109 @@ bool JackEngine::Process(jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end
     // Cycle end
     fEngineControl->CycleEnd(fClientTable);
     return res;
+}
+
+/*
+ Realtime thread, each cycle start, before the graph is reset: how the clients in the
+ graph did in the cycle that ends. Statistics only (GetClientCycleStats): nothing
+ changes for the clients.
+
+ A client is late when the graph did not finish because of it: triggered, and not
+ finished, either in its callback (Running) or all its inputs signalled but not woken
+ yet (Triggered, its activation count at 0). A client still waiting for an input is
+ not late itself. As always, a late client is triggered again and goes straight on to
+ the next cycle when it finishes (catching up: no block of its input is skipped).
+ Counted on every cycle the graph did not finish (the engine's slow path): nothing to
+ do on the others.
+
+ A cycle's length is woken to finished (fAwakeAt, fFinishedAt, which every libjack
+ writes); a late cycle is measured up to the client's next wake if it went straight
+ on to the next one (which overwrites fFinishedAt before the engine looks again), and
+ while it lasts, up to now. Measuring means reading every client's timing every
+ cycle, so it is done only while someone asks for the statistics (GetClientCycleStats
+ in the last kMeasureUsecs).
+ */
+void JackEngine::UpdateClientCycles(jack_time_t cur_cycle_begin, int bound, bool graph_finished)
+{
+    const uint32_t reset = __atomic_load_n(&fCycleStatsReset, __ATOMIC_RELAXED);
+    const bool zero = (reset != fCycleStatsResetDone);   // only this thread writes fCycleStatsResetDone
+    const jack_time_t asked = __atomic_load_n(&fCycleStatsAskedAt, __ATOMIC_RELAXED);
+    const bool measure = (asked != 0 && cur_cycle_begin - asked < kMeasureUsecs);
+
+    if (graph_finished && !measure && !zero) {
+        return;     // the usual cycle
+    }
+
+    // Lengths only from consecutive looks: what was noted at an earlier one is stale
+    const bool consecutive = measure && (cur_cycle_begin - fLastCycleLook < 2 * (jack_time_t)fEngineControl->fPeriodUsecs);
+    fLastCycleLook = cur_cycle_begin;
+    const bool freewheel = __atomic_load_n(&fFreewheeling, __ATOMIC_RELAXED);  // no deadline then
+
+    for (int i = fEngineControl->fDriverNum; i < bound; i++) {
+        const uint32_t member = __atomic_load_n(&fCycleMember[i], __ATOMIC_ACQUIRE);
+        if (!(member & 1)) {
+            continue;       // not in the graph (an internal client, or inactive)
+        }
+        ClientCycle& c = fClientCycle[i];
+        JackClientTiming* timing = fGraphManager->GetClientTiming(i);
+        const jack_time_t finished_at = timing->fFinishedAt;
+        const jack_time_t awake_at = timing->fAwakeAt;
+        bool fresh = !consecutive;
+
+        if (member != c.fMember || zero) {
+            // Joined the graph since (another client on this refnum, or activated
+            // again), or a reset was asked: start afresh
+            __atomic_store_n(&c.fLateCycles, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&c.fMaxUsecs, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&c.fMember, member, __ATOMIC_RELAXED);
+            fresh = true;
+        }
+
+        jack_time_t longest = 0;
+        if (fresh) {
+            c.fFinishedAt = finished_at;
+            c.fLateAwakeAt = 0;
+        } else {
+            if (c.fLateAwakeAt != 0 && awake_at != c.fLateAwakeAt) {
+                // Late at the last cycle start, woken again since: that cycle ended before
+                if (awake_at > c.fLateAwakeAt) {
+                    longest = awake_at - c.fLateAwakeAt;
+                }
+                c.fLateAwakeAt = 0;
+            }
+            if (finished_at != c.fFinishedAt) {
+                c.fFinishedAt = finished_at;
+                c.fLateAwakeAt = 0;     // a late cycle has ended: measured here, or just above
+                if (awake_at != 0 && finished_at >= awake_at && finished_at - awake_at > longest) {
+                    longest = finished_at - awake_at;
+                }
+            }
+        }
+
+        if (!graph_finished) {
+            const jack_client_state_t status = timing->fStatus;
+            const bool running = (status == Running && awake_at > finished_at);
+            if (running || (status == Triggered && fGraphManager->IsActivated(i))) {
+                if (!freewheel) {
+                    __atomic_store_n(&c.fLateCycles, c.fLateCycles + 1, __ATOMIC_RELAXED);
+                }
+                if (running && measure) {
+                    c.fLateAwakeAt = awake_at;
+                    if (cur_cycle_begin > awake_at && cur_cycle_begin - awake_at > longest) {
+                        longest = cur_cycle_begin - awake_at;
+                    }
+                }
+            }
+        }
+
+        if (measure && !freewheel && longest > c.fMaxUsecs) {
+            __atomic_store_n(&c.fMaxUsecs, (longest < 0xFFFFFFFFULL) ? (uint32_t)longest : 0xFFFFFFFFU, __ATOMIC_RELAXED);
+        }
+    }
+
+    if (zero) {
+        __atomic_store_n(&fCycleStatsResetDone, reset, __ATOMIC_RELAXED);
+    }
 }
 
 /*
@@ -652,6 +764,8 @@ void JackEngine::NotifyFailure(int code, const char* reason)
 
 void JackEngine::NotifyFreewheel(bool onoff)
 {
+    // Called with the cycles stopped, before the freewheel driver starts and after it stops
+    __atomic_store_n(&fFreewheeling, onoff, __ATOMIC_RELAXED);
     if (onoff) {
         // Save RT state
         fEngineControl->fSavedRealTime = fEngineControl->fRealTime;
@@ -1474,6 +1588,11 @@ void JackEngine::WatchClient(int refnum, bool on)
     if (refnum < 0 || refnum >= CLIENT_NUM) {
         return;
     }
+    // One more change of the client's membership of the graph, for the realtime
+    // thread's statistics (UpdateClientCycles); writers hold the engine lock
+    uint32_t member = __atomic_load_n(&fCycleMember[refnum], __ATOMIC_RELAXED);
+    __atomic_store_n(&fCycleMember[refnum], (((member >> 1) + 1) << 1) | (on ? 1U : 0U), __ATOMIC_RELEASE);
+
     uint64_t bit = 1ULL << (refnum % 64);
     if (on) {
         __atomic_fetch_or(&fAliveWatch[refnum / 64], bit, __ATOMIC_RELEASE);
@@ -1555,6 +1674,40 @@ int JackEngine::DetachClients(const char* client_name, int pid)
         fNotifier.RequestCheck();   // its process is about to go: removed soon after
     }
     return (client_name && !found) ? -1 : count;
+}
+
+// Non-RT, engine lock held: the clients in the graph and their statistics. Asking
+// keeps the realtime thread measuring the lengths of the clients' cycles for
+// kMeasureUsecs more (UpdateClientCycles): until the first request, and once nobody
+// has asked for that long, only the late cycles are counted.
+int JackEngine::GetClientCycleStats(JackClientCycleStats* stats, int max)
+{
+    __atomic_store_n(&fCycleStatsAskedAt, GetMicroSeconds(), __ATOMIC_RELAXED);
+
+    const bool reset = (__atomic_load_n(&fCycleStatsReset, __ATOMIC_RELAXED)
+                        != __atomic_load_n(&fCycleStatsResetDone, __ATOMIC_RELAXED));
+    int n = 0;
+    for (int i = fEngineControl->fDriverNum; i < CLIENT_NUM && n < max; i++) {
+        JackClientInterface* client = fClientTable[i];
+        const uint32_t member = __atomic_load_n(&fCycleMember[i], __ATOMIC_RELAXED);
+        if (!client || !(member & 1)) {
+            continue;
+        }
+        JackClientCycleStats& s = stats[n++];
+        snprintf(s.fName, sizeof(s.fName), "%s", client->GetClientControl()->fName);
+        // Zero until the realtime thread has looked at it since it joined or a reset
+        ClientCycle& c = fClientCycle[i];
+        const bool current = !reset && (__atomic_load_n(&c.fMember, __ATOMIC_RELAXED) == member);
+        s.fLateCycles = current ? __atomic_load_n(&c.fLateCycles, __ATOMIC_RELAXED) : 0;
+        s.fMaxUsecs = current ? __atomic_load_n(&c.fMaxUsecs, __ATOMIC_RELAXED) : 0;
+    }
+    return n;
+}
+
+// Any thread: the realtime thread starts every client's statistics afresh
+void JackEngine::ResetClientCycleStats()
+{
+    __atomic_add_fetch(&fCycleStatsReset, 1, __ATOMIC_RELAXED);
 }
 
 // The client's process is exiting or gone: out of the graph now, without waiting for

@@ -120,6 +120,7 @@ class SERVER_EXPORT JackGraphManager : public JackShmMem, public JackAtomicState
         void RunCurrentGraph(int refnum_bound = CLIENT_NUM);
         bool RunNextGraph(int refnum_bound = CLIENT_NUM);
         bool IsFinishedGraph();
+        bool IsActivated(int refnum);
 
         void InitRefNum(int refnum);
         int ResumeRefNum(JackClientControl* control, JackSynchro* table);
