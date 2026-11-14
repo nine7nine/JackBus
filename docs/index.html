@@ -2058,8 +2058,8 @@ pre.code .s { color: var(--amber); }
   <p class="sub">
     <code>jackdbus</code> is the JACK server packaged as a D-Bus service: the session bus starts it on the first call
     to <code>org.jackaudio.service</code>, it keeps its settings in <code>~/.config/jack/conf.xml</code>, and it owns
-    the card through the desktop's device-reservation protocol. On this system PipeWire runs on top of it as an
-    ordinary JACK client, carrying the PulseAudio and ALSA applications.
+    the card through the desktop's device-reservation protocol. In the set-up it's built for, PipeWire runs on top of
+    it as an ordinary JACK client, carrying the PulseAudio and ALSA applications.
   </p>
   <div class="figure">
     <div class="controls"><button class="toggle" type="button" data-play>Pause</button> <button class="toggle" type="button" data-replay>Replay</button></div>
@@ -2176,6 +2176,7 @@ pre.code .s { color: var(--amber); }
       <tr><td>Stopping an application from a session manager</td><td>killed in the graph: the cycle it is due in waits for it; with a stock libjack, or killed mid-callback, the graph stalls until it is found</td><td><span class="better"><code>DetachClient</code> / <code>DetachProcess</code>: out of the graph first, 0 xruns with any libjack (§12)</span></td></tr>
       <tr><td>Which client runs late, and how close each runs to its deadline</td><td>only the xrun log line</td><td><span class="better"><code>GetClientTimings</code> / <code>ResetClientTimings</code> (§13)</span></td></tr>
       <tr><td>PM QoS</td><td>external helper only</td><td><span class="better">engine parameter <code>cpu-dma-latency</code>; effective value 8000 → 0 µs while running</span></td></tr>
+      <tr><td>A sound card plugged in or removed</td><td>the ALSA device list is read once, at start: a USB interface plugged in later is not offered until jackdbus restarts</td><td><span class="better"><code>/dev/snd</code> watched from the main loop; about a second after a change (once the card's nodes are usable) the list is read again and <code>Configure.ConstraintsChanged</code> sent · no new thread, nothing on the RT path</span></td></tr>
     </table>
   </div>
   <pre class="code" style="margin-top:14px"><span class="c"># jack2dbus-nspa additions · org.jackaudio.service /org/jackaudio/Controller</span>
@@ -2183,6 +2184,7 @@ pre.code .s { color: var(--amber); }
 <span class="k">org.jackaudio.JackPatchbay.DetachProcess</span>(x process_id)  → u detached
 <span class="k">org.jackaudio.JackControl.GetClientTimings</span>()          → a(suu)   <span class="c"># client, late cycles, longest cycle µs</span>
 <span class="k">org.jackaudio.JackControl.ResetClientTimings</span>()
+<span class="k">org.jackaudio.Configure.ConstraintsChanged</span>       (as container)  <span class="c"># signal: a value list changed (["drivers", "alsa"]: sound cards)</span>
 <span class="c"># jackdbus' own engine parameters (jack_control eps …), saved in conf.xml</span>
 <span class="k">log-level</span>     off | errors | <span class="s">server</span> | all
 <span class="k">log-max-size</span>  MiB, default <span class="s">4</span></pre>
@@ -3497,7 +3499,7 @@ pre.code .s { color: var(--amber); }
           failing raw MIDI port still stops the I/O thread for all (C21, not done).</li>
         <li><b>"Device busy" right after a PipeWire takeover</b>: a short retry of the PCM open after acquiring the
           reservation would remove the race; optional, not done.</li>
-        <li><b>FireWire (FFADO)</b>: built like Arch's package, not tested; not used on this system.</li>
+        <li><b>FireWire (FFADO)</b>: built like Arch's package, not tested (no FireWire hardware to test with).</li>
         <li><b>A TSan report older than the fork's changes</b>: <code>JackMessageBuffer::AddMessage</code> against
           jackdbus's log callback, around the message buffer's lifetime across StartServer/StopServer; the queue
           itself is clean under TSan. To investigate.</li>

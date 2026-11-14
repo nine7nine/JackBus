@@ -154,6 +154,7 @@ org.jackaudio.JackPatchbay.DetachClient(s client_name)  → u detached
 org.jackaudio.JackPatchbay.DetachProcess(x process_id)  → u detached
 org.jackaudio.JackControl.GetClientTimings()          → a(suu)
 org.jackaudio.JackControl.ResetClientTimings()
+org.jackaudio.Configure.ConstraintsChanged(as container)  (signal)
 ```
 
 - **Detach before stop.** A session manager that is about to stop an
@@ -168,7 +169,18 @@ org.jackaudio.JackControl.ResetClientTimings()
   client per cycle), so a monitor polls. With nobody asking, the server costs
   27 instructions per cycle more than before.
 
-Older jackdbus versions answer `UnknownMethod`, and a tool carries on as before.
+- **Sound cards plugged in or removed.** Stock jackdbus lists the ALSA devices
+  once, at start: a USB interface plugged in later is never offered until
+  jackdbus restarts. This one watches `/dev/snd` and, about a second after a card
+  comes or goes, reads the ALSA driver's device list again and sends
+  `ConstraintsChanged` with `["drivers", "alsa"]`, so a settings page refreshes
+  its list. That covers whether a card is fully set up (its control node and
+  permissions), and a burst of changes gives one refresh. It runs in jackdbus's
+  main loop: no new thread, nothing near the server's real-time thread. A server
+  that keeps running when its own card is unplugged is designed, not done yet.
+
+Older jackdbus versions answer `UnknownMethod`, and a tool carries on as before
+(the signal simply never comes).
 
 ### From upstream `develop`
 
