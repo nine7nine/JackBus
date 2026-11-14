@@ -236,6 +236,9 @@ alsa_driver_reset_parameters (alsa_driver_t *driver,
 			      jack_nframes_t user_nperiods,
 			      jack_nframes_t rate);
 
+int
+alsa_driver_wake_margin (alsa_driver_t *driver);
+
 jack_driver_t *
 alsa_driver_new (char *name, char *playback_alsa_device,
 		 char *capture_alsa_device,

@@ -20,7 +20,8 @@
 # Environment: NSPA_BUILD_DIR (default ./build), NSPA_HW_OUT (default
 # /tmp/jack2-nspa-hw), NSPA_HW_SERVERS (default "fork system"), NSPA_HW_LOW
 # (low-latency configurations, default "64x2 64x3 128x2"), NSPA_HW_ONLY
-# (subset of: load capture seq lowlat sync midi kill; default all).
+# (subset of: load capture seq lowlat sync midi kill; default all), NSPA_HW_ALSA_ARGS (more
+# ALSA driver options for the fork's server only, e.g. "-w 0").
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"
@@ -214,7 +215,7 @@ start_server() {
     # no ptrace capability in here); stop it with stop_traced_server
     if [ "$which" = fork ]; then
         env LD_LIBRARY_PATH="$build/common" JACK_DRIVER_DIR="$build" ${STRACE_OUT:+strace -f -qq -o $STRACE_OUT} \
-            "$build/jackd" -R -P 89 ${SERVER_OPTS:-} -d alsa -d "$dev" "$@" >"$log" 2>&1 &
+            "$build/jackd" -R -P 89 ${SERVER_OPTS:-} -d alsa -d "$dev" "$@" ${NSPA_HW_ALSA_ARGS:-} >"$log" 2>&1 &
     else
         env ${STRACE_OUT:+strace -f -qq -o $STRACE_OUT} \
             /usr/bin/jackd -R -P 89 ${SERVER_OPTS:-} -d alsa -d "$dev" "$@" >"$log" 2>&1 &

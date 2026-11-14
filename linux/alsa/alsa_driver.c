@@ -1372,6 +1372,16 @@ alsa_driver_set_clock_sync_status (alsa_driver_t *driver, channel_t chn,
 
 static int under_gdb = FALSE;
 
+/* jack2-nspa: the wake timer's automatic margin: an eighth of a period, between 50 and 500 us.
+   It covers the position's jitter and the interrupt's usual delay, which don't grow with the
+   period. */
+int
+alsa_driver_wake_margin (alsa_driver_t *driver)
+{
+	int m = driver->period_usecs / 8;
+	return m < 50 ? 50 : (m > 500 ? 500 : m);
+}
+
 jack_nframes_t
 alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 		  *delayed_usecs)
@@ -1472,7 +1482,7 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 				if (m > need) need = m;
 			}
 			int64_t margin = driver->wake_timer_us > 0 ? driver->wake_timer_us
-				: (driver->period_usecs / 8 > 50 ? driver->period_usecs / 8 : 50);
+				: alsa_driver_wake_margin (driver);
 			int64_t us = (int64_t) need * 1000000 / driver->frame_rate + margin;
 			int64_t left = (int64_t) driver->poll_timeout * 1000
 				- (int64_t) (jack_get_microseconds () - wait_start);

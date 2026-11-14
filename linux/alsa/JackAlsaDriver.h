@@ -98,7 +98,7 @@ class JackAlsaDriver : public JackAudioDriver
             if (us >= 0 && d->batch) {
                 jack_info("ALSA: wake timer not used: a batch device (its position moves only when it reports)");
             } else if (us >= 0) {
-                jack_info("ALSA: wake timer on, %d us after a period is due", us > 0 ? us : (int)(d->period_usecs / 8 > 50 ? d->period_usecs / 8 : 50));
+                jack_info("ALSA: wake timer on, %d us after a period is due", us > 0 ? us : alsa_driver_wake_margin(d));
             }
         }
 

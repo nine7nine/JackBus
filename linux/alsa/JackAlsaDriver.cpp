@@ -796,7 +796,7 @@ SERVER_EXPORT const jack_driver_desc_t* driver_get_descriptor ()
         "Wake on a timer too (us after a period is due; 0 auto, -1 off)",
         "Wake when the card's position says a period is due, plus this margin in us, even if its period interrupt "
         "has not come: some cards' interrupts arrive late or are dropped while their position is right "
-        "(Intel HDA at small buffer sizes). 0: an eighth of a period (at least 50 us). -1: off, the interrupt only. "
+        "(Intel HDA at small buffer sizes). 0: an eighth of a period, 50 to 500 us. -1: off, the interrupt only. "
         "Not used with batch devices (USB), whose position moves only when they report.");
 
     strcpy(value.str, "none");
