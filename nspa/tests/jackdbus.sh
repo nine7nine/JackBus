@@ -320,6 +320,44 @@ fi
 rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 rm -rf "$HOME/.config/jack"
 
+# 1f. the server stops with clients connected, which leave as soon as they are told:
+# what the server still has to say during its teardown (its own clients and ports going)
+# must not be written to their closed sockets, nor to its own request channel once that
+# is closed (1.9.22 logged three error lines per notification: 20 to 60 per stop with a
+# patchbay connected; the build before the fix: 158 and 166 lines over these three stops).
+pb_bin="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/patchbay_client"
+if [ ! -x "$pb_bin" ]; then
+    echo "SKIP jackdbus-stop-quiet: no patchbay_client"
+elif start_jackdbus; then
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
+    call org.jackaudio.Configure.SetParameterValue array:string:driver,period variant:uint32:256
+    before=$(grep -c 'Broken pipe\|Could not write notification\|ClientNotify fails' "$log")
+    rc=0
+    for round in 1 2 3; do
+        if ! call org.jackaudio.JackControl.StartServer; then rc=1; break; fi
+        rm -f "$work/pbfifo"; mkfifo "$work/pbfifo"; exec 7<>"$work/pbfifo"
+        LD_LIBRARY_PATH="$(dirname "$jackdbus")/../common" "$pb_bin" patchbay <&7 >/dev/null 2>&1 & p1=$!
+        LD_LIBRARY_PATH="$(dirname "$jackdbus")/../common" "$pb_bin" patchbayd <&7 >/dev/null 2>&1 & p2=$!
+        p3=
+        if [ -x "$timings_bin" ]; then  # ordinary realtime clients, which stay until killed
+            LD_LIBRARY_PATH="$(dirname "$jackdbus")/../common" "$timings_bin" 0 1 <&7 >/dev/null 2>&1 & p3=$!
+        fi
+        sleep 1.5
+        call org.jackaudio.JackControl.StopServer || rc=1
+        sleep 0.3
+        exec 7>&-
+        kill $p1 $p2 $p3 2>/dev/null; wait $p1 $p2 $p3 2>/dev/null
+    done
+    n=$(( $(grep -c 'Broken pipe\|Could not write notification\|ClientNotify fails' "$log") - before ))
+    [ "$n" = 0 ] || rc=1
+    result jackdbus-stop-quiet $rc "3 stops with patchbay clients connected: $n notification error lines"
+    kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
+else
+    echo "FAIL jackdbus-stop-quiet: jackdbus did not come up"; fail=1
+fi
+rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
+rm -rf "$HOME/.config/jack"
+
 # 2. crash handler
 if start_jackdbus; then
     kill -SEGV $JD_PID

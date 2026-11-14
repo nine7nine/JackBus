@@ -46,6 +46,7 @@ cc -O2 $tcf -Wall -I"$root/common" -o "$out/refnum_bound" "$here/refnum_bound.c"
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/client_kill" "$here/client_kill.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/notify_lag" "$here/notify_lag.c" -L"$fork_lib" -ljack || exit 1
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/client_timings" "$here/client_timings.c" -L"$fork_lib" -ljack || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/patchbay_client" "$here/patchbay_client.c" -L"$fork_lib" -ljack || exit 1
 cc -m32 -O2 -Wall -I"$root/common" -o "$out/stress32" "$here/stress.c" -L/usr/lib32 -ljack -lpthread 2>/dev/null \
     || { echo "note: 32-bit client not built (no multilib/lib32-jack2?)"; rm -f "$out/stress32"; }
 
@@ -448,6 +449,53 @@ lag_case fork slow    1
 lag_case fork hung    1
 lag_case fork bufsize 1
 lag_case system slow  0
+
+# A client whose socket is already closed while the server still notifies it: client A
+# is stopped (SIGSTOP), so the request thread waits on its latency reply when a third
+# client connects; B is killed meanwhile, and when the request thread goes on, B's
+# notifications meet a closed socket before its hang-up is processed. 1.9.22 logged
+# three error lines per notification ("Broken pipe", "Could not write notification",
+# "ClientNotify fails"), as it did for every client still connected when the server
+# stops; nothing is sent to a closed socket now. The lagging A is reported once.
+closed_case() {  # closed_case <server> <gating 1|0>
+    name="notify-closed_$1-server"
+    skip_system "$name" "$1" fork && return
+    saved_period=${SERVER_PERIOD:-}
+    [ "$san" = tsan ] || SERVER_PERIOD=256
+    if start_server "$1" "$out/$name.server.log"; then
+        pb="$out/patchbay_client"
+        rm -f "$out/$name.fifo"; mkfifo "$out/$name.fifo"; exec 7<>"$out/$name.fifo"
+        LD_LIBRARY_PATH="$fork_lib" "$pb" slow_a <&7 >/dev/null 2>&1 & pa=$!
+        sleep 0.3
+        LD_LIBRARY_PATH="$fork_lib" "$pb" victim_b <&7 >/dev/null 2>&1 & pv=$!
+        sleep 0.5
+        kill -STOP $pa
+        LD_LIBRARY_PATH="$fork_lib" "$pb" trigger <&7 >/dev/null 2>&1 & pt=$!
+        sleep 0.15
+        kill -KILL $pv
+        sleep 3
+        kill -CONT $pa
+        sleep 1
+        exec 7>&-
+        kill $pa $pt 2>/dev/null; wait $pa $pt $pv 2>/dev/null
+        rm -f "$out/$name.fifo"
+        n=$(grep -c 'Broken pipe\|Could not write notification\|ClientNotify fails' "$out/$name.server.log")
+        lag=$(grep -c 'slow_a did not answer' "$out/$name.server.log")
+        if [ "$n" = 0 ] && [ "$lag" = 1 ]; then
+            echo "PASS $name: no notification sent to the dead client's closed socket; the stopped one reported once"
+        elif [ "$2" = 1 ]; then
+            echo "FAIL $name: $n notification error lines, slow client reported $lag times"; fail=1
+        else
+            echo "INFO $name (expected to fail on unfixed servers): $n notification error lines"
+        fi
+        stop_server || fail=1
+    else
+        echo "FAIL $name: server"; fail=1
+    fi
+    SERVER_PERIOD=$saved_period
+}
+closed_case fork   1
+closed_case system 0
 
 if [ -n "$san" ]; then
     echo "SKIP rt-syscalls (sanitizer run)"
