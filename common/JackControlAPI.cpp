@@ -150,6 +150,10 @@ struct jackctl_parameter
     struct jackctl_driver * driver_ptr;
     char id;
     jack_driver_param_constraint_desc_t * constraint_ptr;
+    /* jack2-nspa: called when the value is set or reset, for parameters that take
+       effect on a running server (NULL for the others) */
+    void (*on_change)(void * arg);
+    void * on_change_arg;
 };
 
 const char * jack_get_self_connect_mode_description(char mode)
@@ -210,6 +214,8 @@ jackctl_add_parameter(
     parameter_ptr->driver_ptr = NULL;
     parameter_ptr->id = 0;
     parameter_ptr->constraint_ptr = constraint_ptr;
+    parameter_ptr->on_change = NULL;
+    parameter_ptr->on_change_arg = NULL;
 
     *parameters_list_ptr_ptr = jack_slist_append(*parameters_list_ptr_ptr, parameter_ptr);
 
@@ -753,6 +759,8 @@ get_realtime_priority_constraint()
     return constraint_ptr;
 }
 
+static void jackctl_cpu_dma_latency_changed(void * arg);
+
 SERVER_EXPORT jackctl_server_t * jackctl_server_create(
     bool (* on_device_acquire)(const char * device_name),
     void (* on_device_release)(const char * device_name))
@@ -767,6 +775,7 @@ SERVER_EXPORT jackctl_server_t * jackctl_server_create2(
 {
     struct jackctl_server * server_ptr;
     union jackctl_parameter_value value;
+    struct jackctl_parameter * param;
 
     server_ptr = (struct jackctl_server *)malloc(sizeof(struct jackctl_server));
     if (server_ptr == NULL)
@@ -941,22 +950,25 @@ SERVER_EXPORT jackctl_server_t * jackctl_server_create2(
     }
 
     value.i = -1;
-    if (jackctl_add_parameter(
+    if ((param = jackctl_add_parameter(
             &server_ptr->parameters,
             "cpu-dma-latency",
             "CPU wakeup latency limit in microseconds while the server runs (-1 = off).",
             "Holds a PM QoS request on /dev/cpu_dma_latency while the server runs, so idle "
-            "CPUs avoid C-states whose exit latency exceeds this (e.g. 0 = stay in C0/C1). "
-            "Deep C-states can take a millisecond or more to wake from: significant at small "
-            "buffer sizes. Costs power. Needs write access to /dev/cpu_dma_latency "
+            "CPUs avoid C-states whose exit latency exceeds this (0: no C-state at all, the "
+            "CPUs poll; 1: C1 only). Deep C-states can take a millisecond or more to wake "
+            "from: significant at small buffer sizes. Costs power. Takes effect at once when "
+            "changed while the server runs. Needs write access to /dev/cpu_dma_latency "
             "(e.g. the realtime group with realtime-privileges).",
             JackParamInt,
             &server_ptr->cpu_dma_latency,
             &server_ptr->default_cpu_dma_latency,
-            value) == NULL)
+            value)) == NULL)
     {
         goto fail_free_parameters;
     }
+    param->on_change = jackctl_cpu_dma_latency_changed;
+    param->on_change_arg = server_ptr;
 
     JackServerGlobals::on_device_acquire = on_device_acquire;
     JackServerGlobals::on_device_release = on_device_release;
@@ -1087,6 +1099,34 @@ static void jackctl_release_cpu_dma_latency(jackctl_server * server_ptr)
     if (server_ptr->cpu_dma_latency_fd >= 0) {
         close(server_ptr->cpu_dma_latency_fd);
         server_ptr->cpu_dma_latency_fd = -1;
+    }
+}
+
+/* The parameter changed (set or reset). While the server runs (from open to close,
+   when the request is held), apply it now: writing a new value to the open
+   /dev/cpu_dma_latency updates the request, -1 releases it, a value >= 0 takes one.
+   Otherwise it applies when the server opens. Called from the control thread, as
+   open and close. */
+static void jackctl_cpu_dma_latency_changed(void * arg)
+{
+    jackctl_server * server_ptr = (jackctl_server *)arg;
+    if (!server_ptr->engine) {
+        return;
+    }
+    int32_t usec = server_ptr->cpu_dma_latency.i;
+    if (usec < 0) {
+        if (server_ptr->cpu_dma_latency_fd >= 0) {
+            jackctl_release_cpu_dma_latency(server_ptr);
+            jack_info("Released the CPU DMA latency request");
+        }
+    } else if (server_ptr->cpu_dma_latency_fd >= 0) {
+        if (write(server_ptr->cpu_dma_latency_fd, &usec, sizeof(usec)) == (ssize_t)sizeof(usec)) {
+            jack_info("Holding a CPU DMA latency request of %d us", usec);
+        } else {
+            jack_error("cpu-dma-latency: cannot set %d us (%s)", usec, strerror(errno));
+        }
+    } else {
+        jackctl_hold_cpu_dma_latency(server_ptr);
     }
 }
 
@@ -1441,6 +1481,10 @@ SERVER_EXPORT bool jackctl_parameter_reset(jackctl_parameter *parameter_ptr)
 
     *parameter_ptr->value_ptr = *parameter_ptr->default_value_ptr;
 
+    if (parameter_ptr->on_change) {
+        parameter_ptr->on_change(parameter_ptr->on_change_arg);
+    }
+
     return true;
 }
 
@@ -1452,6 +1496,10 @@ SERVER_EXPORT bool jackctl_parameter_set_value(jackctl_parameter *parameter_ptr,
 
     parameter_ptr->is_set = true;
     *parameter_ptr->value_ptr = *value_ptr;
+
+    if (parameter_ptr->on_change) {
+        parameter_ptr->on_change(parameter_ptr->on_change_arg);
+    }
 
     return true;
 }
