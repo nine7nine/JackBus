@@ -74,7 +74,7 @@ ShutDown is called:
 void JackLibClient::ShutDown(jack_status_t code, const char* message)
 {
     jack_log("JackLibClient::ShutDown");
-    JackGlobals::fServerRunning = false;
+    __atomic_store_n(&JackGlobals::fServerRunning, false, __ATOMIC_RELAXED);  // jack2-nspa: every client's channel thread may do this at once
     JackClient::ShutDown(code, message);
 }
 

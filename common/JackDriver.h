@@ -258,7 +258,7 @@ class SERVER_EXPORT JackDriver : public JackDriverClientInterface
         virtual JackClientControl* GetClientControl() const;
 
         virtual bool IsRealTime() const;
-        virtual bool IsRunning() const { return fIsRunning; }
+        virtual bool IsRunning() const { return __atomic_load_n(&fIsRunning, __ATOMIC_ACQUIRE); }
         virtual bool Initialize();  // To be called by the wrapping thread Init method when the driver is a "blocking" one
 
 };

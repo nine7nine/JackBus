@@ -167,6 +167,10 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         // read by the RT thread): per-cycle loops over clients stop there
         int fRefNumBound;
         void UpdateRefNumBound();
+        // jack2-nspa: the CPU load statistics are reset when clients come and go; they are the
+        // RT thread's (CalcCPULoad), so other threads only ask for it and Process() does it
+        int fRollingResetPending;
+        void RequestRollingReset() { __atomic_store_n(&fRollingResetPending, 1, __ATOMIC_RELEASE); }
         // Each external client's process as seen from the server: pid in the server's
         // pid namespace (SO_PEERCRED on its request socket; 0 = unknown, no checks) and
         // the process start time, which tells it from a later process reusing the pid.

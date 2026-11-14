@@ -53,7 +53,7 @@ int JackSocketClientChannel::Open(const char* server_name, const char* name, jac
     }
     
     // OK so server is there...
-    JackGlobals::fServerRunning = true;
+    __atomic_store_n(&JackGlobals::fServerRunning, true, __ATOMIC_RELAXED);
 
     // Check name in server
     ClientCheck(name, uuid, name_res, JACK_PROTOCOL_VERSION, (int)options, (int*)status, &result, true);

@@ -357,7 +357,7 @@ void JackEngineProfiling::Profile(JackClientInterface** table,
     for (int i = GetEngineControl()->fDriverNum; i < CLIENT_NUM; i++) {
         JackClientInterface* client = table[i];
         JackClientTiming* timing = manager->GetClientTiming(i);
-        if (client && client->GetClientControl()->fActive && client->GetClientControl()->fCallback[kRealTimeCallback]) {
+        if (client && client->GetClientControl()->IsActive() && client->GetClientControl()->fCallback[kRealTimeCallback]) {
 
             if (!CheckClient(client->GetClientControl()->fName, fAudioCycle)) {
                 // Keep new measured client
@@ -368,10 +368,10 @@ void JackEngineProfiling::Profile(JackClientInterface** table,
                 fMeasuredClient++;
             }
             fProfileTable[fAudioCycle].fClientTable[i].fRefNum = i;
-            fProfileTable[fAudioCycle].fClientTable[i].fSignaledAt = timing->fSignaledAt;
-            fProfileTable[fAudioCycle].fClientTable[i].fAwakeAt = timing->fAwakeAt;
-            fProfileTable[fAudioCycle].fClientTable[i].fFinishedAt = timing->fFinishedAt;
-            fProfileTable[fAudioCycle].fClientTable[i].fStatus = timing->fStatus;
+            fProfileTable[fAudioCycle].fClientTable[i].fSignaledAt = timing->SignaledAt();
+            fProfileTable[fAudioCycle].fClientTable[i].fAwakeAt = timing->AwakeAt();
+            fProfileTable[fAudioCycle].fClientTable[i].fFinishedAt = timing->FinishedAt();
+            fProfileTable[fAudioCycle].fClientTable[i].fStatus = timing->Status();
         }
     }
 }

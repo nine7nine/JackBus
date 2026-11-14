@@ -113,7 +113,7 @@ void JackTransportEngine::MakeAllStartingLocating(JackClientInterface** table)
         if (client) {
             JackClientControl* control = client->GetClientControl();
             // Inactive clients don't have their process function called at all, so they must appear as already "rolling" for the transport....
-            control->fTransportState = (control->fActive && control->fCallback[kRealTimeCallback]) ? JackTransportStarting : JackTransportRolling;
+            control->fTransportState = (control->IsActive() && control->fCallback[kRealTimeCallback]) ? JackTransportStarting : JackTransportRolling;
             control->fTransportSync = true;
             control->fTransportTimebase = true;
             jack_log("MakeAllStartingLocating ref = %ld", i);

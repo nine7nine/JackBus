@@ -179,6 +179,9 @@ class JackAtomicState
         */
         UInt16 GetCurrentIndex()
         {
+            // jack2-nspa: a reader's state reads before this index read (the retry check of a
+            // coherent read): an acquire fence keeps them before it on weakly ordered CPUs
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
             return LoadCurIndex();
         }
 

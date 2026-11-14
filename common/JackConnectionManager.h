@@ -406,15 +406,30 @@ struct JackClientTiming
     {
         Init();
     }
+
+    /*
+     jack2-nspa: shared between processes and threads with no lock (the server's RT thread and
+     every client write them, the engine's other threads read them): each access is a relaxed
+     atomic one. The same instructions as plain accesses on x86-64; no torn 64-bit values on
+     32-bit clients; and the sharing is visible to ThreadSanitizer. The layout is unchanged.
+     */
+    jack_client_state_t Status() const { return __atomic_load_n(&fStatus, __ATOMIC_RELAXED); }
+    void SetStatus(jack_client_state_t status) { __atomic_store_n(&fStatus, status, __ATOMIC_RELAXED); }
+    jack_time_t SignaledAt() const { return __atomic_load_n(&fSignaledAt, __ATOMIC_RELAXED); }
+    jack_time_t AwakeAt() const { return __atomic_load_n(&fAwakeAt, __ATOMIC_RELAXED); }
+    jack_time_t FinishedAt() const { return __atomic_load_n(&fFinishedAt, __ATOMIC_RELAXED); }
+    void SetSignaledAt(jack_time_t t) { __atomic_store_n(&fSignaledAt, t, __ATOMIC_RELAXED); }
+    void SetAwakeAt(jack_time_t t) { __atomic_store_n(&fAwakeAt, t, __ATOMIC_RELAXED); }
+    void SetFinishedAt(jack_time_t t) { __atomic_store_n(&fFinishedAt, t, __ATOMIC_RELAXED); }
     ~JackClientTiming()
     {}
 
     void Init()
     {
-        fSignaledAt = 0;
-        fAwakeAt = 0;
-        fFinishedAt = 0;
-        fStatus = NotTriggered;
+        SetSignaledAt(0);
+        SetAwakeAt(0);
+        SetFinishedAt(0);
+        SetStatus(NotTriggered);
     }
 
 } POST_PACKED_STRUCTURE;

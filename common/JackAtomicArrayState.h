@@ -132,7 +132,7 @@ class JackAtomicArrayState
             UInt32 next_index;
             bool need_copy;
             do {
-                old_val = fCounter;
+                Counter1(old_val) = LoadCounter1();
                 new_val = old_val;
                 *result = GetIndex1(new_val, state);
                 cur_index = GetIndex1(new_val, 0);
@@ -150,7 +150,7 @@ class JackAtomicArrayState
             AtomicArrayCounter old_val;
             AtomicArrayCounter new_val;
             do {
-                old_val = fCounter;
+                Counter1(old_val) = LoadCounter1();
                 new_val = old_val;
                 SetIndex1(new_val, state, 1);  // Written = true, state becomes "switchable"
             } while (!CAS(Counter1(old_val), Counter1(new_val), (UInt32*)&fCounter));
@@ -168,13 +168,22 @@ class JackAtomicArrayState
         ~JackAtomicArrayState() // Not virtual ??
         {}
 
+        // jack2-nspa: atomic snapshot of fCounter, as in JackAtomicState (written with CAS by
+        // other threads and processes; a plain read of the volatile is a data race).
+        UInt32 LoadCounter1() const
+        {
+            return __atomic_load_n((const volatile UInt32*)&fCounter, __ATOMIC_ACQUIRE);
+        }
+
         /*!
         \brief Returns the current state : only valid in the RT reader thread 
         */
 
         T* ReadCurrentState()
         {
-            return &fState[GetIndex1(fCounter, 0)];
+            AtomicArrayCounter c;
+            Counter1(c) = LoadCounter1();
+            return &fState[GetIndex1(c, 0)];
         }
 
         /*!
@@ -183,7 +192,12 @@ class JackAtomicArrayState
 
         UInt16 GetCurrentIndex()
         {
-            return GetIndex1(fCounter, 3);
+            // a reader's state reads before this index read (the retry check of a coherent
+            // read): an acquire fence keeps them before it on weakly ordered CPUs
+            __atomic_thread_fence(__ATOMIC_ACQUIRE);
+            AtomicArrayCounter c;
+            Counter1(c) = LoadCounter1();
+            return GetIndex1(c, 3);
         }
 
         /*!
@@ -195,7 +209,7 @@ class JackAtomicArrayState
             AtomicArrayCounter old_val;
             AtomicArrayCounter new_val;
             do {
-                old_val = fCounter;
+                Counter1(old_val) = LoadCounter1();
                 new_val = old_val;
                 if (GetIndex1(new_val, state)) {						// If state has been written
                     SetIndex1(new_val, 0, SwapIndex1(new_val, state));	// Prepare switch
@@ -203,7 +217,7 @@ class JackAtomicArrayState
                     IncIndex1(new_val, 3);								// Inc switch
                 }
             } while (!CAS(Counter1(old_val), Counter1(new_val), (UInt32*)&fCounter));
-            return &fState[GetIndex1(fCounter, 0)];	// Read the counter again
+            return ReadCurrentState();	// Read the counter again
         }
 
         /*!
@@ -215,7 +229,7 @@ class JackAtomicArrayState
             AtomicArrayCounter old_val;
             AtomicArrayCounter new_val;
             do {
-                old_val = fCounter;
+                Counter1(old_val) = LoadCounter1();
                 new_val = old_val;
                 if ((*result = GetIndex1(new_val, state))) {			// If state has been written
                     SetIndex1(new_val, 0, SwapIndex1(new_val, state));	// Prepare switch
@@ -223,7 +237,7 @@ class JackAtomicArrayState
                     IncIndex1(new_val, 3);								// Inc switch
                 }
             } while (!CAS(Counter1(old_val), Counter1(new_val), (UInt32*)&fCounter));
-            return &fState[GetIndex1(fCounter, 0)];	// Read the counter again
+            return ReadCurrentState();	// Read the counter again
         }
 
         /*!

@@ -46,10 +46,10 @@ void JackEngineControl::CalcCPULoad(JackClientInterface** table,
     // In Asynchronous mode, last cycle end is the max of client end dates
     if (!fSyncMode) {
         for (int i = fDriverNum; i < refnum_bound; i++) {
-            JackClientInterface* client = table[i];
+            JackClientInterface* client = __atomic_load_n(&table[i], __ATOMIC_ACQUIRE);  // jack2-nspa: written by the request thread
             JackClientTiming* timing = manager->GetClientTiming(i);
-            if (client && client->GetClientControl()->fActive && timing->fStatus == Finished) {
-                last_cycle_end = JACK_MAX(last_cycle_end, timing->fFinishedAt);
+            if (client && client->GetClientControl()->IsActive() && timing->Status() == Finished) {
+                last_cycle_end = JACK_MAX(last_cycle_end, timing->FinishedAt());
             }
         }
     }

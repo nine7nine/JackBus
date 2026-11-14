@@ -71,7 +71,7 @@ int JackDriver::Open()
     }
 
     fClientControl.fRefNum = refnum;
-    fClientControl.fActive = true;
+    fClientControl.SetActive(true);
     fEngineControl->fDriverNum++;
     fGraphManager->DirectConnect(fClientControl.fRefNum, fClientControl.fRefNum); // Connect driver to itself for "sync" mode
     SetupDriverSync(fClientControl.fRefNum, false);
@@ -109,7 +109,7 @@ int JackDriver::Open(jack_nframes_t buffer_size,
     }
 
     fClientControl.fRefNum = refnum;
-    fClientControl.fActive = true;
+    fClientControl.SetActive(true);
     fEngineControl->fDriverNum++;
     if (buffer_size > 0) {
         fEngineControl->fBufferSize = buffer_size;
@@ -139,7 +139,7 @@ int JackDriver::Close()
     if (fClientControl.fRefNum >= 0) {
         jack_log("JackDriver::Close");
         fGraphManager->DirectDisconnect(fClientControl.fRefNum, fClientControl.fRefNum); // Disconnect driver from itself for sync
-        fClientControl.fActive = false;
+        fClientControl.SetActive(false);
         fEngineControl->fDriverNum--;
         return fEngine->ClientInternalClose(fClientControl.fRefNum, false);
     } else {
@@ -342,13 +342,13 @@ int JackDriver::Start()
     if (fIsMaster) {
         fEngineControl->InitFrameTime();
     }
-    fIsRunning = true;
+    __atomic_store_n(&fIsRunning, true, __ATOMIC_RELEASE);  // jack2-nspa: read by other threads (IsRunning)
     return StartSlaves();
 }
 
 int JackDriver::Stop()
 {
-    fIsRunning = false;
+    __atomic_store_n(&fIsRunning, false, __ATOMIC_RELEASE);  // jack2-nspa: read by other threads (IsRunning)
     return StopSlaves();
 }
 

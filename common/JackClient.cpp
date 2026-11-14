@@ -132,7 +132,7 @@ int JackClient::Close()
 
 bool JackClient::IsActive()
 {
-    return (GetClientControl()) ? GetClientControl()->fActive : false;
+    return (GetClientControl()) ? GetClientControl()->IsActive() : false;
 }
 
 jack_native_thread_t JackClient::GetThreadID()
@@ -473,7 +473,7 @@ int JackClient::Activate()
     Insertion of client in the graph will cause a kGraphOrderCallback notification
     to be delivered by the server, the client wants to receive it.
     */
-    GetClientControl()->fActive = true;
+    GetClientControl()->SetActive(true);
 
     // Transport related callback become "active"
     GetClientControl()->fTransportSync = true;
@@ -495,7 +495,7 @@ int JackClient::Deactivate()
         return 0;
     }
 
-    GetClientControl()->fActive = false;
+    GetClientControl()->SetActive(false);
 
     // Transport related callback become "unactive"
     GetClientControl()->fTransportSync = false;
@@ -698,7 +698,7 @@ inline bool JackClient::WaitSync()
     if (GetGraphManager()->SuspendRefNum(GetClientControl(), fSynchroTable, LONG_MAX) < 0) {
 #ifdef __APPLE__
         // FIXME macOS reports wait failures when closing down, due to aborted semaphore, ignore it
-        if (!GetClientControl()->fActive) {
+        if (!GetClientControl()->IsActive()) {
             fThread.Terminate();
             return true;
         }
@@ -724,7 +724,7 @@ inline void JackClient::End()
     // Hum... not sure about this, the following "close" code is called in the RT thread...
     int result;
     fThread.DropSelfRealTime();
-    GetClientControl()->fActive = false;
+    GetClientControl()->SetActive(false);
     fChannel->ClientDeactivate(GetClientControl()->fRefNum, &result);
     fThread.Terminate();
 }
@@ -735,7 +735,7 @@ inline void JackClient::Error()
     // Hum... not sure about this, the following "close" code is called in the RT thread...
     int result;
     fThread.DropSelfRealTime();
-    GetClientControl()->fActive = false;
+    GetClientControl()->SetActive(false);
     fChannel->ClientDeactivate(GetClientControl()->fRefNum, &result);
     ShutDown(jack_status_t(JackFailure | JackServerError), JACK_SERVER_FAILURE);
     fThread.Terminate();

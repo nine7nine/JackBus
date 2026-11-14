@@ -252,7 +252,7 @@ void JackConnectionManager::ResetGraph(JackClientTiming* timing, int refnum_boun
     // counters and timings of all CLIENT_NUM slots every cycle.
     for (int i = 0; i < refnum_bound; i++) {
         fInputCounter[i].Reset();
-        timing[i].fStatus = NotTriggered;
+        timing[i].SetStatus(NotTriggered);
     }
 }
 
@@ -263,8 +263,8 @@ int JackConnectionManager::SuspendRefNum(JackClientControl* control, JackSynchro
 {
     bool res;
     if ((res = table[control->fRefNum].TimedWait(time_out_usec))) {
-        timing[control->fRefNum].fStatus = Running;
-        timing[control->fRefNum].fAwakeAt = GetMicroSeconds();
+        timing[control->fRefNum].SetStatus(Running);
+        timing[control->fRefNum].SetAwakeAt(GetMicroSeconds());
     }
     return (res) ? 0 : -1;
 }
@@ -279,8 +279,8 @@ int JackConnectionManager::ResumeRefNum(JackClientControl* control, JackSynchro*
     int res = 0;
 
     // Update state and timestamp of current client
-    timing[control->fRefNum].fStatus = Finished;
-    timing[control->fRefNum].fFinishedAt = current_date;
+    timing[control->fRefNum].SetStatus(Finished);
+    timing[control->fRefNum].SetFinishedAt(current_date);
 
     /*
     Runs at the end of every client's (and the driver's) cycle. Almost all of
@@ -303,8 +303,8 @@ int JackConnectionManager::ResumeRefNum(JackClientControl* control, JackSynchro*
             if (output_ref[i] > 0) {
 
                 // Update state and timestamp of destination clients
-                timing[i].fStatus = Triggered;
-                timing[i].fSignaledAt = current_date;
+                timing[i].SetStatus(Triggered);
+                timing[i].SetSignaledAt(current_date);
 
                 if (!fInputCounter[i].Signal(table + i, control)) {
                     jack_log("JackConnectionManager::ResumeRefNum error: ref = %ld output = %ld ", control->fRefNum, i);

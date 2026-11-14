@@ -84,10 +84,16 @@ struct JackClientControl : public JackShmMemAble
         fTransportState = JackTransportStopped;
         fTransportSync = false;
         fTransportTimebase = false;
-        fActive = false;
+        SetActive(false);
 
         fSessionID = uuid;
     }
+
+    /* jack2-nspa: fActive is written by the client's API thread, the server's request thread
+       and its notification paths, and read by the RT thread every cycle: atomic accesses (the
+       same instructions on x86; the layout is unchanged) */
+    bool IsActive() const { return __atomic_load_n(&fActive, __ATOMIC_ACQUIRE); }
+    void SetActive(bool active) { __atomic_store_n(&fActive, active, __ATOMIC_RELEASE); }
 
 } POST_PACKED_STRUCTURE;
 

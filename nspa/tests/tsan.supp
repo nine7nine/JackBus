@@ -6,17 +6,13 @@
 # or the lock-free state switching, which TSan cannot see. Do not add
 # entries for code introduced by this fork; fix those races instead.
 
-# Per-client timing records (status, timestamps) written by the threads
-# that activate and run each client; informational (xrun detection, load).
-race:Jack::JackConnectionManager::ResumeRefNum
-race:Jack::JackConnectionManager::SuspendRefNum
-race:Jack::JackConnectionManager::ResetGraph
-race:Jack::JackEngine::CheckXRun
+# (Per-client timing records and the CPU load statistics were listed here; they are fixed:
+# relaxed atomic accesses to the timing records, and the statistics reset by the RT thread.)
 
-# CPU load statistics: computed by the RT thread, reset by the request
-# thread when clients come and go, read by clients (jack_cpu_load).
-race:Jack::JackEngineControl::CalcCPULoad
-race:Jack::JackEngineControl::ResetRollingUsecs
+# Coherent reads of the graph state (JackAtomicState): read, then check that the state index
+# did not change, else read again (a seqlock). A writer can be filling the state a slow reader
+# is still reading; the reader then retries. TSan cannot see the retry.
+race:Jack::JackGraphManager::RecalculateLatencyAux
 
 # Client control flags in shared memory (fActive, fTransportSync/State/
 # Timebase, fCallback[]) written by API/notification threads and read by

@@ -143,7 +143,7 @@ struct JackLibGlobals
 
     static void Init()
     {
-        if (!JackGlobals::fServerRunning && fClientCount > 0) {
+        if (!__atomic_load_n(&JackGlobals::fServerRunning, __ATOMIC_RELAXED) && fClientCount > 0) {
 
             // Cleanup remaining clients
             jack_error("Jack server was closed but clients are still allocated, cleanup...");

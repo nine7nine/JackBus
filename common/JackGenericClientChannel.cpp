@@ -63,7 +63,7 @@ void JackGenericClientChannel::ServerSyncCall(JackRequest* req, JackResult* res,
         return;
     }
     
-    if (!JackGlobals::fServerRunning) {
+    if (!__atomic_load_n(&JackGlobals::fServerRunning, __ATOMIC_RELAXED)) {
         jack_error("Server is not running");
         *result = -1;
         return;
@@ -96,7 +96,7 @@ void JackGenericClientChannel::ServerAsyncCall(JackRequest* req, JackResult* res
         return;
     }
     
-    if (!JackGlobals::fServerRunning) {
+    if (!__atomic_load_n(&JackGlobals::fServerRunning, __ATOMIC_RELAXED)) {
         jack_error("Server is not running");
         *result = -1;
         return;

@@ -63,6 +63,7 @@ JackEngine::JackEngine(JackGraphManager* manager,
     fSynchroTable = table;
     fEngineControl = control;
     fSelfConnectMode = self_connect_mode;
+    fRollingResetPending = 0;
     for (int i = 0; i < CLIENT_NUM; i++) {
         fClientTable[i] = NULL;
         fPeerPid[i] = 0;
@@ -335,7 +336,7 @@ void JackEngine::ReleaseRefnum(int refnum)
 #ifdef __linux__
     fAliveTable.ClearSlot(refnum);
 #endif
-    fClientTable[refnum] = NULL;
+    __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)NULL, __ATOMIC_RELEASE);  // jack2-nspa: read by the RT thread (CheckXRun, CalcCPULoad)
     fPeerPid[refnum] = 0;
     fPeerStart[refnum] = 0;
     fPeerNextCheck[refnum] = 0;
@@ -382,6 +383,11 @@ bool JackEngine::Process(jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end
 {
     bool res = true;
     const int bound = __atomic_load_n(&fRefNumBound, __ATOMIC_ACQUIRE);
+
+    if (__atomic_load_n(&fRollingResetPending, __ATOMIC_RELAXED)
+        && __atomic_exchange_n(&fRollingResetPending, 0, __ATOMIC_ACQUIRE)) {
+        fEngineControl->ResetRollingUsecs();   // asked for by another thread (RequestRollingReset)
+    }
 
     // Cycle  begin
     fEngineControl->CycleBegin(fClientTable, fGraphManager, cur_cycle_begin, prev_cycle_end, bound);
@@ -455,8 +461,8 @@ void JackEngine::UpdateClientCycles(jack_time_t cur_cycle_begin, int bound, bool
         }
         ClientCycle& c = fClientCycle[i];
         JackClientTiming* timing = fGraphManager->GetClientTiming(i);
-        const jack_time_t finished_at = timing->fFinishedAt;
-        const jack_time_t awake_at = timing->fAwakeAt;
+        const jack_time_t finished_at = timing->FinishedAt();
+        const jack_time_t awake_at = timing->AwakeAt();
         bool fresh = !consecutive;
 
         if (member != c.fMember || zero) {
@@ -490,7 +496,7 @@ void JackEngine::UpdateClientCycles(jack_time_t cur_cycle_begin, int bound, bool
         }
 
         if (!graph_finished) {
-            const jack_client_state_t status = timing->fStatus;
+            const jack_client_state_t status = timing->Status();
             const bool running = (status == Running && awake_at > finished_at);
             if (running || (status == Triggered && fGraphManager->IsActivated(i))) {
                 if (!freewheel) {
@@ -557,12 +563,12 @@ void JackEngine::CheckXRun(jack_time_t callback_usecs)  // REVOIR les conditions
 
     clients[0] = 0;
     for (int i = fEngineControl->fDriverNum; i < bound; i++) {
-        JackClientInterface* client = fClientTable[i];
-        if (client && client->GetClientControl()->fActive) {
+        JackClientInterface* client = __atomic_load_n(&fClientTable[i], __ATOMIC_ACQUIRE);  // RT thread
+        if (client && client->GetClientControl()->IsActive()) {
             JackClientTiming* timing = fGraphManager->GetClientTiming(i);
-            jack_client_state_t status = timing->fStatus;
-            jack_time_t signaled_date = timing->fSignaledAt;
-            jack_time_t finished_date = timing->fFinishedAt;
+            jack_client_state_t status = timing->Status();
+            jack_time_t signaled_date = timing->SignaledAt();
+            jack_time_t finished_date = timing->FinishedAt();
             jack_time_t late;
 
             if (status != NotTriggered && status != Finished) {
@@ -1026,7 +1032,7 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
         goto error;
     }
 
-    fClientTable[refnum] = client;
+    __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)client, __ATOMIC_RELEASE);
     UpdateRefNumBound();
 
     if (NotifyAddClient(client, real_name, refnum) < 0) {
@@ -1035,7 +1041,7 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
     }
 
     fGraphManager->InitRefNum(refnum);
-    fEngineControl->ResetRollingUsecs();
+    RequestRollingReset();
     *shared_engine = fEngineControl->GetShmIndex();
     *shared_graph_manager = fGraphManager->GetShmIndex();
     *ref = refnum;
@@ -1044,7 +1050,7 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
 error:
     // Cleanup...
     fSynchroTable[refnum].Destroy();
-    fClientTable[refnum] = 0;
+    __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)NULL, __ATOMIC_RELEASE);
     UpdateRefNumBound();
     client->Close();
     delete client;
@@ -1073,7 +1079,7 @@ int JackEngine::ClientInternalOpen(const char* name, int* ref, JackEngineControl
         goto error;
     }
 
-    fClientTable[refnum] = client;
+    __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)client, __ATOMIC_RELEASE);
     UpdateRefNumBound();
 
     if (NotifyAddClient(client, name, refnum) < 0) {
@@ -1082,7 +1088,7 @@ int JackEngine::ClientInternalOpen(const char* name, int* ref, JackEngineControl
     }
 
     fGraphManager->InitRefNum(refnum);
-    fEngineControl->ResetRollingUsecs();
+    RequestRollingReset();
     *shared_engine = fEngineControl;
     *shared_manager = fGraphManager;
     *ref = refnum;
@@ -1091,7 +1097,7 @@ int JackEngine::ClientInternalOpen(const char* name, int* ref, JackEngineControl
 error:
     // Cleanup...
     fSynchroTable[refnum].Destroy();
-    fClientTable[refnum] = 0;
+    __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)NULL, __ATOMIC_RELEASE);
     UpdateRefNumBound();
     return -1;
 }
@@ -1177,7 +1183,7 @@ int JackEngine::ClientCloseAux(int refnum, bool wait)
     } else
 #endif
     fSynchroTable[refnum].Destroy();
-    fEngineControl->ResetRollingUsecs();
+    RequestRollingReset();
     return 0;
 }
 
@@ -1322,7 +1328,7 @@ void JackEngine::ClientKill(int refnum)
     if (detached) {
         // its ports were announced as gone when it was taken out of the graph: not
         // again when they are released (ClientCloseAux)
-        fClientTable[refnum]->GetClientControl()->fActive = false;
+        fClientTable[refnum]->GetClientControl()->SetActive(false);
     }
     if (!detached) {
         /*
@@ -1334,7 +1340,7 @@ void JackEngine::ClientKill(int refnum)
         if (ClientDeactivate(refnum, true) < 0) {
             jack_error("JackEngine::ClientKill ref = %ld cannot be removed from the graph !!", refnum);
         }
-        fClientTable[refnum]->GetClientControl()->fActive = false;
+        fClientTable[refnum]->GetClientControl()->SetActive(false);
     } else {
         /*
          Already taken out of the graph by CheckStuckClients (its process was found
@@ -1512,7 +1518,7 @@ void JackEngine::CheckStuckClients()
      */
     for (int i = 0; i < fRefNumBound; i++) {
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
-        if (!client || client->IsDead() || fDetached[i] || !IsWatched(i) || !client->GetClientControl()->fActive) {
+        if (!client || client->IsDead() || fDetached[i] || !IsWatched(i) || !client->GetClientControl()->IsActive()) {
             continue;
         }
         uint32_t* word = fAliveTable.Word(i);
@@ -1549,10 +1555,10 @@ void JackEngine::CheckStuckClients()
     // Clients without such a slot (another libjack): when the graph did not finish
     for (int i = 0; i < fRefNumBound; i++) {   // drivers are skipped (not external clients)
         JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[i]);
-        if (!client || client->IsDead() || fDetached[i] || fPeerPid[i] <= 0 || !client->GetClientControl()->fActive) {
+        if (!client || client->IsDead() || fDetached[i] || fPeerPid[i] <= 0 || !client->GetClientControl()->IsActive()) {
             continue;
         }
-        if (fGraphManager->GetClientTiming(i)->fStatus == Finished || now < fPeerNextCheck[i]) {
+        if (fGraphManager->GetClientTiming(i)->Status() == Finished || now < fPeerNextCheck[i]) {
             continue;
         }
         PeerState state = ProcessState(fPeerPid[i], fPeerStart[i]);
@@ -1661,7 +1667,7 @@ int JackEngine::DetachClients(const char* client_name, int pid)
             }
         }
         found = true;
-        if (client->IsDead() || fDetached[i] || !client->GetClientControl()->fActive) {
+        if (client->IsDead() || fDetached[i] || !client->GetClientControl()->IsActive()) {
             continue;
         }
         jack_info("client %s: taken out of the graph on request", client->GetClientControl()->fName);
@@ -1718,7 +1724,7 @@ void JackEngine::DetachDeadClient(int refnum)
     JackExternalClient* client = dynamic_cast<JackExternalClient*>(fClientTable[refnum]);
     client->SetDead();
     ClientDeactivate(refnum, false);
-    client->GetClientControl()->fActive = false;
+    client->GetClientControl()->SetActive(false);
 }
 
 //-----------------
@@ -1739,7 +1745,7 @@ int JackEngine::PortRegister(int refnum, const char* name, const char *type, uns
     // buffer_size is actually ignored...
     *port_index = fGraphManager->AllocatePort(refnum, name, type, (JackPortFlags)flags, fEngineControl->fBufferSize);
     if (*port_index != NO_PORT) {
-        if (client->GetClientControl()->fActive) {
+        if (client->GetClientControl()->IsActive()) {
             NotifyPortRegistation(*port_index, true);
         }
         return 0;
@@ -1769,7 +1775,7 @@ int JackEngine::PortUnRegister(int refnum, jack_port_id_t port_index)
             }
         }
 
-        if (client->GetClientControl()->fActive) {
+        if (client->GetClientControl()->IsActive()) {
             NotifyPortRegistation(port_index, false);
         }
         return 0;
@@ -1844,7 +1850,7 @@ int JackEngine::PortConnect(int refnum, jack_port_id_t src, jack_port_id_t dst)
     assert(ref >= 0);
     client = fClientTable[ref];
     assert(client);
-    if (!client->GetClientControl()->fActive) {
+    if (!client->GetClientControl()->IsActive()) {
         jack_error("Cannot connect ports owned by inactive clients:"
                    " \"%s\" is not active", client->GetClientControl()->fName);
         return -1;
@@ -1854,7 +1860,7 @@ int JackEngine::PortConnect(int refnum, jack_port_id_t src, jack_port_id_t dst)
     assert(ref >= 0);
     client = fClientTable[ref];
     assert(client);
-    if (!client->GetClientControl()->fActive) {
+    if (!client->GetClientControl()->IsActive()) {
         jack_error("Cannot connect ports owned by inactive clients:"
                    " \"%s\" is not active", client->GetClientControl()->fName);
         return -1;
