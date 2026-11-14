@@ -601,9 +601,13 @@ extern "C"
 {
 #endif
 
+/* The cards and their PCM devices. `stream` -1: all of them (the "device" parameter); a
+   stream direction: "none" first (the "device" parameter's device), then only cards and
+   devices that have that direction (jack2-nspa: the "capture" and "playback" parameters
+   get a list too, so a front end can offer them like the device). */
 static
 jack_driver_param_constraint_desc_t *
-enum_alsa_devices()
+enum_alsa_devices(int stream = -1)
 {
     snd_ctl_t * handle;
     snd_ctl_card_info_t * info;
@@ -625,6 +629,16 @@ enum_alsa_devices()
 
     constraint_ptr = NULL;
 
+    if (stream >= 0)
+    {
+        jack_driver_param_value_t none;
+        strcpy(none.str, "none");
+        if (!jack_constraint_add_enum(&constraint_ptr, &array_size, &none, "Same as the device"))
+        {
+            goto fail;
+        }
+    }
+
     while(snd_card_next(&card_no) >= 0 && card_no >= 0)
     {
         snprintf(card_id.str, sizeof(card_id.str), "hw:%d", card_no);
@@ -640,14 +654,20 @@ enum_alsa_devices()
 
         {
             snprintf(card_id.str, sizeof(card_id.str), "hw:%s", snd_ctl_card_info_get_id(info));
-            if (!jack_constraint_add_enum(
-                    &constraint_ptr,
-                    &array_size,
-                    &card_id,
-                    snd_ctl_card_info_get_name(info)))
+            /* filtered: the card goes in before its first device of that direction */
+            bool card_listed = false;
+            if (stream < 0)
             {
-                snd_ctl_close(handle);
-                goto fail;
+                if (!jack_constraint_add_enum(
+                        &constraint_ptr,
+                        &array_size,
+                        &card_id,
+                        snd_ctl_card_info_get_name(info)))
+                {
+                    snd_ctl_close(handle);
+                    goto fail;
+                }
+                card_listed = true;
             }
 
             device_no = -1;
@@ -681,6 +701,26 @@ enum_alsa_devices()
                 else
                 {
                     continue;
+                }
+
+                if ((stream == SND_PCM_STREAM_CAPTURE && !has_capture)
+                    || (stream == SND_PCM_STREAM_PLAYBACK && !has_playback))
+                {
+                    continue;
+                }
+
+                if (!card_listed)
+                {
+                    if (!jack_constraint_add_enum(
+                            &constraint_ptr,
+                            &array_size,
+                            &card_id,
+                            snd_ctl_card_info_get_name(info)))
+                    {
+                        snd_ctl_close(handle);
+                        goto fail;
+                    }
+                    card_listed = true;
                 }
 
                 if (!jack_constraint_add_enum(
@@ -748,8 +788,13 @@ SERVER_EXPORT const jack_driver_desc_t* driver_get_descriptor ()
 #endif
 
     strcpy(value.str, "none");
+#ifdef __ANDROID__
     jack_driver_descriptor_add_parameter(desc, &filler, "capture", 'C', JackDriverParamString, &value, NULL, "Provide capture ports.  Optionally set device", NULL);
     jack_driver_descriptor_add_parameter(desc, &filler, "playback", 'P', JackDriverParamString, &value, NULL, "Provide playback ports.  Optionally set device", NULL);
+#else
+    jack_driver_descriptor_add_parameter(desc, &filler, "capture", 'C', JackDriverParamString, &value, enum_alsa_devices(SND_PCM_STREAM_CAPTURE), "Provide capture ports.  Optionally set device", NULL);
+    jack_driver_descriptor_add_parameter(desc, &filler, "playback", 'P', JackDriverParamString, &value, enum_alsa_devices(SND_PCM_STREAM_PLAYBACK), "Provide playback ports.  Optionally set device", NULL);
+#endif
 
     value.ui = 48000U;
     jack_driver_descriptor_add_parameter(desc, &filler, "rate", 'r', JackDriverParamUInt, &value, NULL, "Sample rate", NULL);
