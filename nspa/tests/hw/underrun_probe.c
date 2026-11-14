@@ -55,7 +55,11 @@ static int64_t now_us(void)
 #define CHECK(x) do { int e_ = (x); if (e_ < 0) { fprintf(stderr, "%s:%d %s: %s\n", __FILE__, __LINE__, #x, snd_strerror(e_)); exit(1); } } while (0)
 
 static snd_pcm_format_t fmt;
-static unsigned bytes_per_frame;
+static unsigned bytes_per_frame, cap_bytes_per_frame;
+/* stale-capture check (marker): slots seen once, periods checked, periods read too early */
+static unsigned char slot_seen[64];
+static int marker_on;
+static uint64_t stale_tails, checked_periods;
 
 static void setup(snd_pcm_t *h, int playback, unsigned nper)
 {
@@ -85,6 +89,8 @@ static void setup(snd_pcm_t *h, int playback, unsigned nper)
 	CHECK(snd_pcm_hw_params_get_period_size(hw, &ps, &dir));
 	if (playback)
 		bytes_per_frame = snd_pcm_format_physical_width(fmt) / 8 * ch;
+	else
+		cap_bytes_per_frame = snd_pcm_format_physical_width(fmt) / 8 * ch;
 
 	snd_pcm_sw_params_alloca(&sw);
 	CHECK(snd_pcm_sw_params_current(h, sw));
@@ -137,7 +143,12 @@ static void write_zeros(snd_pcm_t *h, snd_pcm_uframes_t commit, snd_pcm_uframes_
 	CHECK(snd_pcm_mmap_commit(h, off, 0));
 }
 
-/* Read (discard) n captured frames. */
+/* Read n captured frames. Integrity check: each period read is then filled with a marker no
+   converter produces (S32 with 24 significant bits: the low byte is always 0; the marker's is
+   not). A frame that still holds the marker when its slot is read again was not written by the
+   hardware yet: the period was read too early. */
+#define MARK 0x7e7e7e7eu
+static uint64_t stale_frames_max;
 static void read_frames(snd_pcm_t *h, snd_pcm_uframes_t n)
 {
 	const snd_pcm_channel_area_t *a;
@@ -147,6 +158,24 @@ static void read_frames(snd_pcm_t *h, snd_pcm_uframes_t n)
 		CHECK(snd_pcm_mmap_begin(h, &a, &off, &f));
 		if (f == 0)
 			break;
+		if (marker_on && fmt == SND_PCM_FORMAT_S32_LE) {
+			uint32_t *p = (uint32_t *)((unsigned char *)a[0].addr + a[0].first / 8 + off * cap_bytes_per_frame);
+			const size_t words = (size_t)f * (cap_bytes_per_frame / 4);
+			size_t marked = 0;
+			for (size_t i = 0; i < words; i++)
+				marked += p[i] == MARK;
+			if (slot_seen[off / period]) {
+				checked_periods++;
+				if (marked) {
+					stale_tails++;
+					if (marked / (cap_bytes_per_frame / 4) > stale_frames_max)
+						stale_frames_max = marked / (cap_bytes_per_frame / 4);
+				}
+			}
+			slot_seen[off / period] = 1;
+			for (size_t i = 0; i < words; i++)
+				p[i] = MARK;
+		}
 		CHECK(snd_pcm_mmap_commit(h, off, f));
 		n -= f;
 	}
@@ -203,6 +232,7 @@ int main(int argc, char **argv)
 	struct pollfd pfd[16];
 	if (pfd_n > 16) { fprintf(stderr, "too many poll fds\n"); return 1; }
 
+	marker_on = cap != NULL && nper <= 64;
 	/* prefill: the queue, plus the spare (uncommitted) */
 	write_zeros(pb, (snd_pcm_uframes_t)P * queue, spare_mode ? P : 0, B);
 	CHECK(snd_pcm_start(pb));
@@ -375,6 +405,9 @@ int main(int argc, char **argv)
 out:
 	if (timer_margin_us >= 0)
 		fprintf(logf, "# timer fallback (margin %d us): %" PRIu64 " waits ended by the timer\n", timer_margin_us, timer_wakes);
+	if (marker_on)
+		fprintf(logf, "# capture integrity: %" PRIu64 " periods checked, %" PRIu64 " read before the hardware wrote them (at most %" PRIu64 " frames)\n",
+			checked_periods, stale_tails, stale_frames_max);
 	fprintf(logf, "# output slots: written %" PRIu64 " + stood in by the spare %" PRIu64 " - captured %" PRIu64 " = %+" PRId64 " periods (prefill %u; constant means the latency never moved, except across stop-mode restarts); overflows %" PRIu64 ", wait spins %" PRIu64 "\n",
 		pb_written / P, dropped, cap_read / P, (int64_t)(pb_written / P + dropped) - (int64_t)(cap_read / P), queue, overflow, spin);
 	const int64_t t_end = now_us();
