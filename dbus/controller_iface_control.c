@@ -23,6 +23,7 @@
 #endif
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
@@ -57,6 +58,98 @@ jack_controller_control_send_signal_server_stopped()
 }
 
 #define controller_ptr ((struct jack_controller *)call->context)
+
+/*
+ * jack2-nspa: how each client in the graph keeps up, as an array of (client name,
+ * cycles it had not finished when the next one began, its longest cycle in us).
+ */
+static
+void
+jack_control_get_client_timings(
+    struct jack_dbus_method_call * call)
+{
+    jackctl_client_timing_t * timings;
+    DBusMessageIter iter;
+    DBusMessageIter array_iter;
+    DBusMessageIter struct_iter;
+    const char * name;
+    dbus_uint32_t value;
+    int count;
+    int i;
+
+    timings = malloc(CLIENT_NUM * sizeof(jackctl_client_timing_t));
+    if (timings == NULL)
+    {
+        jack_dbus_error(call, JACK_DBUS_ERROR_GENERIC, "out of memory");
+        return;
+    }
+
+    count = jackctl_server_get_client_timings(controller_ptr->server, timings, CLIENT_NUM);
+    if (count < 0)
+    {
+        jack_dbus_error(call, JACK_DBUS_ERROR_GENERIC, "cannot get the client timings");
+        goto out;
+    }
+
+    call->reply = dbus_message_new_method_return(call->message);
+    if (!call->reply)
+    {
+        goto fail;
+    }
+
+    dbus_message_iter_init_append(call->reply, &iter);
+
+    if (!dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "(suu)", &array_iter))
+    {
+        goto fail_unref;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        if (!dbus_message_iter_open_container(&array_iter, DBUS_TYPE_STRUCT, NULL, &struct_iter))
+        {
+            goto fail_close;
+        }
+        name = timings[i].name;
+        if (!dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &name))
+        {
+            goto fail_close_struct;
+        }
+        value = timings[i].late_cycles;
+        if (!dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT32, &value))
+        {
+            goto fail_close_struct;
+        }
+        value = timings[i].max_callback_usecs;
+        if (!dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT32, &value))
+        {
+            goto fail_close_struct;
+        }
+        if (!dbus_message_iter_close_container(&array_iter, &struct_iter))
+        {
+            goto fail_close;
+        }
+    }
+
+    if (!dbus_message_iter_close_container(&iter, &array_iter))
+    {
+        goto fail_unref;
+    }
+
+    goto out;
+
+fail_close_struct:
+    dbus_message_iter_close_container(&array_iter, &struct_iter);
+fail_close:
+    dbus_message_iter_close_container(&iter, &array_iter);
+fail_unref:
+    dbus_message_unref(call->reply);
+    call->reply = NULL;
+fail:
+    jack_error("Ran out of memory trying to construct method return");
+out:
+    free(timings);
+}
 
 /*
  * Check if the supplied method name exists in org.jackaudio.JackControl,
@@ -220,6 +313,24 @@ jack_control_run_method(
     else if (strcmp (call->method_name, "ResetXruns") == 0)
     {
         controller_ptr->xruns = 0;
+    }
+    else if (strcmp (call->method_name, "GetClientTimings") == 0)
+    {
+        if (!controller_ptr->started)
+        {
+            goto not_started;
+        }
+
+        jack_control_get_client_timings(call);
+        goto exit;
+    }
+    else if (strcmp (call->method_name, "ResetClientTimings") == 0)
+    {
+        /* nothing to reset without a server, as ResetXruns */
+        if (controller_ptr->started)
+        {
+            jackctl_server_reset_client_timings(controller_ptr->server);
+        }
     }
     else if (strcmp (call->method_name, "LoadInternal") == 0)
     {
@@ -392,6 +503,13 @@ JACK_DBUS_METHOD_ARGUMENTS_END
 JACK_DBUS_METHOD_ARGUMENTS_BEGIN(ResetXruns)
 JACK_DBUS_METHOD_ARGUMENTS_END
 
+JACK_DBUS_METHOD_ARGUMENTS_BEGIN(GetClientTimings)
+    JACK_DBUS_METHOD_ARGUMENT("client_timings", "a(suu)", true)
+JACK_DBUS_METHOD_ARGUMENTS_END
+
+JACK_DBUS_METHOD_ARGUMENTS_BEGIN(ResetClientTimings)
+JACK_DBUS_METHOD_ARGUMENTS_END
+
 JACK_DBUS_METHOD_ARGUMENTS_BEGIN(LoadInternal)
     JACK_DBUS_METHOD_ARGUMENT("internal", "s", false)
 JACK_DBUS_METHOD_ARGUMENTS_END
@@ -421,6 +539,8 @@ JACK_DBUS_METHODS_BEGIN
     JACK_DBUS_METHOD_DESCRIBE(SetBufferSize, NULL)
     JACK_DBUS_METHOD_DESCRIBE(IsRealtime, NULL)
     JACK_DBUS_METHOD_DESCRIBE(ResetXruns, NULL)
+    JACK_DBUS_METHOD_DESCRIBE(GetClientTimings, NULL)
+    JACK_DBUS_METHOD_DESCRIBE(ResetClientTimings, NULL)
     JACK_DBUS_METHOD_DESCRIBE(LoadInternal, NULL)
     JACK_DBUS_METHOD_DESCRIBE(UnloadInternal, NULL)
     JACK_DBUS_METHOD_DESCRIBE(AddSlaveDriver, NULL)
