@@ -510,6 +510,12 @@ if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then
     "$here/jackdbus.sh" "$JACK_BUILD/dbus/jackdbus" >/dev/null 2>&1 || fail=1
 fi
 
+# sound card hotplug in jackdbus: a real card "unplugged" through bind mounts (skips without
+# two cards)
+if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then
+    "$here/hotplug.sh" "$JACK_BUILD/dbus/jackdbus" || fail=1
+fi
+
 if [ "$san" = tsan ]; then
     # Under TSan, JACK's asynchronous thread cancellation aborts clients at
     # close and timing checks are meaningless: only the reports gate the run.
