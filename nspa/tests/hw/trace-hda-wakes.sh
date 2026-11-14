@@ -33,7 +33,16 @@ as_user env UNDERRUN_OUT="$out/probe" UNDERRUN_CONFIGS="spare:2" UNDERRUN_PERIOD
 runner=$!
 sleep 3   # the server stopped and the probe running
 
-perf record -o "$out/perf.data" -a \
+# The ALSA core's own tracepoints, when the kernel has them: each hardware-pointer update with the
+# position read (in the interrupt or from an application's hwsync), and xruns.
+pcm_events=""
+if [ -d /sys/kernel/tracing/events/snd_pcm ] || [ -d /sys/kernel/debug/tracing/events/snd_pcm ]; then
+    pcm_events="-e snd_pcm:hwptr -e snd_pcm:xrun -e snd_pcm:hw_ptr_error"
+fi
+echo "ALSA tracepoints: ${pcm_events:-not in this kernel}" > "$out/tracepoints.txt"
+
+# shellcheck disable=SC2086
+perf record -o "$out/perf.data" -a $pcm_events \
     -e irq:irq_handler_entry --filter "irq == ${irq:-168}" \
     -e irq:irq_handler_exit --filter "irq == ${irq:-168}" \
     -e workqueue:workqueue_queue_work \
@@ -44,6 +53,6 @@ perf record -o "$out/perf.data" -a \
 wait "$runner" || true
 
 perf script -i "$out/perf.data" -F comm,tid,cpu,time,event,trace 2>/dev/null \
-    | grep -E "irq_handler|azx_|underrun_probe|snd_" > "$out/events.txt" || true
+    | grep -E "irq_handler|azx_|underrun_probe|snd_|pcmC" > "$out/events.txt" || true
 chown -R "$user" "$out"
 echo "done: $(wc -l < "$out/events.txt") events in $out/events.txt; JACK: $(as_user jack_control status 2>/dev/null | tail -1)"
