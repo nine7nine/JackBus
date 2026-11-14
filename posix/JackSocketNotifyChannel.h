@@ -75,8 +75,10 @@ class JackSocketNotifyChannel
         jack_time_t fLagSince;
         bool fReported;                          // this episode was reported in the log
         jack_time_t fLastSlowReport;
+        bool fClosed;                            // the client closed its end: nothing more is sent
 
         bool HasRoom();
+        bool PeerClosed();
         bool WaitReadable(long usec);
         int Send(JackClientNotification& event);
         void ReadLateReplies();

@@ -26,6 +26,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <stdio.h>
 #include <pthread.h>
 #include <fcntl.h>
+#include <poll.h>
 
 namespace Jack
 {
@@ -150,6 +151,22 @@ int JackClientSocket::Connect(const char* dir, const char* name, int which) // A
 #endif
 
     return 0;
+}
+
+/*
+ A connected stream socket whose peer has closed (or shut down) polls as POLLHUP,
+ whatever the events asked for. No wait.
+ */
+bool JackClientSocket::PeerClosed()
+{
+    if (fSocket < 0) {
+        return true;
+    }
+    struct pollfd pfd;
+    pfd.fd = fSocket;
+    pfd.events = 0;
+    pfd.revents = 0;
+    return poll(&pfd, 1, 0) > 0 && (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0;
 }
 
 int JackClientSocket::Close()

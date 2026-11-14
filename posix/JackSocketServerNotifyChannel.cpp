@@ -53,7 +53,13 @@ void JackSocketServerNotifyChannel::Notify(int refnum, int notify, int value)
 {
     JackClientNotificationRequest req(refnum, notify, value);
     std::lock_guard<std::mutex> lock(fWriteLock);
-    if (req.Write(&fRequestSocket) < 0) {
+    // The request channel's end is closed once the server is stopping (JackServer::Close
+    // closes it before the drivers and the engine's notifier): what the notifier still
+    // drains then (graph order, stuck-client checks) has no one left to read it
+    if (fRequestSocket.PeerClosed()) {
+        return;
+    }
+    if (req.Write(&fRequestSocket) < 0 && !fRequestSocket.PeerClosed()) {
         jack_error("Could not write notification ref = %d notify = %d", refnum, notify);
     }
 }

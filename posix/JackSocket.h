@@ -66,6 +66,9 @@ class JackClientSocket : public detail::JackClientRequestInterface
         void SetWriteTimeOut(long sec);
 
         void SetNonBlocking(bool onoff);
+
+        // The other end has closed (or this one is): a write can only fail
+        bool PeerClosed();
 };
 
 /*!

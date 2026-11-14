@@ -58,7 +58,7 @@ static const char* NotificationName(int notify)
 
 JackSocketNotifyChannel::JackSocketNotifyChannel()
     : fSendBuffer(0), fLagging(false), fPendingReplies(0), fBacklog(new std::deque<JackClientNotification>()),
-      fDelivered(0), fDropped(0), fLagSince(0), fReported(false), fLastSlowReport(0)
+      fDelivered(0), fDropped(0), fLagSince(0), fReported(false), fLastSlowReport(0), fClosed(false)
 {
     memset(fName, 0, sizeof(fName));
 }
@@ -117,6 +117,26 @@ bool JackSocketNotifyChannel::HasRoom()
 #else
     return true;
 #endif
+}
+
+/*
+ Has the client closed its end of the socket? Then nothing more is sent to it: every
+ write would fail, and be logged. It happens each time the server stops (clients
+ leave on its quit notification, before the server has removed its own drivers and
+ ports, which it announces to every client: 20 to 60 "Broken pipe" lines per stop
+ with a few clients connected), and when a client dies, until the request thread
+ removes it.
+ */
+bool JackSocketNotifyChannel::PeerClosed()
+{
+    if (!fClosed && fNotifySocket.PeerClosed()) {
+        fClosed = true;
+        fBacklog->clear();
+        fPendingReplies = 0;
+        fLagging = false;
+        jack_log("JackSocketNotifyChannel: client %s closed its notification socket, nothing more is sent to it", fName);
+    }
+    return fClosed;
 }
 
 bool JackSocketNotifyChannel::WaitReadable(long usec)
@@ -184,7 +204,7 @@ void JackSocketNotifyChannel::Queue(JackClientNotification& event)
 
 bool JackSocketNotifyChannel::Flush()
 {
-    if (!fLagging) {
+    if (!fLagging || PeerClosed()) {
         return false;
     }
     ReadLateReplies();
@@ -242,6 +262,10 @@ void JackSocketNotifyChannel::ClientNotify(int refnum, const char* name, int not
     jack_time_t deadline = 0;
     *result = 0;
 
+    if (PeerClosed()) {
+        return;     // the client is gone: as for a dead client (JackExternalClient), not an error
+    }
+
     if (fLagging && sync && notify != kLatencyCallback) {
         // The client must have handled this before the server goes on: wait for it to
         // catch up, then for its answer, together no longer than 1.9.22 waited for the
@@ -257,12 +281,17 @@ void JackSocketNotifyChannel::ClientNotify(int refnum, const char* name, int not
     }
     if (fLagging) {
         Queue(event);
-        *result = sync ? -1 : 0;
+        // A latency notification is delivered later, in order: not a failure (the lag
+        // itself is reported once). Another synchronous one could not be waited for.
+        *result = (sync && notify != kLatencyCallback) ? -1 : 0;
         return;
     }
 
     // Send notification
     if (Send(event) < 0) {
+        if (PeerClosed()) {
+            return;     // it closed its end just now
+        }
         jack_error("Could not write notification");
         *result = -1;
         return;
@@ -289,7 +318,7 @@ void JackSocketNotifyChannel::ClientNotify(int refnum, const char* name, int not
             char why[96];
             snprintf(why, sizeof(why), "did not answer a %s notification within %ld ms", NotificationName(notify), budget / 1000);
             StartLagging(why);
-            *result = -1;
+            *result = (notify == kLatencyCallback) ? 0 : -1;    // as above
         }
     }
 }
