@@ -9,7 +9,14 @@ same paths, same configure options.
 layout, the futex activation protocol, the request encoding and the time base
 are exactly 1.9.22's (protocol 9). Applications built against any JACK2 keep
 working; a stock 1.9.22 libjack (64- or 32-bit) works against this server, and
-this libjack works against a stock server.
+this libjack works against a stock server. The one addition is optional: a small
+side file in which each client's realtime thread holds a robust mutex, so the
+server knows the moment a client dies. A stock libjack never opens it, and this
+libjack does without it on a stock server.
+
+**[Architecture document](https://nine7nine.github.io/jack2dbus-nspa/)**: how the
+server, libjack, shared memory and the activation graph work, every change with
+diagrams, and the measurements behind them (source: [`docs/index.html`](docs/index.html)).
 
 ## Why this fork
 
@@ -52,6 +59,39 @@ doesn't hold up under measurement is reverted.
   request on `/dev/cpu_dma_latency` while the server runs. Idle xruns over 20 s
   at 128×2: **410–546 → 7–10**. Off by default.
 
+### Clients that die, run late or fall behind
+
+- **A dead client is out of the graph at once.** 1.9.22 only noticed when the
+  client's sockets closed, and the kernel closes a dying process's files after
+  it has torn down its memory; every cycle waited until then. Now each client's
+  realtime thread holds a robust mutex in a shared slot, the kernel marks it
+  (`FUTEX_OWNER_DIED`) at the start of the thread's exit, and the server's
+  notifier, waiting on all slots with `futex_waitv`, wakes within microseconds.
+  A 1 GB client killed 6 times: **346–402 xruns, stalls up to 78 cycles → 0
+  xruns, 0 missed cycles**, removed in ~9 ms. It works whichever way the thread
+  ends: kill, crash, `exit()`, or a process thread that returns.
+- **Any libjack.** A client without a slot (a stock libjack) is checked through
+  `/proc` when the graph doesn't finish: 1 xrun per kill. A child process that
+  inherited a client's sockets no longer keeps a dead client in the graph:
+  **4.7 s stall → 0**.
+- **Removed in one step.** All of a client's disconnections and its activation
+  edges go into one graph edit, switched at the next cycle. Nothing is sent to a
+  dead client: no broken-pipe floods, and its ports are announced gone once
+  instead of twice.
+- **One xrun per failing cycle**, with one log line naming the unfinished
+  clients, and `jack_get_xrun_delayed_usecs()` reports that xrun. A late client
+  still catches up as before: making it skip its next cycle (CoreAudio-style)
+  was designed and dropped, because it loses a block of that client's input
+  (MIDI events, recorded audio).
+- **A slow notification client lags alone.** 1.9.22 waited up to 2 s per
+  notification for a client busy in a callback, under the engine lock, and
+  blocked for good on one that stopped reading. Now it gets a 500 ms budget,
+  then its notifications are queued in order and sent as it catches up; the
+  server never blocks on its socket, and late replies are no longer mistaken
+  for later ones. Other clients' worst operation with a 1.5 s callback:
+  **2.9 s → 0.41 s once, then 0.4 ms**. 1 500 port registrations behind a hung
+  client: **6.2 s → 0.66 s**.
+
 ### Performance
 
 - **Per-cycle loops bounded by the clients in use.** Engine loops stop at the
@@ -93,7 +133,8 @@ doesn't hold up under measurement is reverted.
   - Exits cleanly on SIGTERM; it used to need SIGKILL and left its segments
     behind.
   - Async-signal-safe crash handler.
-  - Patchbay callbacks are locked.
+  - Patchbay callbacks are locked; a destroyed client's leftover ports and
+    their connections are removed, and teardown holds the lock.
   - A failed master switch is recoverable.
   - Control operations are serialized.
   - Device-reservation bookkeeping is bounded.
@@ -105,6 +146,29 @@ doesn't hold up under measurement is reverted.
     client and connection) or `all` (upstream's). Both are saved in conf.xml.
 - **Metadata:** builds against Berkeley DB 5.3, like Arch's `jack2`, so the
   shared metadata database stays readable by every client's libjack.
+
+### jackdbus for session managers and monitors
+
+```text
+org.jackaudio.JackPatchbay.DetachClient(s client_name)  → u detached
+org.jackaudio.JackPatchbay.DetachProcess(x process_id)  → u detached
+org.jackaudio.JackControl.GetClientTimings()          → a(suu)
+org.jackaudio.JackControl.ResetClientTimings()
+```
+
+- **Detach before stop.** A session manager that is about to stop an
+  application asks jackdbus first, by client name or by the pid it started. The
+  application's clients leave the graph before the signal, so stopping it costs
+  the graph nothing, with any libjack inside the application.
+- **Client timings.** Per client in the graph: the cycles it hadn't finished
+  when the next one began, and its longest cycle in µs. A client waiting for one
+  of its inputs isn't counted late; the one it waits for is. Late cycles are
+  counted on cycles that didn't finish, at no cost to the others. Cycle lengths
+  are measured only within a minute of a request (about 50 instructions per
+  client per cycle), so a monitor polls. With nobody asking, the server costs
+  27 instructions per cycle more than before.
+
+Older jackdbus versions answer `UnknownMethod`, and a tool carries on as before.
 
 ### From upstream `develop`
 
@@ -123,19 +187,23 @@ doesn't hold up under measurement is reverted.
 - An AVX2 input-port mixdown was faster in a hot loop but slower in the running
   engine (432–509 ns vs 326–369 ns), so it was reverted.
 - Also evaluated and not adopted: AVX2/AVX-512 sample conversion,
-  `SCHED_DEADLINE`, `futex_waitv`, pidfd and io_uring. None showed a measurable
-  gain or fit JACK's activation model.
+  `SCHED_DEADLINE`, pidfd and io_uring. None showed a measurable gain or fit
+  JACK's activation model. `futex_waitv` gains nothing on the RT path; it is
+  used off it, where the notifier waits on all the clients' slots at once.
+- A late client skipping its next cycle, as above.
 
 ## Validation
 
 - **Isolated test suite** (`nspa/tests`). It runs inside a private
   user/mount/IPC/network namespace with its own `/dev/shm`, so tests never touch
-  a running server. It covers fork↔stock interoperability in both directions,
-  including 32-bit libjack.
+  a running server. 70 checks, including fork↔stock interoperability in both
+  directions with 32-bit libjack, clients killed and stalled in every way the
+  tests can produce, and the jackdbus calls.
 - **ASan/UBSan and TSan builds** of the server and clients.
 - **Hardware tests** (`nspa/tests/hw`) on a real ALSA device, against both the
   fork and the stock server. They cover load, capture freshness, `-X seq`
-  startup and bursts, low-latency configurations, sync mode and MIDI timing.
+  startup and bursts, low-latency configurations, sync mode, MIDI timing and
+  clients killed while the graph runs.
   Every playback output stays muted for the whole run; a watchdog re-mutes when
   PipeWire re-applies its volumes.
 
