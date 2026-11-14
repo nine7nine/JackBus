@@ -146,11 +146,16 @@ typedef struct _alsa_driver {
     alsa_midi_t *midi;
     int xrun_recovery;
     int device_lost;   /* jack2-nspa: the card went away (POLLNVAL, -ENODEV): not recoverable here */
-    /* jack2-nspa: wake on a timer as well as on the period interrupt (see alsa_driver_wait):
-       -1 off, 0 auto (an eighth of a period, at least 50 us), else the margin in us */
+    /* jack2-nspa: wake on a timer as well as on the period interrupt (see alsa_driver_wait).
+       wake_timer_us: -1 off, else on with this margin (0: automatic, alsa_driver_wake_margin).
+       wake_timer_adaptive: off until period notifications are seen coming late, then on. */
     int wake_timer_us;
+    int wake_timer_adaptive;
+    int wake_timer_late;          /* late notifications seen while adaptive and not yet on */
     int batch;                    /* a stream's position moves only when the device reports
                                      (USB...): the wake timer can't learn anything earlier */
+    int capture_tstamp;           /* monotonic status timestamps on: the wake timer reads */
+    int playback_tstamp;          /* the position and its time without a syscall */
     unsigned long wake_timer_wakes;
 
 } alsa_driver_t;

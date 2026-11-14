@@ -87,19 +87,41 @@ class JackAlsaDriver : public JackAudioDriver
         int Write();
 
         // BufferSize can be changed
-        /* jack2-nspa: -1 off, 0 auto, else the margin in us (alsa_driver_wait) */
-        void SetWakeTimer(int us)
+        /* jack2-nspa: the wake timer (alsa_driver_wait): "adaptive" (the default), "on", "off",
+           or a margin in us (on) */
+        void SetWakeTimer(const char* mode)
         {
             if (fDriver == NULL) {
                 return;
             }
             alsa_driver_t* d = (alsa_driver_t *)fDriver;
-            d->wake_timer_us = us;
-            if (us >= 0 && d->batch) {
-                jack_info("ALSA: wake timer not used: a batch device (its position moves only when it reports)");
-            } else if (us >= 0) {
-                jack_info("ALSA: wake timer on, %d us after a period is due", us > 0 ? us : alsa_driver_wake_margin(d));
+            d->wake_timer_us = -1;
+            d->wake_timer_adaptive = 0;
+            if (strcmp(mode, "off") == 0) {
+                return;
             }
+            const bool adaptive = strcmp(mode, "adaptive") == 0;
+            const bool on = strcmp(mode, "on") == 0;
+            const bool margin = mode[0] >= '0' && mode[0] <= '9';
+            if (!adaptive && !on && !margin) {
+                jack_error("ALSA: wake timer \"%s\" not understood (adaptive, on, off or a margin in us): adaptive", mode);
+            }
+            if (d->batch) {
+                if (on || margin) {     /* the default says nothing about it */
+                    jack_info("ALSA: wake timer not used: a batch device (its position moves only when it reports)");
+                }
+                return;
+            }
+            if (on) {
+                d->wake_timer_us = 0;
+            } else if (margin) {
+                d->wake_timer_us = atoi(mode);
+            } else {
+                d->wake_timer_adaptive = 1;
+                return;
+            }
+            jack_info("ALSA: wake timer on, %d us after a period is due",
+                      d->wake_timer_us > 0 ? d->wake_timer_us : alsa_driver_wake_margin(d));
         }
 
         bool IsDeviceLost()

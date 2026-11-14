@@ -55,6 +55,15 @@ static struct jack_constraint_enum_str_descriptor midi_constraint_descr_array[] 
     { 0 }
 };
 
+/* jack2-nspa: the wake timer (alsa_driver_wait); a number (us) means on with that margin */
+static struct jack_constraint_enum_str_descriptor wake_timer_constraint_descr_array[] =
+{
+    { "adaptive", "Adaptive: on once period notifications are seen coming late" },
+    { "on", "On: wake on the position too" },
+    { "off", "Off: the period interrupt only" },
+    { 0 }
+};
+
 static struct jack_constraint_enum_char_descriptor dither_constraint_descr_array[] =
 {
     { 'n', "none" },
@@ -791,13 +800,15 @@ SERVER_EXPORT const jack_driver_desc_t* driver_get_descriptor ()
     jack_driver_descriptor_add_parameter(desc, &filler, "input-latency", 'I', JackDriverParamUInt, &value, NULL, "Extra input latency (frames)", NULL);
     jack_driver_descriptor_add_parameter(desc, &filler, "output-latency", 'O', JackDriverParamUInt, &value, NULL, "Extra output latency (frames)", NULL);
 
-    value.i = -1;
-    jack_driver_descriptor_add_parameter(desc, &filler, "wake-timer", 'w', JackDriverParamInt, &value, NULL,
-        "Wake on a timer too (us after a period is due; 0 auto, -1 off)",
-        "Wake when the card's position says a period is due, plus this margin in us, even if its period interrupt "
-        "has not come: some cards' interrupts arrive late or are dropped while their position is right "
-        "(Intel HDA at small buffer sizes). 0: an eighth of a period, 50 to 500 us. -1: off, the interrupt only. "
-        "Not used with batch devices (USB), whose position moves only when they report.");
+    strcpy(value.str, "adaptive");
+    jack_driver_descriptor_add_parameter(desc, &filler, "wake-timer", 'w', JackDriverParamString, &value,
+        jack_constraint_compose_enum_str(0, wake_timer_constraint_descr_array),
+        "Wake on the position too: adaptive, on, off, or a margin in us",
+        "Wake when the card's position says a period is due, plus a margin (an eighth of a period, 50 to 500 us, "
+        "or the number given, in us), even if its period interrupt has not come: some cards' interrupts arrive late "
+        "or are dropped while their position is right (Intel HDA at small buffer sizes). adaptive (the default): "
+        "the interrupt only until notifications are seen coming late, then on for the session. on: always. "
+        "off: the interrupt only. Not used with batch devices (USB), whose position moves only when they report.");
 
     strcpy(value.str, "none");
     jack_driver_descriptor_add_parameter(
@@ -835,7 +846,7 @@ SERVER_EXPORT Jack::JackDriverClientInterface* driver_initialize(Jack::JackLocke
     int user_capture_nchnls = 0;
     int user_playback_nchnls = 0;
     int shorts_first = FALSE;
-    int wake_timer = -1;
+    char wake_timer[JACK_DRIVER_PARAM_STRING_MAX + 1] = "adaptive";
     jack_nframes_t systemic_input_latency = 0;
     jack_nframes_t systemic_output_latency = 0;
     const JSList * node;
@@ -941,7 +952,7 @@ SERVER_EXPORT Jack::JackDriverClientInterface* driver_initialize(Jack::JackLocke
                 break;
 
             case 'w':
-                wake_timer = param->value.i;
+                snprintf(wake_timer, sizeof(wake_timer), "%s", param->value.str);
                 break;
         }
     }

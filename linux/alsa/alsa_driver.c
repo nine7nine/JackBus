@@ -33,6 +33,7 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/time.h>
+#include <time.h>
 #include <string.h>
 
 #include "alsa_driver.h"
@@ -665,10 +666,12 @@ alsa_driver_configure_stream (alsa_driver_t *driver, char *device_name,
 		return -1;
 	}
 
+	int tstamp = 1;	/* jack2-nspa: monotonic timestamps, for the wake timer */
 	err = snd_pcm_sw_params_set_tstamp_mode(handle, sw_params, SND_PCM_TSTAMP_ENABLE);
 	if (err < 0) {
 		jack_info("Could not enable ALSA time stamp mode for %s (err %d)",
 			  stream_name, err);
+		tstamp = 0;
 	}
 
 #if SND_LIB_MAJOR >= 1 && SND_LIB_MINOR >= 1
@@ -676,13 +679,21 @@ alsa_driver_configure_stream (alsa_driver_t *driver, char *device_name,
 	if (err < 0) {
 		jack_info("Could not use monotonic ALSA time stamps for %s (err %d)",
 			  stream_name, err);
+		tstamp = 0;
 	}
+#else
+	tstamp = 0;
 #endif
 
 	if ((err = snd_pcm_sw_params (handle, sw_params)) < 0) {
 		jack_error ("ALSA: cannot set software parameters for %s\n",
 			    stream_name);
 		return -1;
+	}
+	if (handle == driver->capture_handle) {
+		driver->capture_tstamp = tstamp;
+	} else {
+		driver->playback_tstamp = tstamp;
 	}
 
 	return 0;
@@ -1008,6 +1019,12 @@ alsa_driver_reset_parameters (alsa_driver_t *driver,
 {
 	/* XXX unregister old ports ? */
 	alsa_driver_release_channel_dependent_memory (driver);
+	/* jack2-nspa: lateness depends on the period size: an adaptive wake timer that went on
+	   watches again (the driver is stopped here) */
+	if (driver->wake_timer_adaptive) {
+		driver->wake_timer_us = -1;
+		driver->wake_timer_late = 0;
+	}
 	return alsa_driver_set_parameters (driver,
 					   frames_per_cycle,
 					   user_nperiods, rate);
@@ -1382,6 +1399,41 @@ alsa_driver_wake_margin (alsa_driver_t *driver)
 	return m < 50 ? 50 : (m > 500 ? 500 : m);
 }
 
+/* jack2-nspa: when a stream's period is due (jack time): when it has `ready` frames to give
+   or take. With `stored`, only from the position and the time of its last update in the
+   status page (the period interrupt's): no syscall, and the card is not touched; -1 if
+   those are not usable (no monotonic timestamps, an update too old). Otherwise from the
+   card (hwsync); -1 if there is no position (an xrun, most likely). */
+static int
+alsa_driver_period_due (alsa_driver_t *driver, snd_pcm_t *handle, int stored,
+			snd_pcm_sframes_t ready, jack_time_t *due)
+{
+	if (stored) {
+		snd_pcm_uframes_t av;
+		snd_htimestamp_t ts;
+		struct timespec now;
+		if (snd_pcm_htimestamp (handle, &av, &ts) < 0
+		    || clock_gettime (CLOCK_MONOTONIC, &now) < 0) {
+			return -1;
+		}
+		const int64_t age = (int64_t) (now.tv_sec - ts.tv_sec) * 1000000
+			+ (now.tv_nsec - ts.tv_nsec) / 1000;
+		if (age < 0 || age >= 4 * (int64_t) driver->period_usecs) {
+			return -1;
+		}
+		*due = (jack_time_t) ((int64_t) jack_get_microseconds () - age
+			+ ((int64_t) ready - (int64_t) av) * 1000000 / driver->frame_rate);
+		return 0;
+	}
+	const snd_pcm_sframes_t a = snd_pcm_avail (handle);
+	if (a < 0) {
+		return -1;
+	}
+	*due = (jack_time_t) ((int64_t) jack_get_microseconds ()
+		+ ((int64_t) ready - (int64_t) a) * 1000000 / driver->frame_rate);
+	return 0;
+}
+
 jack_nframes_t
 alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 		  *delayed_usecs)
@@ -1397,6 +1449,7 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 	jack_time_t poll_enter;
 	jack_time_t poll_ret = 0;
 	const jack_time_t wait_start = jack_get_microseconds ();
+	jack_time_t due = 0;	/* adaptive wake timer: when the period was due, from the position */
 
 	*status = -1;
 	*delayed_usecs = 0;
@@ -1470,26 +1523,50 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 		   margin, then look at the position: a timeout here is not a stall. Not for
 		   batch devices (USB), whose position moves only when the device reports. */
 		int wake_timer = 0;
-		if (driver->wake_timer_us >= 0 && !driver->batch && extra_fd < 0) {
-			snd_pcm_sframes_t need = 0, a;
-			if (need_playback && (a = snd_pcm_avail (driver->playback_handle)) >= 0) {
-				snd_pcm_sframes_t m = (snd_pcm_sframes_t) driver->frames_per_cycle
-					* (driver->playback_nperiods - driver->user_nperiods + 1) - a;
-				if (m > need) need = m;
+		const int watch_late = driver->wake_timer_us < 0 && driver->wake_timer_adaptive;
+		due = 0;
+		if ((driver->wake_timer_us >= 0 || watch_late) && !driver->batch && extra_fd < 0) {
+			/* when the period is due: while only watching, from the position the last
+			   update left (no syscall: a card that never needs the timer is not touched);
+			   with the timer on, from the card itself, which also measured better (fewer
+			   timer wakes on HDA) than starting from the stored position */
+			jack_time_t d = 0, t = 0;
+			int ok = 1;
+			if (need_playback) {
+				ok = (!watch_late || driver->playback_tstamp)
+					&& alsa_driver_period_due (driver, driver->playback_handle, watch_late,
+					(snd_pcm_sframes_t) driver->frames_per_cycle
+					* (driver->playback_nperiods - driver->user_nperiods + 1), &t) == 0;
+				if (ok && t > d) d = t;
 			}
-			if (need_capture && (a = snd_pcm_avail (driver->capture_handle)) >= 0) {
-				snd_pcm_sframes_t m = (snd_pcm_sframes_t) driver->frames_per_cycle - a;
-				if (m > need) need = m;
+			if (ok && need_capture) {
+				ok = (!watch_late || driver->capture_tstamp)
+					&& alsa_driver_period_due (driver, driver->capture_handle, watch_late,
+					(snd_pcm_sframes_t) driver->frames_per_cycle, &t) == 0;
+				if (ok && t > d) d = t;
 			}
-			int64_t margin = driver->wake_timer_us > 0 ? driver->wake_timer_us
-				: alsa_driver_wake_margin (driver);
-			int64_t us = (int64_t) need * 1000000 / driver->frame_rate + margin;
-			int64_t left = (int64_t) driver->poll_timeout * 1000
-				- (int64_t) (jack_get_microseconds () - wait_start);
-			if (us < left) {
-				struct timespec ts = { us / 1000000, (us % 1000000) * 1000 };
-				wake_timer = 1;
-				poll_result = ppoll (driver->pfd, nfds, &ts, NULL);
+			const jack_time_t now = jack_get_microseconds ();
+			if (!ok) {
+				/* no position (or, watching, none without asking the card): the plain
+				   poll below; an xrun is reported there */
+			} else if (watch_late) {
+				/* adaptive, not on yet: only note when the period is due. Not due yet
+				   means this wait is on time, so a late wake is the notification's */
+				if (d > now)
+					due = d;
+			} else {
+				const int64_t margin = driver->wake_timer_us > 0 ? driver->wake_timer_us
+					: alsa_driver_wake_margin (driver);
+				int64_t us = (int64_t) d - (int64_t) now + margin;
+				const int64_t left = (int64_t) driver->poll_timeout * 1000
+					- (int64_t) (now - wait_start);
+				if (us < 0)
+					us = 0;	/* due a margin ago already: look at the card now */
+				if (us < left) {
+					struct timespec ts = { us / 1000000, (us % 1000000) * 1000 };
+					wake_timer = 1;
+					poll_result = ppoll (driver->pfd, nfds, &ts, NULL);
+				}
 			}
 		}
 		if (!wake_timer) {
@@ -1671,6 +1748,17 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 	} else {
 		/* odd, but see min() computation below */
 		playback_avail = INT_MAX;
+	}
+
+	/* jack2-nspa: adaptive wake timer. The wait began before the period was due, and the
+	   wake (or the xrun: with two periods a dropped interrupt is one) came more than half a
+	   period after it: the notification was late or missing. After a few, the timer is on
+	   for the rest of the session. A cycle that ran long is not counted: its period was
+	   already due when it began to wait. Cards whose interrupts are on time never change. */
+	if (due && poll_ret > due + driver->period_usecs / 2 && ++driver->wake_timer_late >= 3) {
+		driver->wake_timer_us = 0;
+		jack_info ("ALSA: period notifications come late (%d seen): the wake timer is on, %d us after a period is due",
+			   driver->wake_timer_late, alsa_driver_wake_margin (driver));
 	}
 
 	if (xrun_detected) {
@@ -2226,7 +2314,11 @@ alsa_driver_new (char *name, char *playback_alsa_device,
 	driver->xrun_recovery = 0;
 	driver->device_lost = 0;
 	driver->wake_timer_us = -1;
+	driver->wake_timer_adaptive = 0;
+	driver->wake_timer_late = 0;
 	driver->batch = 0;
+	driver->capture_tstamp = 0;
+	driver->playback_tstamp = 0;
 	driver->wake_timer_wakes = 0;
 
 	if (alsa_driver_check_card_type (driver)) {

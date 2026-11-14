@@ -5,14 +5,14 @@
 # writes zeros; every playback control of the card is muted for the run and restored.
 # Take the card from a running jackdbus first: nspa/tests/hw/with-card.sh hw:PCH <this script>.
 #
-#   nspa/tests/hw/wake-timer.sh [card=PCH] [seconds=30] [periods="64 128 256"] [timers="-1 0"]
+#   nspa/tests/hw/wake-timer.sh [card=PCH] [seconds=30] [periods="64 128 256"] [timers="off on adaptive"]
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
     exec "$root/nspa/run-isolated.sh" "$0" "$@"
 fi
-card=${1:-PCH}; secs=${2:-30}; periods=${3:-64 128 256}; timers=${4:--1 0}
+card=${1:-PCH}; secs=${2:-30}; periods=${3:-64 128 256}; timers=${4:-off on adaptive}
 idx=$(readlink "/proc/asound/$card" | sed 's/^card//')
 [ -n "$idx" ] || { echo "SKIP: no card $card"; exit 0; }
 work=$(mktemp -d /tmp/nspa-waketimer.XXXXXX)
@@ -32,14 +32,14 @@ fi
 ctxsw() {  # voluntary + involuntary context switches of jackd's threads
     cat /proc/$1/task/*/status 2>/dev/null | awk '/ctxt_switches/ { s += $2 } END { print s + 0 }'
 }
-printf '%-6s %-6s %7s %6s %9s %12s %s\n' period timer cycles xruns load_avg ctxsw_per_s timer_log
+printf '%-6s %-9s %7s %6s %9s %12s %s\n' period timer cycles xruns load_avg ctxsw_per_s timer_log
 for p in $periods; do
     for w in $timers; do
         export JACK_DEFAULT_SERVER="nspa-wt-$$"
         jackd=$JACK_BUILD/linux/jackd; [ -x "$jackd" ] || jackd=$JACK_BUILD/jackd
         # the card is held for us by with-card.sh (device reservation on the session bus,
         # which this isolated namespace cannot reach): no reservation from jackd itself
-        JACK_NO_AUDIO_RESERVATION=1 "$jackd" -n "$JACK_DEFAULT_SERVER" -R -P 70 -d alsa -d "hw:$card" -r 48000 -p "$p" -n 2 $( [ "$w" != -1 ] && echo "-w $w" ) > "$work/jackd-$p-$w.log" 2>&1 &
+        JACK_NO_AUDIO_RESERVATION=1 "$jackd" -n "$JACK_DEFAULT_SERVER" -R -P 70 -d alsa -d "hw:$card" -r 48000 -p "$p" -n 2 -w "$w" > "$work/jackd-$p-$w.log" 2>&1 &
         jd=$!
         i=0; until grep -q "ALSA: wake timer\|configuring for\|Acquire audio" "$work/jackd-$p-$w.log" 2>/dev/null || [ $i -gt 50 ]; do sleep 0.1; i=$((i+1)); done
         sleep 1
@@ -54,8 +54,8 @@ for p in $periods; do
         cyc=$(echo "$last" | sed -n 's/.*cycles=\([0-9]*\).*/\1/p')
         xr=$(echo "$last" | sed -n 's/.*xruns=\([0-9]*\).*/\1/p')
         load=$(awk -F'load=' 'NF > 1 { s += $2; n++ } END { if (n) printf "%.1f", s / n }' "$work/client-$p-$w.log")
-        tl=$(grep -o "wake timer[^\"]*" "$work/jackd-$p-$w.log" | head -1)
-        printf '%-6s %-6s %7s %6s %9s %12s %s\n' "$p" "$w" "${cyc:-?}" "${xr:-?}" "${load:-?}" "$(( (c1 - c0) / ( (t1 - t0) > 0 ? (t1 - t0) : 1 ) ))" "${tl:-}"
+        tl=$(grep -o "wake timer[^\"]*\|notifications come late[^\"]*" "$work/jackd-$p-$w.log" | head -1)
+        printf '%-6s %-9s %7s %6s %9s %12s %s\n' "$p" "$w" "${cyc:-?}" "${xr:-?}" "${load:-?}" "$(( (c1 - c0) / ( (t1 - t0) > 0 ? (t1 - t0) : 1 ) ))" "${tl:-}"
     done
 done
 echo "logs: $work"
