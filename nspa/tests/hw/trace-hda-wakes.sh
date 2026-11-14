@@ -39,10 +39,22 @@ sleep 3   # the server stopped and the probe running
 T=/sys/kernel/tracing; [ -d "$T/events" ] || T=/sys/kernel/debug/tracing
 KP="$T/kprobe_events"
 pcm_events=""
-if echo 'p:nspa/pos_in snd_hda_intel:azx_position_ok dev=$arg2:x64' >> "$KP" 2>>"$out/perf.log" &&
-   echo 'r:nspa/pos_ret snd_hda_intel:azx_position_ok ret=$retval:s32' >> "$KP" 2>>"$out/perf.log"; then
-    pcm_events="-e nspa:pos_in -e nspa:pos_ret"
-fi
+# simplest definitions that this kernel accepts: with the stream argument, then without
+for entry in 'p:nspa/pos_in snd_hda_intel:azx_position_ok dev=%di:x64' \
+             'p:nspa/pos_in azx_position_ok dev=%di:x64' \
+             'p:nspa/pos_in azx_position_ok'; do
+    if echo "$entry" >> "$KP" 2>>"$out/perf.log"; then
+        pcm_events="-e nspa:pos_in"; break
+    fi
+done
+for ret in 'r:nspa/pos_ret snd_hda_intel:azx_position_ok ret=$retval:s32' \
+           'r:nspa/pos_ret azx_position_ok ret=$retval:s32' \
+           'r:nspa/pos_ret azx_position_ok ret=%ax:s32'; do
+    if echo "$ret" >> "$KP" 2>>"$out/perf.log"; then
+        pcm_events="$pcm_events -e nspa:pos_ret"; break
+    fi
+done
+cat "$T/error_log" >> "$out/perf.log" 2>/dev/null || true
 echo "HDA events: ${pcm_events:-none (kprobes refused: see perf.log)}" > "$out/tracepoints.txt"
 
 # shellcheck disable=SC2086
@@ -55,7 +67,8 @@ perf record -o "$out/perf.data" -a $pcm_events \
     -e sched:sched_wakeup --filter 'comm == "underrun_probe"' \
     -- sleep 20 >> "$out/perf.log" 2>&1 || echo "perf record failed: see $out/perf.log"
 wait "$runner" || true
-echo '-:nspa/pos_in' >> "$KP" 2>/dev/null; echo '-:nspa/pos_ret' >> "$KP" 2>/dev/null
+echo '-:nspa/pos_in' >> "$KP" 2>/dev/null || true
+echo '-:nspa/pos_ret' >> "$KP" 2>/dev/null || true
 
 perf script -i "$out/perf.data" -F comm,tid,cpu,time,event,trace 2>/dev/null \
     | grep -E "irq_handler|azx_|underrun_probe|snd_|pcmC|nspa:pos_" > "$out/events.txt" || true
