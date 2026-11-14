@@ -30,6 +30,9 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackPlatformPlug.h"
 #include "JackMutex.h"
 #include "jslist.h"
+#include <map>
+#include <set>
+#include <string>
 
 namespace Jack
 {
@@ -67,6 +70,13 @@ class SERVER_EXPORT JackServer
         JackSynchro fSynchroTable[CLIENT_NUM];
         bool fFreewheel;
         bool fAudioDriverClosed;   /*! master closed after a failed SwitchMaster */
+        /*! jack2-nspa: connections of the master driver's ports, by name, across master switches
+            (control thread only, under fControlLock): taken when a master goes, restored for
+            every port the next master has; the rest wait for a later one (a card's MIDI ports
+            while the dummy driver stands in) */
+        std::map<std::string, std::set<std::string> > fMasterConnections;
+        void SaveMasterConnections();
+        void RestoreMasterConnections();
         JackServerControlLock fControlLock; /*! serializes SetBufferSize/SetFreewheel/SwitchMaster
                                        (request thread and, in jackdbus, the D-Bus thread) */
 

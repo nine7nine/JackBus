@@ -79,6 +79,14 @@ jackctl_server_reset_client_timings(struct jackctl_server * server);
 JACK_NSPA_CONTROL_EXPORT int
 jackctl_driver_refresh_constraints(struct jackctl_driver * driver);
 
+/* Called once when the running master driver loses its device (a USB interface unplugged),
+   from the driver thread as it ends: set a flag and return, nothing else (no locks, no
+   control API calls). With a callback set, clients are not told the server stopped: the
+   controller is expected to switch the master driver (jackctl_server_switch_master) to keep
+   the server running. NULL restores the default (clients get a shutdown). */
+JACK_NSPA_CONTROL_EXPORT void
+jackctl_server_set_backend_lost_callback(struct jackctl_server * server, void (*callback)(void * arg), void * arg);
+
 #ifdef __cplusplus
 }
 #endif

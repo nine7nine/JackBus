@@ -145,6 +145,7 @@ typedef struct _alsa_driver {
 
     alsa_midi_t *midi;
     int xrun_recovery;
+    int device_lost;   /* jack2-nspa: the card went away (POLLNVAL, -ENODEV): not recoverable here */
 
 } alsa_driver_t;
 

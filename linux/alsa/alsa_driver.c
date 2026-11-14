@@ -1277,11 +1277,19 @@ alsa_driver_xrun_recovery (alsa_driver_t *driver, float *delayed_usecs)
 		if ((res = snd_pcm_status(driver->capture_handle, status))
 		    < 0) {
 			jack_error("status error: %s", snd_strerror(res));
+			if (res == -ENODEV) {
+				driver->device_lost = 1;
+				return -1;
+			}
 		}
 	} else {
 		if ((res = snd_pcm_status(driver->playback_handle, status))
 		    < 0) {
 			jack_error("status error: %s", snd_strerror(res));
+			if (res == -ENODEV) {
+				driver->device_lost = 1;
+				return -1;
+			}
 		}
 	}
 
@@ -1535,6 +1543,7 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 
 			if (revents & POLLNVAL) {
 				jack_error ("ALSA: playback device disconnected");
+				driver->device_lost = 1;
 				*status = -7;
 				return 0;
 			}
@@ -1564,6 +1573,7 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 
 			if (revents & POLLNVAL) {
 				jack_error ("ALSA: capture device disconnected");
+				driver->device_lost = 1;
 				*status = -7;
 				return 0;
 			}
@@ -2164,6 +2174,7 @@ alsa_driver_new (char *name, char *playback_alsa_device,
 
 	driver->midi = midi_driver;
 	driver->xrun_recovery = 0;
+	driver->device_lost = 0;
 
 	if (alsa_driver_check_card_type (driver)) {
 		alsa_driver_delete (driver);

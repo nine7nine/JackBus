@@ -36,6 +36,8 @@ std::map<std::string, int> JackServerGlobals::fInternalsList;
 
 bool (* JackServerGlobals::on_device_acquire)(const char * device_name) = NULL;
 void (* JackServerGlobals::on_device_release)(const char * device_name) = NULL;
+void (* JackServerGlobals::on_backend_lost)(void* arg) = NULL;
+void* JackServerGlobals::on_backend_lost_arg = NULL;
 void (* JackServerGlobals::on_device_reservation_loop)(void) = NULL;
 
 int JackServerGlobals::Start(const char* server_name,

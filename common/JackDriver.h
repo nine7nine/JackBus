@@ -249,6 +249,8 @@ class SERVER_EXPORT JackDriver : public JackDriverClientInterface
         virtual int ProcessWriteAsync();
 
         virtual bool IsFixedBufferSize();
+        /* jack2-nspa: the device went away (not an ordinary failure): see JackThreadedDriver::Execute */
+        virtual bool IsDeviceLost() { return false; }
         virtual int SetBufferSize(jack_nframes_t buffer_size);
         virtual int SetSampleRate(jack_nframes_t sample_rate);
 

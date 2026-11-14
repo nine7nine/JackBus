@@ -742,6 +742,258 @@ static void jack_controller_snd_watch_run(struct jack_controller * controller_pt
     jack_controller_snd_refresh(controller_ptr);
 }
 
+/* jack2-nspa: surviving an unplugged card. When the master driver's device goes away (a USB
+   interface pulled out), the driver thread calls back (jackctl_server_set_backend_lost_callback)
+   instead of telling clients the server stopped. On the next tick, jackdbus puts the dummy
+   driver in its place, at the same rate and buffer size and with as many ports, so clients
+   keep running (silently) and keep their connections (the server restores them by port name).
+   When the card is back and free, jackdbus switches back to it. jackdbus's saved settings
+   (the selected driver, the dummy's parameters) are left as they were. */
+
+#define FALLBACK_RETRY_MS 1000
+#define FALLBACK_MAX_FAILURES 30
+
+static void jack_controller_on_backend_lost(void * arg)
+{
+    __atomic_store_n(&((struct jack_controller *)arg)->backend_lost, 1, __ATOMIC_RELEASE);
+}
+
+static jackctl_driver_t * jack_controller_nspa_driver(struct jack_controller * controller_ptr, const char * name)
+{
+    const JSList * node;
+    for (node = jackctl_server_get_drivers_list(controller_ptr->server); node != NULL; node = jack_slist_next(node))
+    {
+        if (strcmp(jackctl_driver_get_name(node->data), name) == 0)
+        {
+            return node->data;
+        }
+    }
+    return NULL;
+}
+
+static jackctl_parameter_t * jack_controller_nspa_param(jackctl_driver_t * driver, const char * name)
+{
+    const JSList * node;
+    for (node = jackctl_driver_get_parameters(driver); node != NULL; node = jack_slist_next(node))
+    {
+        if (strcmp(jackctl_parameter_get_name(node->data), name) == 0)
+        {
+            return node->data;
+        }
+    }
+    return NULL;
+}
+
+static int jack_controller_count_ports(jack_client_t * client, const char * pattern)
+{
+    const char ** ports = client ? jack_get_ports(client, pattern, JACK_DEFAULT_AUDIO_TYPE, 0) : NULL;
+    int n = 0;
+    if (ports != NULL)
+    {
+        while (ports[n] != NULL)
+        {
+            n++;
+        }
+        jack_free(ports);
+    }
+    return n;
+}
+
+/* Switch the running master to the dummy driver, shaped like the one that went away. The dummy's
+   own settings are set only for the switch (the driver copies them when it opens) and put back
+   right after, so nothing changes in conf.xml. */
+static bool jack_controller_switch_to_dummy(struct jack_controller * controller_ptr)
+{
+    static const char * names[4] = { "rate", "period", "capture", "playback" };
+    jackctl_driver_t * dummy = jack_controller_nspa_driver(controller_ptr, "dummy");
+    jackctl_parameter_t * params[4];
+    union jackctl_parameter_value saved[4], value;
+    bool was_set[4];
+    bool ok;
+    int i;
+
+    if (dummy == NULL || controller_ptr->client == NULL)
+    {
+        return false;
+    }
+    for (i = 0; i < 4; i++)
+    {
+        params[i] = jack_controller_nspa_param(dummy, names[i]);
+        if (params[i] == NULL)
+        {
+            return false;
+        }
+        was_set[i] = jackctl_parameter_is_set(params[i]);
+        saved[i] = jackctl_parameter_get_value(params[i]);
+    }
+    value.ui = jack_get_sample_rate(controller_ptr->client);
+    jackctl_parameter_set_value(params[0], &value);
+    value.ui = jack_get_buffer_size(controller_ptr->client);
+    jackctl_parameter_set_value(params[1], &value);
+    value.ui = jack_controller_count_ports(controller_ptr->client, "^system:capture_");
+    jackctl_parameter_set_value(params[2], &value);
+    value.ui = jack_controller_count_ports(controller_ptr->client, "^system:playback_");
+    jackctl_parameter_set_value(params[3], &value);
+
+    ok = jackctl_server_switch_master(controller_ptr->server, dummy);
+
+    for (i = 0; i < 4; i++)
+    {
+        if (was_set[i])
+        {
+            jackctl_parameter_set_value(params[i], &saved[i]);
+        }
+        else
+        {
+            jackctl_parameter_reset(params[i]);
+        }
+    }
+    return ok;
+}
+
+/* The card a driver's "device" names ("hw:U44", "hw:U44,0", "hw:1") is present, its nodes usable
+   and the PCM not open by anyone (PipeWire probes a new card for a moment). */
+static bool jack_controller_card_ready(jackctl_driver_t * driver)
+{
+    jackctl_parameter_t * param = jack_controller_nspa_param(driver, "device");
+    union jackctl_parameter_value value;
+    char card[64], path[PATH_MAX], line[64];
+    const char * name;
+    int device = 0, n;
+    FILE * f;
+    const char * dirs[2] = { "p", "c" };
+
+    if (param == NULL)
+    {
+        return false;
+    }
+    value = jackctl_parameter_get_value(param);
+    name = value.str;
+    if (strncmp(name, "hw:", 3) != 0)
+    {
+        return true;        /* not a hardware card name: just try */
+    }
+    name += 3;
+    n = strcspn(name, ",");
+    if (n == 0 || n >= (int)sizeof(card))
+    {
+        return true;
+    }
+    memcpy(card, name, n);
+    card[n] = 0;
+    if (name[n] == ',')
+    {
+        device = atoi(name + n + 1);
+    }
+    if (card[0] >= '0' && card[0] <= '9')
+    {
+        snprintf(path, sizeof(path), "/proc/asound/card%s", card);
+    }
+    else
+    {
+        snprintf(path, sizeof(path), "/proc/asound/%s", card);
+    }
+    if (access(path, F_OK) != 0 || !jack_controller_snd_nodes_ready())
+    {
+        return false;
+    }
+    for (n = 0; n < 2; n++)
+    {
+        char status[PATH_MAX + 32];
+        snprintf(status, sizeof(status), "%s/pcm%d%s/sub0/status", path, device, dirs[n]);
+        f = fopen(status, "r");
+        if (f == NULL)
+        {
+            continue;       /* no such direction, or no procfs detail: don't block on it */
+        }
+        line[0] = 0;
+        if (fgets(line, sizeof(line), f) == NULL)
+        {
+            line[0] = 0;
+        }
+        fclose(f);
+        if (line[0] != 0 && strncmp(line, "closed", 6) != 0)
+        {
+            return false;   /* open by someone: try again later */
+        }
+    }
+    return true;
+}
+
+static void jack_controller_fallback_run(struct jack_controller * controller_ptr)
+{
+    int64_t now;
+
+    if (__atomic_exchange_n(&controller_ptr->backend_lost, 0, __ATOMIC_ACQ_REL))
+    {
+        jackctl_driver_t * lost = jack_params_get_driver(controller_ptr->params);
+        if (!controller_ptr->started)
+        {
+            return;
+        }
+        if (jack_controller_switch_to_dummy(controller_ptr))
+        {
+            /* keep the first driver if it was already a fallback (the dummy cannot lose a device) */
+            if (controller_ptr->fallback_from == NULL)
+            {
+                controller_ptr->fallback_from = lost;
+            }
+            controller_ptr->fallback_next_try = monotonic_ms() + FALLBACK_RETRY_MS;
+            controller_ptr->fallback_failures = 0;
+            jack_error("The sound card of the %s driver is gone: the server keeps running on the dummy driver until it is back",
+                       jackctl_driver_get_name(controller_ptr->fallback_from));
+        }
+        else
+        {
+            jack_error("The sound card is gone and the dummy driver could not take over: the server is stopped");
+            jack_controller_stop_server(controller_ptr, NULL);
+        }
+        return;
+    }
+
+    if (controller_ptr->fallback_from == NULL)
+    {
+        return;
+    }
+    if (!controller_ptr->started)
+    {
+        controller_ptr->fallback_from = NULL;   /* stopped meanwhile: the next start is a new one */
+        return;
+    }
+    now = monotonic_ms();
+    if (now < controller_ptr->fallback_next_try)
+    {
+        return;
+    }
+    controller_ptr->fallback_next_try = now + FALLBACK_RETRY_MS;
+    if (!jack_controller_card_ready(controller_ptr->fallback_from))
+    {
+        return;
+    }
+    if (jackctl_server_switch_master(controller_ptr->server, controller_ptr->fallback_from))
+    {
+        jack_info("The sound card is back: the server runs on the %s driver again",
+                  jackctl_driver_get_name(controller_ptr->fallback_from));
+        controller_ptr->fallback_from = NULL;
+        return;
+    }
+    /* the card is there but would not open (busy, or not the same card): the dummy again */
+    controller_ptr->fallback_failures++;
+    if (!jack_controller_switch_to_dummy(controller_ptr))
+    {
+        jack_error("The sound card is back but could not be used, and the dummy driver could not take over again: the server is stopped");
+        controller_ptr->fallback_from = NULL;
+        jack_controller_stop_server(controller_ptr, NULL);
+        return;
+    }
+    if (controller_ptr->fallback_failures >= FALLBACK_MAX_FAILURES)
+    {
+        jack_error("The sound card is back but could not be used (%d tries): the server stays on the dummy driver; switch the master driver to use it",
+                   controller_ptr->fallback_failures);
+        controller_ptr->fallback_from = NULL;
+    }
+}
+
 void *
 jack_controller_create(
         DBusConnection *connection)
@@ -778,6 +1030,8 @@ jack_controller_create(
         jack_error("Failed to create server object");
         goto fail_uninit_mutex;
     }
+    controller_ptr->backend_lost = 0;
+    jackctl_server_set_backend_lost_callback(controller_ptr->server, jack_controller_on_backend_lost, controller_ptr);
 
     controller_ptr->params = jack_params_create(controller_ptr->server);
     if (controller_ptr->params == NULL)
@@ -792,6 +1046,10 @@ jack_controller_create(
     controller_ptr->pending_save = 0;
 
     jack_controller_snd_watch_init(controller_ptr);
+    controller_ptr->backend_lost = 0;
+    controller_ptr->fallback_from = NULL;
+    controller_ptr->fallback_next_try = 0;
+    controller_ptr->fallback_failures = 0;
 
     INIT_LIST_HEAD(&controller_ptr->slave_drivers);
     controller_ptr->slave_drivers_set = false;
@@ -840,6 +1098,7 @@ fail_destroy_params:
     jack_params_destroy(controller_ptr->params);
 
 fail_destroy_server:
+    jackctl_server_set_backend_lost_callback(controller_ptr->server, NULL, NULL);
     jackctl_server_destroy(controller_ptr->server);
 
 fail_uninit_mutex:
@@ -1014,6 +1273,7 @@ jack_controller_destroy(
     }
 
     jack_controller_remove_slave_drivers(controller_ptr);
+    jackctl_server_set_backend_lost_callback(controller_ptr->server, NULL, NULL);
     if (controller_ptr->snd_watch_fd >= 0)
     {
         close(controller_ptr->snd_watch_fd);
@@ -1031,6 +1291,7 @@ jack_controller_run(
     long ut;
 
     jack_controller_snd_watch_run(controller_ptr);
+    jack_controller_fallback_run(controller_ptr);
 
     if (controller_ptr->pending_save == 0)
     {

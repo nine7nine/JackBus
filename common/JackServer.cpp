@@ -144,6 +144,7 @@ fail_close1:
 int JackServer::Close()
 {
     jack_log("JackServer::Close");
+    fMasterConnections.clear();
     fRequestChannel.Close();
     if (fAudioDriver && !fAudioDriverClosed) {
         fAudioDriver->Detach();
@@ -418,11 +419,69 @@ void JackServer::RemoveSlave(JackDriverInfo* info)
     slave->Close();
 }
 
+/* jack2-nspa: the master's ports and what they are connected to, by name (for SwitchMaster) */
+void JackServer::SaveMasterConnections()
+{
+    JackGraphManager* graph = GetGraphManager();
+    const char* client = fAudioDriver->GetClientControl()->fName;
+    const size_t len = strlen(client);
+    const char** ports = graph->GetPorts(NULL, NULL, 0);
+    if (ports == NULL) {
+        return;
+    }
+    for (int i = 0; ports[i] != NULL; i++) {
+        if (strncmp(ports[i], client, len) != 0 || ports[i][len] != ':') {
+            continue;
+        }
+        std::set<std::string>& peers = fMasterConnections[ports[i]];
+        peers.clear();
+        const char** conns = graph->GetConnections(graph->GetPort(ports[i]));
+        if (conns != NULL) {
+            for (int j = 0; conns[j] != NULL; j++) {
+                peers.insert(conns[j]);
+            }
+            free(conns);
+        }
+    }
+    free(ports);
+}
+
+void JackServer::RestoreMasterConnections()
+{
+    JackGraphManager* graph = GetGraphManager();
+    const int refnum = fAudioDriver->GetClientControl()->fRefNum;
+    int restored = 0;
+    for (std::map<std::string, std::set<std::string> >::iterator it = fMasterConnections.begin(); it != fMasterConnections.end();) {
+        jack_port_id_t index = graph->GetPort(it->first.c_str());
+        if (index == NO_PORT) {
+            ++it;           /* this master has no such port: keep it for a later one */
+            continue;
+        }
+        const bool output = (graph->GetPort(index)->GetFlags() & JackPortIsOutput) != 0;
+        for (std::set<std::string>::const_iterator peer = it->second.begin(); peer != it->second.end(); ++peer) {
+            if (graph->GetPort(peer->c_str()) == NO_PORT) {
+                continue;   /* its client has gone meanwhile */
+            }
+            const char* src = output ? it->first.c_str() : peer->c_str();
+            const char* dst = output ? peer->c_str() : it->first.c_str();
+            if (fEngine->PortConnect(refnum, src, dst) == 0) {
+                restored++;
+            }
+        }
+        fMasterConnections.erase(it++);
+    }
+    if (restored > 0) {
+        jack_info("Master driver switched: %d connection(s) to its ports restored", restored);
+    }
+}
+
 int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_params)
 {
     std::list<JackDriverInterface*> slave_list;
     std::list<JackDriverInterface*>::const_iterator it;
     JackLock lock(&fControlLock);
+    const jack_nframes_t old_buffer_size = fEngineControl->fBufferSize;
+    const jack_nframes_t old_sample_rate = fEngineControl->fSampleRate;
 
     /*
     Failure handling: the old master is closed before the new one is opened
@@ -435,8 +494,9 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
     driver info that fDriverInfo already pointed to (double free on close).
     */
 
-    // Remove current master
+    // Remove current master (jack2-nspa: its connections are kept, by port name)
     if (!fAudioDriverClosed) {
+        SaveMasterConnections();
         fAudioDriver->Stop();
         fAudioDriver->Detach();
         fAudioDriver->Close();
@@ -475,10 +535,15 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
         return -1;  // fDriverInfo owns the (closed) new driver
     }
     fAudioDriverClosed = false;
+    RestoreMasterConnections();
 
-    // Notify clients of new values
-    fEngine->NotifyBufferSize(fEngineControl->fBufferSize);
-    fEngine->NotifySampleRate(fEngineControl->fSampleRate);
+    // Notify clients of new values (jack2-nspa: only those that changed)
+    if (fEngineControl->fBufferSize != old_buffer_size) {
+        fEngine->NotifyBufferSize(fEngineControl->fBufferSize);
+    }
+    if (fEngineControl->fSampleRate != old_sample_rate) {
+        fEngine->NotifySampleRate(fEngineControl->fSampleRate);
+    }
 
     // And finally start
     fAudioDriver->SetMaster(true);

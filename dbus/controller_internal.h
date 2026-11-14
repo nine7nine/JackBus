@@ -79,6 +79,13 @@ struct jack_controller
     int64_t snd_first_change;   /* ms (monotonic) of the first unhandled change, 0: none */
     int64_t snd_last_change;    /* ms of the latest one */
     int64_t snd_last_rewatch;   /* ms of the last attempt to watch /dev/snd */
+
+    /* jack2-nspa: the master driver's device went away (set from the dying driver thread) */
+    int backend_lost;
+    /* while the dummy driver stands in for it: the driver to go back to, when to try next */
+    jackctl_driver_t * fallback_from;
+    int64_t fallback_next_try;  /* ms */
+    int fallback_failures;
 };
 
 #define DEFAULT_DRIVER "dummy"

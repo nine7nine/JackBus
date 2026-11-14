@@ -1744,6 +1744,13 @@ SERVER_EXPORT int jackctl_driver_refresh_constraints(jackctl_driver * driver_ptr
     return changed;
 }
 
+SERVER_EXPORT void jackctl_server_set_backend_lost_callback(jackctl_server * server_ptr, void (*callback)(void * arg), void * arg)
+{
+    (void)server_ptr;
+    JackServerGlobals::on_backend_lost_arg = arg;
+    JackServerGlobals::on_backend_lost = callback;
+}
+
 SERVER_EXPORT bool jackctl_server_reset_client_timings(jackctl_server * server_ptr)
 {
     if (!server_ptr || !server_ptr->engine) {

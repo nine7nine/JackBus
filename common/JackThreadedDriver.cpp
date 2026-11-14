@@ -24,6 +24,7 @@
 #include "JackTools.h"
 #include "JackGlobals.h"
 #include "JackEngineControl.h"
+#include "JackServerGlobals.h"
 
 namespace Jack
 {
@@ -250,6 +251,13 @@ bool JackThreadedDriver::Execute()
     to exit silently, leaving the server "started" with no audio and clients
     waiting forever. Notify them through the usual shutdown callback.
     */
+    if (fDriver->IsDeviceLost() && JackServerGlobals::on_backend_lost != NULL) {
+        /* jack2-nspa: the device went away and a controller (jackdbus) takes over: it puts
+           another master driver in place, so clients are not told the server stopped. */
+        jack_error("JackThreadedDriver::Execute: the device is gone, the controller takes over");
+        JackServerGlobals::on_backend_lost(JackServerGlobals::on_backend_lost_arg);
+        return false;
+    }
     jack_error("JackThreadedDriver::Execute: driver failed, the server stops processing");
     fDriver->NotifyFailure(JackFailure | JackBackendError, "JACK audio backend failed");
     return false;
