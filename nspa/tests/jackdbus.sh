@@ -358,6 +358,50 @@ fi
 rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 rm -rf "$HOME/.config/jack"
 
+# 1g. cpu-dma-latency takes effect when changed while the server runs: set, changed,
+# reset (released), held again at the next start. /dev/cpu_dma_latency reads the
+# system-wide minimum of all requests: ours is in effect when it reads <= ours, gone
+# when it reads more (needs the baseline from other holders above the values used)
+qos() { od -An -td4 /dev/cpu_dma_latency 2>/dev/null | tr -d ' '; }
+if [ ! -w /dev/cpu_dma_latency ] || [ -z "$(qos)" ]; then
+    echo "SKIP jackdbus-qos-live: no write access to /dev/cpu_dma_latency"
+elif [ "$(qos)" -le 400 ]; then
+    echo "SKIP jackdbus-qos-live: another holder already requests $(qos) us"
+elif start_jackdbus; then
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
+    steps=""; rc=0
+    check() {  # check <label> <le|gt> <value>
+        v=$(qos); steps="$steps $1=$v"
+        if [ "$2" = le ]; then [ "$v" -le "$3" ] || rc=1; else [ "$v" -gt "$3" ] || rc=1; fi
+    }
+    call org.jackaudio.JackControl.StartServer || rc=1
+    check started gt 300
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,cpu-dma-latency variant:int32:300 || rc=1
+    check set300 le 300
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,cpu-dma-latency variant:int32:100 || rc=1
+    check set100 le 100
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,cpu-dma-latency variant:int32:-1 || rc=1
+    check off gt 300
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,cpu-dma-latency variant:int32:200 || rc=1
+    check set200 le 200
+    call org.jackaudio.Configure.ResetParameterValue array:string:engine,cpu-dma-latency || rc=1
+    check reset gt 300
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,cpu-dma-latency variant:int32:250 || rc=1
+    call org.jackaudio.JackControl.StopServer || rc=1
+    check stopped gt 300
+    call org.jackaudio.JackControl.StartServer || rc=1
+    check restarted le 250
+    call org.jackaudio.Configure.ResetParameterValue array:string:engine,cpu-dma-latency
+    call org.jackaudio.JackControl.StopServer
+    check end gt 300
+    result jackdbus-qos-live $rc "/dev/cpu_dma_latency:$steps"
+    kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
+else
+    echo "FAIL jackdbus-qos-live: jackdbus did not come up"; fail=1
+fi
+rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
+rm -rf "$HOME/.config/jack"
+
 # 2. crash handler
 if start_jackdbus; then
     kill -SEGV $JD_PID
