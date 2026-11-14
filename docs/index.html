@@ -1610,8 +1610,8 @@ pre.code .s { color: var(--amber); }
   <p class="sub">
     <code>jack_alsa.so</code> owns the card. It maps the PCM's ring buffer, waits for each period with
     <code>poll()</code>, converts between the card's integer format and JACK's 32-bit float port buffers, and drives
-    the engine's cycle. On this machine: Intel HDA, Realtek ALC274 (24 significant bits in S32_LE), 48&nbsp;kHz,
-    512&nbsp;×&nbsp;2.
+    the engine's cycle. The measurements in this document come from an Intel HDA card, Realtek ALC274 (24
+    significant bits in S32_LE), at 48&nbsp;kHz, 512&nbsp;×&nbsp;2.
   </p>
   <div class="figure">
     <div class="controls"><button class="toggle" type="button" data-play>Pause</button> <button class="toggle" type="button" data-replay>Replay</button></div>
