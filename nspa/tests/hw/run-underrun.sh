@@ -18,7 +18,7 @@ dev="${1:-hw:U44}"
 card="${dev#hw:}"; card="${card%%,*}"
 out="${UNDERRUN_OUT:-/tmp/underrun-$card}"
 periods="${UNDERRUN_PERIODS:-128 256}"
-lates="${UNDERRUN_LATE:-0.5 0.9 1.2 1.6 2.2}"
+lates="${UNDERRUN_LATE-0.5 0.9 1.2 1.6 2.2}"   # set but empty: natural lateness only
 secs="${UNDERRUN_SECONDS:-15}"
 every="${UNDERRUN_EVERY:-100}"
 prio="${UNDERRUN_PRIO:-80}"
