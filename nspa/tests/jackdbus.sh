@@ -351,6 +351,7 @@ elif start_jackdbus; then
     n=$(( $(grep -c 'Broken pipe\|Could not write notification\|ClientNotify fails' "$log") - before ))
     [ "$n" = 0 ] || rc=1
     result jackdbus-stop-quiet $rc "3 stops with patchbay clients connected: $n notification error lines"
+    [ "$n" -gt 0 ] && grep 'Broken pipe\|Could not write notification\|ClientNotify fails' "$log" | tail -n "$n" | sed 's/^/    /' 
     kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
 else
     echo "FAIL jackdbus-stop-quiet: jackdbus did not come up"; fail=1
