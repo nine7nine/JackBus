@@ -33,13 +33,21 @@ as_user env UNDERRUN_OUT="$out/probe" UNDERRUN_CONFIGS="spare:2" UNDERRUN_PERIOD
 runner=$!
 sleep 3   # the server stopped and the probe running
 
-# The ALSA core's own tracepoints, when the kernel has them: each hardware-pointer update with the
-# position read (in the interrupt or from an application's hwsync), and xruns.
+# Period updates as they happen: the ALSA core's tracepoints that this kernel has, and a probe on
+# snd_pcm_period_elapsed (exported, so not inlined; removed again at the end). An HDA interrupt
+# followed by neither an update nor the deferred work is one the driver dropped.
+T=/sys/kernel/tracing; [ -d "$T/events" ] || T=/sys/kernel/debug/tracing
 pcm_events=""
-if [ -d /sys/kernel/tracing/events/snd_pcm ] || [ -d /sys/kernel/debug/tracing/events/snd_pcm ]; then
-    pcm_events="-e snd_pcm:hwptr -e snd_pcm:xrun -e snd_pcm:hw_ptr_error"
+for e in hwptr xrun hw_ptr_error; do
+    [ -d "$T/events/snd_pcm/$e" ] && pcm_events="$pcm_events -e snd_pcm:$e"
+done
+probe=""
+if perf probe -q -a snd_pcm_period_elapsed >> "$out/perf.log" 2>&1 \
+   || perf probe -q -m snd_pcm -a snd_pcm_period_elapsed >> "$out/perf.log" 2>&1; then
+    probe=probe:snd_pcm_period_elapsed
+    pcm_events="$pcm_events -e $probe"
 fi
-echo "ALSA tracepoints: ${pcm_events:-not in this kernel}" > "$out/tracepoints.txt"
+echo "ALSA events: ${pcm_events:-none}" > "$out/tracepoints.txt"
 
 # shellcheck disable=SC2086
 perf record -o "$out/perf.data" -a $pcm_events \
@@ -49,10 +57,11 @@ perf record -o "$out/perf.data" -a $pcm_events \
     -e workqueue:workqueue_execute_start \
     -e workqueue:workqueue_execute_end \
     -e sched:sched_wakeup --filter 'comm == "underrun_probe"' \
-    -- sleep 20 > "$out/perf.log" 2>&1
+    -- sleep 20 >> "$out/perf.log" 2>&1 || echo "perf record failed: see $out/perf.log"
 wait "$runner" || true
+[ -n "$probe" ] && perf probe -q -d "$probe" >> "$out/perf.log" 2>&1
 
 perf script -i "$out/perf.data" -F comm,tid,cpu,time,event,trace 2>/dev/null \
-    | grep -E "irq_handler|azx_|underrun_probe|snd_|pcmC" > "$out/events.txt" || true
+    | grep -E "irq_handler|azx_|underrun_probe|snd_|pcmC|period_elapsed" > "$out/events.txt" || true
 chown -R "$user" "$out"
 echo "done: $(wc -l < "$out/events.txt") events in $out/events.txt; JACK: $(as_user jack_control status 2>/dev/null | tail -1)"
