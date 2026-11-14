@@ -85,6 +85,7 @@ struct jack_controller_patchbay
     uint64_t next_client_id;
     uint64_t next_port_id;
     uint64_t next_connection_id;
+    bool caught_up;             /* the graph as it was at start is in (notification thread only) */
 };
 
 void
@@ -609,11 +610,14 @@ jack_controller_patchbay_find_client_port_by_name(
     return NULL;
 }
 
+/* jack2-nspa: `report`: log a port whose client is not in the graph (an error where the
+   port must be there; not where the lookup only asks whether it is there yet) */
 static
 struct jack_graph_port *
-jack_controller_patchbay_find_port_by_full_name(
+jack_controller_patchbay_lookup_port(
     struct jack_controller_patchbay *patchbay_ptr,
-    const char *port_full_name)
+    const char *port_full_name,
+    bool report)
 {
     const char *port_short_name;
     size_t client_name_len;
@@ -635,11 +639,23 @@ jack_controller_patchbay_find_port_by_full_name(
     client_ptr = jack_controller_patchbay_find_client(patchbay_ptr, port_full_name, client_name_len);
     if (client_ptr == NULL)
     {
-        jack_error("cannot find client of port '%s'", port_full_name);
+        if (report)
+        {
+            jack_error("cannot find client of port '%s'", port_full_name);
+        }
         return NULL;
     }
 
     return jack_controller_patchbay_find_client_port_by_name(patchbay_ptr, client_ptr, port_short_name);
+}
+
+static
+struct jack_graph_port *
+jack_controller_patchbay_find_port_by_full_name(
+    struct jack_controller_patchbay *patchbay_ptr,
+    const char *port_full_name)
+{
+    return jack_controller_patchbay_lookup_port(patchbay_ptr, port_full_name, true);
 }
 
 static
@@ -1667,53 +1683,95 @@ jack_controller_dbus_detach_process(
 #undef controller_ptr
 #define controller_ptr ((struct jack_controller *)context)
 
+/* jack2-nspa: the graph as it is when the patchbay starts, every port and connection, once,
+ * from the first notification of any kind (they all come on this client's one notification
+ * thread, so nothing else adds to the graph meanwhile). It used to wait for the first
+ * graph-order callback and was skipped whenever another notification came first (a client
+ * that registers and connects as soon as the server is up, such as PipeWire's): the graph
+ * then lacked every port from before, the system ports included, for the whole session, and
+ * each connection to them logged errors. Notifications for what this already added are
+ * skipped by the callbacks. jack_get_ports() must not be called with the lock held (see
+ * jack_controller_dbus_connect_ports_by_name()). */
+static
+void
+jack_controller_patchbay_catchup(
+    void *context)
+{
+    const char **ports;
+    const char **connections;
+    jack_port_t *port_ptr;
+    struct jack_graph_port *port1_ptr;
+    struct jack_graph_port *port2_ptr;
+    bool known;
+    int i, j, nports = 0, nconnections = 0;
+
+    if (patchbay_ptr->caught_up)
+    {
+        return;
+    }
+    patchbay_ptr->caught_up = true;
+
+    ports = jack_get_ports(controller_ptr->client, NULL, NULL, 0);
+    if (ports == NULL)
+    {
+        return;
+    }
+
+    for (i = 0; ports[i] != NULL; i++)
+    {
+        port_ptr = jack_port_by_name(controller_ptr->client, ports[i]);
+        if (port_ptr == NULL)
+        {
+            continue;
+        }
+        pthread_mutex_lock(&patchbay_ptr->lock);
+        known = jack_controller_patchbay_lookup_port(patchbay_ptr, ports[i], false) != NULL;
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+        if (!known)
+        {
+            jack_controller_patchbay_new_port(patchbay_ptr, ports[i], jack_port_flags(port_ptr), jack_port_type_id(port_ptr));
+            nports++;
+        }
+    }
+
+    for (i = 0; ports[i] != NULL; i++)
+    {
+        port_ptr = jack_port_by_name(controller_ptr->client, ports[i]);
+        if (port_ptr == NULL || !(jack_port_flags(port_ptr) & JackPortIsOutput))
+        {
+            continue;
+        }
+        connections = jack_port_get_all_connections(controller_ptr->client, port_ptr);
+        if (connections == NULL)
+        {
+            continue;
+        }
+        for (j = 0; connections[j] != NULL; j++)
+        {
+            pthread_mutex_lock(&patchbay_ptr->lock);
+            port1_ptr = jack_controller_patchbay_find_port_by_full_name(patchbay_ptr, ports[i]);
+            port2_ptr = jack_controller_patchbay_find_port_by_full_name(patchbay_ptr, connections[j]);
+            if (port1_ptr != NULL && port2_ptr != NULL &&
+                jack_controller_patchbay_find_connection(patchbay_ptr, port1_ptr, port2_ptr) == NULL)
+            {
+                jack_controller_patchbay_create_connection(patchbay_ptr, port1_ptr, port2_ptr);
+                nconnections++;
+            }
+            pthread_mutex_unlock(&patchbay_ptr->lock);
+        }
+        jack_free(connections);
+    }
+
+    jack_free(ports);
+    jack_info("patchbay: %d ports and %d connections at start", nports, nconnections);
+}
+
 static
 int
 jack_controller_graph_order_callback(
     void *context)
 {
-    const char **ports;
-    int i;
-    jack_port_t *port_ptr;
-    
-    bool catchup;
-
-    /* graph.version is changed under the lock by the other callbacks, which
-     * run in other threads; jack_get_ports() below must not be called with
-     * the lock held (see jack_controller_dbus_connect_ports_by_name()) */
-    pthread_mutex_lock(&patchbay_ptr->lock);
-    catchup = (patchbay_ptr->graph.version <= 1);
-    pthread_mutex_unlock(&patchbay_ptr->lock);
-
-    if (!catchup)
-    {
-        /* we use this only for initial catchup */
-        return 0;
-    }
-    
-    ports = jack_get_ports(controller_ptr->client, NULL, NULL, 0);
-    if (ports)
-    {
-        for (i = 0;  ports[i]; ++i)
-        {
-            jack_info("graph reorder: new port '%s'", ports[i]);
-            port_ptr = jack_port_by_name(controller_ptr->client, ports[i]);;
-            jack_controller_patchbay_new_port(patchbay_ptr, ports[i], jack_port_flags(port_ptr), jack_port_type_id(port_ptr));
-        }
-
-        free(ports);
-    }
-
-    pthread_mutex_lock(&patchbay_ptr->lock);
-    if (patchbay_ptr->graph.version == 1)
-    {
-        /* we have empty initial graph, increment graph version,
-           so we don't do jack_get_ports() again,
-           on next next graph change */
-        patchbay_ptr->graph.version++;
-    }
-    pthread_mutex_unlock(&patchbay_ptr->lock);
-
+    jack_controller_patchbay_catchup(context);  /* the graph order itself is not mirrored */
     return 0;
 }
 
@@ -1723,10 +1781,20 @@ jack_controller_client_registration_callback(
     int created,
     void *context)
 {
+    bool known;
+
+    jack_controller_patchbay_catchup(context);
+
     if (created)
     {
         jack_log("client '%s' created", client_name);
-        jack_controller_patchbay_create_client(patchbay_ptr, client_name, strlen(client_name));
+        pthread_mutex_lock(&patchbay_ptr->lock);
+        known = jack_controller_patchbay_find_client(patchbay_ptr, client_name, strlen(client_name)) != NULL;
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+        if (!known)     /* else the catch-up has it already */
+        {
+            jack_controller_patchbay_create_client(patchbay_ptr, client_name, strlen(client_name));
+        }
     }
     else
     {
@@ -1748,13 +1816,21 @@ jack_controller_port_registration_callback(
     struct jack_graph_port *graph_port_ptr;
     const char *port_name;
 
+    jack_controller_patchbay_catchup(context);
+
     port_ptr = jack_port_by_id(controller_ptr->client, port_id);
     port_name = jack_port_name(port_ptr);
 
     if (created)
     {
         jack_log("port '%s' created", port_name);
-        jack_controller_patchbay_new_port(patchbay_ptr, port_name, jack_port_flags(port_ptr), jack_port_type_id(port_ptr));
+        pthread_mutex_lock(&patchbay_ptr->lock);
+        graph_port_ptr = jack_controller_patchbay_lookup_port(patchbay_ptr, port_name, false);
+        pthread_mutex_unlock(&patchbay_ptr->lock);
+        if (graph_port_ptr == NULL)     /* else the catch-up has it already */
+        {
+            jack_controller_patchbay_new_port(patchbay_ptr, port_name, jack_port_flags(port_ptr), jack_port_type_id(port_ptr));
+        }
     }
     else
     {
@@ -1788,6 +1864,8 @@ jack_controller_port_connect_callback(
     struct jack_graph_port *port2_ptr;
     struct jack_graph_connection *connection_ptr;
 
+    jack_controller_patchbay_catchup(context);
+
     port1 = jack_port_by_id(controller_ptr->client, port1_id);
     port2 = jack_port_by_id(controller_ptr->client, port2_id);
 
@@ -1817,7 +1895,8 @@ jack_controller_port_connect_callback(
         connection_ptr = jack_controller_patchbay_find_connection(patchbay_ptr, port1_ptr, port2_ptr);
         if (connection_ptr != NULL)
         {
-            jack_error("'%s' and '%s' are already connected", port1_name, port2_name);
+            /* the catch-up found it (its notification was still queued) */
+            jack_log("'%s' and '%s' are already connected", port1_name, port2_name);
             goto unlock;
         }
 
@@ -1846,6 +1925,8 @@ void jack_controller_port_rename_callback(jack_port_id_t port, const char * old_
     const char * port_new_short_name;
     const char * port_old_short_name;
     char * name_buffer;
+
+    jack_controller_patchbay_catchup(context);
 
     jack_info("port renamed: '%s' -> '%s'", old_name, new_name);
 
@@ -1997,6 +2078,7 @@ jack_controller_patchbay_init(
     patchbay_ptr->next_client_id = 1;
     patchbay_ptr->next_port_id = 1;
     patchbay_ptr->next_connection_id = 1;
+    patchbay_ptr->caught_up = false;
 
     controller_ptr->patchbay_context = patchbay_ptr;
 

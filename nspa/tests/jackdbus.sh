@@ -164,6 +164,50 @@ else
 fi
 rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 
+# 1c2. the patchbay's graph at start, when a client joins and connects the moment the server
+# is up (as PipeWire's JACK client does): the system ports and that client's connections must
+# be in GetGraph, and no "cannot find client of port" in the log. The patchbay used to learn
+# the graph only from its first graph-order notification, skipped when another came first.
+eager_bin="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/eager_client"
+if [ ! -x "$eager_bin" ]; then
+    echo "SKIP jackdbus-patchbay-start: no eager_client"
+elif start_jackdbus; then
+    call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
+    log0=$(wc -l <"$log" 2>/dev/null || echo 0)
+    rounds=${NSPA_PATCHBAY_START_ROUNDS:-20}; r=0; missed=0; noconn=0
+    while [ $r -lt $rounds ]; do
+        r=$((r + 1))
+        rm -f "$work/eager.in"; mkfifo "$work/eager.in"
+        LD_LIBRARY_PATH="$(dirname "$jackdbus")/../common" "$eager_bin" eager 10 <"$work/eager.in" >"$work/eager.out" 2>/dev/null &
+        epid=$!
+        exec 7>"$work/eager.in"
+        call org.jackaudio.JackControl.StartServer
+        i=0; until grep -q connect "$work/eager.out" || [ $i -gt 50 ]; do sleep 0.1; i=$((i + 1)); done
+        sleep 0.3
+        if ! grep -q "^connected" "$work/eager.out"; then
+            noconn=$((noconn + 1))
+        else
+            g=$(dbus-send --session --print-reply --dest=org.jackaudio.service /org/jackaudio/Controller \
+                org.jackaudio.JackPatchbay.GetGraph uint64:0 2>/dev/null)
+            sys=$(printf '%s\n' "$g" | grep -c 'string "system"')
+            cap=$(printf '%s\n' "$g" | grep -c 'string "capture_1"')
+            pbk=$(printf '%s\n' "$g" | grep -c 'string "playback_1"')
+            # each port once in the client list, once more in its connection
+            [ "$sys" -ge 1 ] && [ "$cap" -ge 2 ] && [ "$pbk" -ge 2 ] || missed=$((missed + 1))
+        fi
+        exec 7>&-
+        call org.jackaudio.JackControl.StopServer
+        wait $epid 2>/dev/null
+    done
+    errs=$(tail -n +"$((log0 + 1))" "$log" 2>/dev/null | grep -c "cannot find client of port")
+    ok=1; [ $missed -eq 0 ] && [ $noconn -eq 0 ] && [ "$errs" -eq 0 ] && ok=0
+    result jackdbus-patchbay-start $ok "$rounds starts with a client that joins at once: graph incomplete in $missed, client not connected in $noconn, $errs 'cannot find client of port' errors"
+    kill -TERM $JD_PID; wait_exit $JD_PID 50; [ "$st" = alive ] && kill -KILL $JD_PID
+else
+    echo "FAIL jackdbus-patchbay-start: jackdbus did not come up"; fail=1
+fi
+rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
+
 # 1d. a session manager takes an application's clients out of the graph before
 # stopping it (org.jackaudio.JackPatchbay.DetachClient / DetachProcess): killed
 # afterwards, its departure costs the graph nothing, whatever its libjack (here
