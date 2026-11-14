@@ -21,6 +21,8 @@
  *   underrun_probe -d hw:U44 [-r 48000] [-p 128] [-q 2] [-c 2] [-m stop|spare] [-s seconds]
  *                  [-k every] [-l late-periods] [-o log] [-P (playback only)]
  *                  [-C (spare mode: capture never stops either; default: it stops on an overrun)]
+ *                  [-T margin_us (timer fallback: wait for the interrupt at most until the position
+ *                   says the period is due, plus margin_us; then read the position instead)]
  *
  * Build: cc -O2 -Wall -o underrun_probe underrun_probe.c -lasound
  */
@@ -39,6 +41,7 @@ static const char *dev = "hw:U44";
 static unsigned rate = 48000, period = 128, queue = 2, chans = 2;
 static int spare_mode = 0, playback_only = 0, cap_boundary = 0;
 static double seconds = 20, late_periods = 1.5;
+static int timer_margin_us = -1;   /* -T: wait at most until the next period is due + this */
 static unsigned every = 250;
 static FILE *logf;
 
@@ -158,7 +161,7 @@ int main(int argc, char **argv)
 {
 	const char *logpath = NULL;
 	int o;
-	while ((o = getopt(argc, argv, "d:r:p:q:c:m:s:k:l:o:PC")) != -1) {
+	while ((o = getopt(argc, argv, "d:r:p:q:c:m:s:k:l:o:PCT:")) != -1) {
 		switch (o) {
 		case 'd': dev = optarg; break;
 		case 'r': rate = atoi(optarg); break;
@@ -172,6 +175,7 @@ int main(int argc, char **argv)
 		case 'o': logpath = optarg; break;
 		case 'P': playback_only = 1; break;
 		case 'C': cap_boundary = 1; break;
+		case 'T': timer_margin_us = atoi(optarg); break;
 		default: fprintf(stderr, "see the header comment\n"); return 2;
 		}
 	}
@@ -220,7 +224,7 @@ int main(int argc, char **argv)
 
 	/* Outputs still to drop: the periods the spare stood in for. Each captured period owns one
 	   output slot, written or stood in for, so the input-to-output latency never moves. */
-	uint64_t drop_out = 0, dropped = 0, overflow = 0, spin = 0;
+	uint64_t drop_out = 0, dropped = 0, overflow = 0, spin = 0, timer_wakes = 0;
 	const snd_pcm_sframes_t pmin = (snd_pcm_sframes_t)P * (nper - queue + 1);
 	const snd_pcm_sframes_t spare = spare_mode ? (snd_pcm_sframes_t)P : 0;
 
@@ -240,9 +244,24 @@ int main(int argc, char **argv)
 			unsigned n = 0;
 			if (need_p) n += snd_pcm_poll_descriptors(pb, pfd + n, 16 - n);
 			if (need_c) n += snd_pcm_poll_descriptors(cap, pfd + n, 16 - n);
-			int r = poll(pfd, n, 1000);
+			int r;
+			if (timer_margin_us >= 0) {
+				/* when the next period is due, from the position read just now */
+				snd_pcm_sframes_t need = 0;
+				if (need_p && pmin - pav > need) need = pmin - pav;
+				if (need_c && (snd_pcm_sframes_t)P - cav > need) need = (snd_pcm_sframes_t)P - cav;
+				int64_t us = (int64_t)need * 1000000 / rate + timer_margin_us;
+				struct timespec ts = { us / 1000000, (us % 1000000) * 1000 };
+				r = ppoll(pfd, n, &ts, NULL);
+				if (r == 0) {
+					timer_wakes++;   /* no interrupt by then: the loop reads the position itself */
+					continue;
+				}
+			} else {
+				r = poll(pfd, n, 1000);
+			}
 			if (r <= 0) { fprintf(logf, "# poll %s at cycle %" PRIu64 "\n", r ? strerror(errno) : "timeout", cycle); goto out; }
-			if (guard > 10000) { spin++; fprintf(logf, "# wait spun at cycle %" PRIu64 "\n", cycle); goto out; }
+			if (guard > 100000) { spin++; fprintf(logf, "# wait spun at cycle %" PRIu64 "\n", cycle); goto out; }
 		}
 		/* a late wake: the device is ready, the application gets to it L periods later */
 		if (every && cycle && cycle % every == 0) {
@@ -354,6 +373,8 @@ int main(int argc, char **argv)
 		}
 	}
 out:
+	if (timer_margin_us >= 0)
+		fprintf(logf, "# timer fallback (margin %d us): %" PRIu64 " waits ended by the timer\n", timer_margin_us, timer_wakes);
 	fprintf(logf, "# output slots: written %" PRIu64 " + stood in by the spare %" PRIu64 " - captured %" PRIu64 " = %+" PRId64 " periods (prefill %u; constant means the latency never moved, except across stop-mode restarts); overflows %" PRIu64 ", wait spins %" PRIu64 "\n",
 		pb_written / P, dropped, cap_read / P, (int64_t)(pb_written / P + dropped) - (int64_t)(cap_read / P), queue, overflow, spin);
 	const int64_t t_end = now_us();

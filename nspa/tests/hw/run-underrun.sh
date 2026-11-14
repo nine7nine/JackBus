@@ -11,7 +11,8 @@
 #
 # Environment: UNDERRUN_CONFIGS (mode:queue, default "stop:2 stop:3 spare:2"), UNDERRUN_PERIODS (default "128 256"), UNDERRUN_LATE (periods slept, default
 # "0.5 0.9 1.2 1.6 2.2"), UNDERRUN_SECONDS (per run, default 15), UNDERRUN_EVERY (cycles between
-# injections, default 100), UNDERRUN_PRIO (default 80), UNDERRUN_OUT (default /tmp/underrun-<card>).
+# injections, default 100), UNDERRUN_PRIO (default 80), UNDERRUN_OUT (default /tmp/underrun-<card>),
+# UNDERRUN_PROBE_ARGS (more probe options, e.g. "-T 300").
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 dev="${1:-hw:U44}"
@@ -62,7 +63,7 @@ for p in $periods; do
             k=$every; [ "$l" = 0 ] && k=0
             log="$out/$mode-q$q-${p}-late$l.log"
             since=$(date +%s)
-            $rt "$probe" -d "$dev" -p "$p" -m "$mode" -q "$q" -s "$secs" -k "$k" -l "$l" -o "$log"
+            $rt "$probe" -d "$dev" -p "$p" -m "$mode" -q "$q" -s "$secs" -k "$k" -l "$l" -o "$log" ${UNDERRUN_PROBE_ARGS:-}
             rc=$?
             journalctl -k --since "@$since" --no-pager -q 2>/dev/null | grep -i -E "snd|pcm|xrun|usb|hda" > "$log.kernel"
             awk -v p="$p" -v m="$mode:q$q" -v l="$l" -v rc="$rc" -v kern="$(wc -l < "$log.kernel")" '
