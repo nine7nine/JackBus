@@ -39,21 +39,24 @@ struct Scenario
     int xrun_frames;
     double pause_at;    // s, the card side stops here for pause_len s, then restarts (unplug, replug)
     double pause_len;
+    double skip_at;     // s, the master skips `skip` cycles here (a master xrun), 0: never
+    int skip;
     double seconds;
     int channels;
 };
 
 static const Scenario kScenarios[] = {
     // name                 master  card    n    upd   ppm    step  at   jitter  wake    xrun  frames pause len secs ch
-    { "hda-like +50ppm",    48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 0, 0, 120, 2 },
-    { "u44-like -120ppm",   48000, 48000, 128,  64, -120.0,  0.0,  0, 30e-6, 100e-6,   0,   0, 0, 0, 120, 4 },
-    { "headset-like +300",  48000, 48000, 256,  48,  300.0,  0.0,  0, 150e-6, 300e-6,  0,   0, 0, 0, 120, 2 },
-    { "small period 64",    48000, 48000,  64,  48,   80.0,  0.0,  0, 50e-6, 100e-6,   0,   0, 0, 0, 120, 2 },
-    { "drift step +30",     48000, 48000, 256, 256,   50.0, 30.0, 60, 20e-6,  50e-6,   0,   0, 0, 0, 120, 2 },
-    { "card xrun",          48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,  40, 512, 0, 0, 120, 2 },
-    { "44.1k card",         48000, 44100, 256, 220,   40.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 0, 0, 120, 2 },
-    { "card gone 2 s",      48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 40, 2.0, 120, 2 },
-    { "16k mic",            48000, 16000, 256,  16,  200.0,  0.0,  0, 150e-6, 300e-6,  0,   0, 0, 0, 120, 1 },
+    { "hda-like +50ppm",    48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 0, 0, 0, 0, 120, 2 },
+    { "u44-like -120ppm",   48000, 48000, 128,  64, -120.0,  0.0,  0, 30e-6, 100e-6,   0,   0, 0, 0, 0, 0, 120, 4 },
+    { "headset-like +300",  48000, 48000, 256,  48,  300.0,  0.0,  0, 150e-6, 300e-6,  0,   0, 0, 0, 0, 0, 120, 2 },
+    { "small period 64",    48000, 48000,  64,  48,   80.0,  0.0,  0, 50e-6, 100e-6,   0,   0, 0, 0, 0, 0, 120, 2 },
+    { "drift step +30",     48000, 48000, 256, 256,   50.0, 30.0, 60, 20e-6,  50e-6,   0,   0, 0, 0, 0, 0, 120, 2 },
+    { "card xrun",          48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,  40, 512, 0, 0, 0, 0, 120, 2 },
+    { "44.1k card",         48000, 44100, 256, 220,   40.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 0, 0, 0, 0, 120, 2 },
+    { "card gone 2 s",      48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 40, 2.0, 0, 0, 120, 2 },
+    { "master skips 3",     48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,   0,   0,  0,   0, 40, 3, 120, 2 },
+    { "16k mic",            48000, 16000, 256,  16,  200.0,  0.0,  0, 150e-6, 300e-6,  0,   0, 0, 0, 0, 0, 120, 1 },
 };
 
 static double urand(unsigned* s)
@@ -162,7 +165,7 @@ static Result Run(const Scenario& sc, bool verbose)
     double t_origin = 0.0123;               // the card started a little after the master
     double p_origin = 0.0;
     double rate = sc.card_rate * (1.0 + ppm * 1e-6);
-    bool stepped = false, xrun_done = false, paused = false;
+    bool stepped = false, xrun_done = false, paused = false, skipped = false;
     auto t_of = [&](double p) { return t_origin + (p - p_origin) / rate; };
 
     unsigned seed = 12345;
@@ -264,7 +267,13 @@ static Result Run(const Scenario& sc, bool verbose)
             next_update_t = t_of(double(upd_pos + sc.update));
         }
 
-        // master cycle
+        // master cycle (a master xrun: it skips some, the graph does not run)
+        if (sc.skip > 0 && !skipped && next_cycle >= sc.skip_at) {
+            skipped = true;
+            next_cycle += sc.skip * cycle;
+            master_frames += sc.skip * sc.n;
+            continue;
+        }
         const double t_c = next_cycle;
         const int64_t t_ns = int64_t(t_c * 1e9);
         for (int i = 0; i < sc.n; i++) {
@@ -344,7 +353,7 @@ int main(int argc, char** argv)
                r.underruns, r.resyncs);
         // steady scenarios: tight; transients (a drift step, a card xrun): no underrun, the
         // delay stays well inside the margin, and only the card's own restarts resync
-        const bool xrun = sc.xrun_at > 0 || sc.pause_len > 0;
+        const bool xrun = sc.xrun_at > 0 || sc.pause_len > 0 || sc.skip > 0;
         if (sc.pause_len > 0) {
             printf("  lost %lld (one per direction expected)\n", r.lost);
             if (r.lost != 2 || r.resyncs > 8) {

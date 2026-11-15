@@ -51,6 +51,8 @@ struct Card
 struct Master
 {
     std::vector<Card*> cards;
+    std::vector<int> periods;   // BRIDGE_PERIODS=256,64,1024: the master's buffer size, in turn
+    double switch_seconds;      // every this long
     int n;
     double rate;
     double seconds;
@@ -60,11 +62,36 @@ struct Master
 static void* MasterThread(void* arg)
 {
     Master* m = (Master*)arg;
-    const int64_t cycle_ns = int64_t(llround(m->n * 1e9 / m->rate));
-    const int64_t t0 = Now() + 100000000;
-    const int64_t cycles = int64_t(m->seconds * m->rate / m->n);
-    for (int64_t k = 0; k < cycles; k++) {
-        const int64_t t_c = t0 + k * cycle_ns;
+    int64_t cycle_ns = int64_t(llround(m->n * 1e9 / m->rate));
+    int64_t t0 = Now() + 100000000;
+    const int64_t end = t0 + int64_t(m->seconds * 1e9);
+    size_t which = 0;
+    int64_t next_switch = m->periods.size() > 1 ? t0 + int64_t(m->switch_seconds * 1e9) : end;
+    int64_t base = 0;
+    for (int64_t k = 0; ; k++) {
+        int64_t t_c = t0 + (k - base) * cycle_ns;
+        if (t_c >= end) {
+            break;
+        }
+        if (t_c >= next_switch) {
+            // the server changes its buffer size: the master stops, the directions are told,
+            // then cycles go on at the new size
+            which = (which + 1) % m->periods.size();
+            struct timespec pause = { 0, 50000000 };
+            nanosleep(&pause, NULL);
+            m->n = m->periods[which];
+            for (size_t i = 0; i < m->cards.size(); i++) {
+                Card* c = m->cards[i];
+                if (c->cch) c->cap.SetMasterPeriod(m->n);
+                if (c->pch) c->play.SetMasterPeriod(m->n);
+            }
+            printf("master period now %d\n", m->n);
+            cycle_ns = int64_t(llround(m->n * 1e9 / m->rate));
+            t0 = Now() + 1000000;
+            base = k;
+            t_c = t0;
+            next_switch = t0 + int64_t(m->switch_seconds * 1e9);
+        }
         struct timespec ts = { time_t(t_c / 1000000000LL), long(t_c % 1000000000LL) };
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
         // as in a server cycle: every card's capture before the graph, playback after it
@@ -81,7 +108,7 @@ static void* MasterThread(void* arg)
             if (c->pch) c->play.Cycle(t_c, m->n, 1e9 / m->rate, &c->inp[0]);
             spent[i] += Now() - a;
         }
-        if (k > int64_t(2 * m->rate / m->n)) {   // after the first two seconds (allocation-free anyway)
+        if (k > int64_t(2 * m->rate / 256)) {   // after the first seconds (allocation-free anyway)
             for (size_t i = 0; i < m->cards.size(); i++) {
                 Card* c = m->cards[i];
                 c->cost_sum += spent[i];
@@ -124,14 +151,31 @@ int main(int argc, char** argv)
     const int periods = atoi(argv[4]);
     m.rate = 48000;
     m.done = false;
+    m.switch_seconds = getenv("BRIDGE_SWITCH") ? atof(getenv("BRIDGE_SWITCH")) : 10.0;
+    m.periods.push_back(m.n);
+    if (getenv("BRIDGE_PERIODS")) {
+        m.periods.clear();
+        for (char* q = getenv("BRIDGE_PERIODS"); *q; ) {
+            m.periods.push_back(atoi(q));
+            while (*q && *q != ',') q++;
+            if (*q) q++;
+        }
+        m.n = m.periods[0];
+    }
     for (int a = 5; a < argc && m.cards.size() < 16; a++) {
         Card* c = new Card();
         c->name = argv[a];
         c->cost_sum = 0;
         c->cost_max = 0;
         c->cost_n = 0;
-        // hw:NAME[@auto|@timer|@irq]: the card's wake mode
+        // hw:NAME[:period][@auto|@timer|@irq]: the card's period and wake mode
+        int period = card_period;
+        char* colon = strchr(argv[a] + 3, ':');
         char* at = strchr(argv[a], '@');
+        if (colon) {
+            period = atoi(colon + 1);
+            *colon = 0;
+        }
         int wake = kWakeAuto;
         if (at) {
             *at = 0;
@@ -142,7 +186,7 @@ int main(int argc, char** argv)
         ap.fCapture = argv[a];
         ap.fPlayback = argv[a];
         ap.fRate = 48000;
-        ap.fPeriod = card_period;
+        ap.fPeriod = period;
         ap.fPeriods = periods;
         ap.fPriority = 70;
         if (!c->alsa.Open(ap)) {
@@ -155,6 +199,7 @@ int main(int argc, char** argv)
         p.fMasterRate = 48000;
         p.fCardRate = c->alsa.Rate();
         p.fMasterPeriod = m.n;
+        p.fMaxMasterPeriod = 4096;
         p.fCardPeriod = c->alsa.Period();
         p.fCardBuffer = c->alsa.Period() * periods;
         p.fMargin = 96;
@@ -165,8 +210,8 @@ int main(int argc, char** argv)
             fprintf(stderr, "bridge init failed for %s\n", argv[a]);
             return 2;
         }
-        c->in.assign(c->pch, std::vector<float>(m.n, 0.0f));
-        c->out.assign(c->cch, std::vector<float>(m.n, 0.0f));
+        c->in.assign(c->pch, std::vector<float>(4096, 0.0f));
+        c->out.assign(c->cch, std::vector<float>(4096, 0.0f));
         c->inp.resize(c->pch + 1);
         c->outp.resize(c->cch + 1);
         for (int i = 0; i < c->pch; i++) c->inp[i] = &c->in[i][0];

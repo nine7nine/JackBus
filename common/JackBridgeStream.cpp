@@ -85,8 +85,12 @@ bool JackBridgeDirection::Init(const JackBridgeParams& params)
     if (params.fChannels <= 0 || params.fChannels > 64) {
         return false;
     }
+    if (fParams.fMaxMasterPeriod < params.fMasterPeriod) {
+        fParams.fMaxMasterPeriod = params.fMasterPeriod;
+    }
+    const int maxn = fParams.fMaxMasterPeriod;
     // the FIFO holds a few cycles of either side
-    const int fifo = 4 * (params.fMasterPeriod + params.fCardPeriod) + 4 * kChunk;
+    const int fifo = 4 * (maxn + params.fCardPeriod) + 4 * kChunk;
     if (!fFifo.Init(params.fChannels, fifo)) {
         return false;
     }
@@ -101,10 +105,24 @@ bool JackBridgeDirection::Init(const JackBridgeParams& params)
     fControl.Init(params.fMasterPeriod, params.fMasterRate, params.fMaxPpm * 1e-6);
     // input arrives in chunks until one cycle's worth is in; output is a cycle or a chunk
     const double ratio = NominalRatio();
-    const int cycle_in = int(ceil(params.fMasterPeriod * (ratio > 1.0 ? ratio : 1.0)));
+    const int cycle_in = int(ceil(maxn * (ratio > 1.0 ? ratio : 1.0)));
     const int max_in = cycle_in + 2 * kChunk;
-    const int max_out = (params.fMasterPeriod > kChunk) ? params.fMasterPeriod : kChunk;
+    const int max_out = (maxn > kChunk) ? maxn : kChunk;
     return fResampler.Init(params.fChannels, ratio, params.fQuality, max_in, max_out);
+}
+
+bool JackBridgeDirection::SetMasterPeriod(int n)
+{
+    if (n <= 0 || n > fParams.fMaxMasterPeriod) {
+        return false;
+    }
+    fParams.fMasterPeriod = n;
+    fControl.Init(n, fParams.fMasterRate, fParams.fMaxPpm * 1e-6);
+    if (fState != kBridgeIdle && fState != kBridgeLearning) {
+        fState = kBridgeStarting;   // the targets follow the cycle length: placed again
+    }
+    fPeriodChanged = true;
+    return true;
 }
 
 void JackBridgeDirection::Stop()
@@ -139,6 +157,14 @@ bool JackBridgeDirection::Stale(const JackBridgeClockState& cs, int64_t t_ns) co
         limit = 100e6;
     }
     return double(t_ns - cs.fTimeRef) > limit;
+}
+
+double JackBridgeDirection::Discontinuity(int n) const
+{
+    // the delay error beyond which it is a break: half a master cycle (64 frames at least);
+    // drift and jitter move it by a frame or two, a skipped master cycle by a whole one
+    const double half = 0.5 * n * fParams.fCardRate / fParams.fMasterRate;
+    return half > 64.0 ? half : 64.0;
 }
 
 void JackBridgeDirection::Placed()
@@ -355,6 +381,12 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
         fState = kBridgeStarting;
         fPendingLate = 0.0;
     }
+    if (fPeriodChanged) {
+        fPeriodChanged = false;
+        if (fState == kBridgeStarting) {
+            SetTarget(n);
+        }
+    }
     if (fState == kBridgeStarting && fPendingLate > 0.0) {
         // After an underrun: wait for the card to show it is running (a card period more in),
         // then its frames really came that late, and the delay covers it. If it went away
@@ -377,6 +409,14 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
 
     const double delay = p - (double(fBase) + fResampler.Center());
     const double error = delay - fTarget;
+    if (fabs(error) > Discontinuity(n)) {
+        // a break, not drift (the master skipped cycles, the card's clock was reset): steering
+        // back at the largest correction would take seconds; place again now (fades)
+        fStats.fResyncs++;
+        fState = kBridgeStarting;
+        Silence(out, fParams.fChannels, n);
+        return;
+    }
     const double corr = fControl.Update(error);
     const double ratio = (master_ns_per_frame / CardPeriod(cs)) * (1.0 + corr);
 
@@ -443,10 +483,11 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
     if (fState == kBridgeLost) {
         fState = kBridgeStarting;
     }
-    if (fState == kBridgeIdle || cs.fEpoch != fEpoch) {
-        if (fState != kBridgeIdle) {
+    if (fState == kBridgeIdle || cs.fEpoch != fEpoch || fPeriodChanged) {
+        if (fState != kBridgeIdle && !fPeriodChanged) {
             fStats.fResyncs++;
         }
+        fPeriodChanged = false;
         fEpoch = cs.fEpoch;
         fState = kBridgeStarting;
         // The card side keeps the card's buffer full, so the frames placed must reach past it:
@@ -477,6 +518,12 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
         + (double(fResampler.Pushed()) - fResampler.Center()) / r_now;
     const double delay = first - p;
     const double error = delay - fTarget;
+    if (fabs(error) > Discontinuity(n)) {
+        // a break (the master skipped cycles, the card's clock was reset): place again
+        fStats.fResyncs++;
+        fState = kBridgeStarting;
+        return;
+    }
     const double corr = fControl.Update(error);
     const double ratio = (CardPeriod(cs) / master_ns_per_frame) * (1.0 + corr);
 

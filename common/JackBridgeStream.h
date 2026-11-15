@@ -41,6 +41,7 @@ struct JackBridgeParams
     double fMasterRate;        // nominal, Hz
     double fCardRate;          // nominal, Hz
     int fMasterPeriod;         // frames per master cycle
+    int fMaxMasterPeriod;      // the largest it may become (SetMasterPeriod): sizes are for it
     int fCardPeriod;           // frames per card update (period, or URB for batch devices)
     int fCardBuffer;           // frames the card side keeps queued for playback (0: 2 periods)
     int fQuality;              // resampler quality (0, 1, 2)
@@ -53,7 +54,7 @@ struct JackBridgeParams
     double fMaxDelay;          // card frames: the delay target never grows beyond this
 
     JackBridgeParams()
-        : fChannels(2), fMasterRate(48000.0), fCardRate(48000.0), fMasterPeriod(256),
+        : fChannels(2), fMasterRate(48000.0), fCardRate(48000.0), fMasterPeriod(256), fMaxMasterPeriod(4096),
           fCardPeriod(256), fCardBuffer(0), fQuality(1), fMargin(48.0), fMaxPpm(1000.0),
           fAcquireBandwidth(1.0), fLockedBandwidth(0.05), fAcquireSeconds(4.0),
           fLearnSeconds(1.0), fMaxDelay(0.0)
@@ -92,6 +93,10 @@ class JackBridgeDirection
 
         bool Init(const JackBridgeParams& params);   // non-RT
         void Stop();                                 // graph side: back to idle
+        // The master's buffer size changed. Non-RT, while the master is stopped (the card side
+        // may go on): no allocation (Init sized everything for fMaxMasterPeriod); the delay is
+        // placed again, keeping what was learned of the card side's lateness.
+        bool SetMasterPeriod(int n);
 
         // shared with the card side
         JackBridgeFifo& Fifo() { return fFifo; }
@@ -123,10 +128,12 @@ class JackBridgeDirection
         int fState;
         int64_t fStateCycles;      // cycles in the current state
         int fFadeIn;               // frames of fade-in left (after each placement)
+        bool fPeriodChanged = false;   // SetMasterPeriod: targets to compute again
 
         // the card's clock has not moved for a while: the card side stopped
         bool Stale(const JackBridgeClockState& cs, int64_t t_ns) const;
         void Placed();             // a placement: fade in from here
+        double Discontinuity(int n) const;   // card frames of delay error that mean a break
         void FadeIn(float* const* buf, int channels, int offset, int n);
         double fTarget;            // card frames
         double fRatio;             // last target ratio

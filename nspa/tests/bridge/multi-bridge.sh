@@ -6,7 +6,8 @@
 # silence.
 #
 #   nspa/tests/bridge/multi-bridge.sh <seconds> <master period> <card period> <periods> PCH U44 Headset ...
-#   (a card as NAME@irq / NAME@timer / NAME@auto: its wake mode)
+#   (a card as NAME[:period][@irq|@timer|@auto]: its period, its wake mode;
+#    BRIDGE_PERIODS=256,64,1024 BRIDGE_SWITCH=10: the master's buffer size changes every 10 s)
 set -u
 secs=$1; n=$2; cperiod=$3; periods=$4; shift 4
 here=$(cd "$(dirname "$0")" && pwd)
@@ -26,7 +27,8 @@ work=$(mktemp -d /tmp/nspa-bridge-multi.XXXXXX)
 pids=""
 devs=""
 for arg in "$@"; do
-    card=${arg%%@*}      # NAME[@auto|@timer|@irq]
+    card=${arg%%@*}      # NAME[:period][@auto|@timer|@irq]
+    card=${card%%:*}
     idx=$(readlink "/proc/asound/$card" 2>/dev/null | sed 's/^card//')
     [ -n "$idx" ] || { echo "no card $card"; continue; }
     pw-reserve -n "Audio$idx" -a nspa-bridge-test -p 1000 -r >/dev/null 2>&1 &
