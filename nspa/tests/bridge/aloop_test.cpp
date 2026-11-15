@@ -13,6 +13,7 @@
        common/JackBridgeResampler.cpp common/JackBridgeAlsa.cpp nspa/tests/bridge/aloop_test.cpp \
        -lasound -lpthread -o /tmp/bridge_aloop
    /tmp/bridge_aloop [seconds=60] [ppm=50] [ppm2=-120] [master period=256] [card period=128]
+   env: BRIDGE_WAKE=irq|timer, BRIDGE_REOPEN_AT=<s> (the card closed and opened again then)
 */
 
 #include "JackBridgeAlsa.h"
@@ -206,9 +207,26 @@ int main(int argc, char** argv)
     ap.fPlaybackChannels = Loopback() ? 2 : 0;
     ap.fPriority = 70;
     ap.fLink = !Loopback();   // two loopback devices: linked, an xrun on one keeps restarting both
+    // BRIDGE_WAKE=irq|timer: the card thread's wakeups (default auto)
+    const char* wake = getenv("BRIDGE_WAKE");
+    ap.fWake = (wake && !strcmp(wake, "irq")) ? kWakeIrq : (wake && !strcmp(wake, "timer")) ? kWakeTimer : kWakeAuto;
+    // the names as a driver has them: its own buffers, gone once the card is open (the card
+    // must keep copies, for Reopen)
+    char* cap_name = ap.fCapture ? strdup(ap.fCapture) : NULL;
+    char* play_name = ap.fPlayback ? strdup(ap.fPlayback) : NULL;
+    ap.fCapture = cap_name;
+    ap.fPlayback = play_name;
     if (!card.Open(ap)) {
         fprintf(stderr, "cannot open the loopback card\n");
         return 2;
+    }
+    if (cap_name) {
+        memset(cap_name, 0, strlen(cap_name));
+        free(cap_name);
+    }
+    if (play_name) {
+        memset(play_name, 0, strlen(play_name));
+        free(play_name);
     }
     printf("card: %u Hz, period %d, batch %d, channels %d/%d\n", card.Rate(), card.Period(), card.Batch(),
            card.CaptureChannels(), card.PlaybackChannels());
@@ -261,9 +279,17 @@ int main(int argc, char** argv)
 
     const double expect1 = ppm, expect2 = ppm2;
     bool shifted = false;
+    // BRIDGE_REOPEN_AT=<s>: the card is closed and opened again then (as after an unplug)
+    const int reopen_at = getenv("BRIDGE_REOPEN_AT") ? atoi(getenv("BRIDGE_REOPEN_AT")) : -1;
+    int reopen_failed = 0;
     for (int s = 0; !m.done; s++) {
         struct timespec one = { 1, 0 };
         nanosleep(&one, NULL);
+        if (s + 1 == reopen_at) {
+            const bool ok = card.Reopen() > 0;
+            printf("t=%3ds reopen: %s (card state %d)\n", s + 1, ok ? "open again" : "FAILED", card.State());
+            reopen_failed += !ok;
+        }
         if (!shifted && s >= seconds / 2) {
             SetShift(ppm2);
             shifted = true;
@@ -308,5 +334,5 @@ int main(int argc, char** argv)
     printf("timer wakes %ld; underruns cap %lld play %lld, resyncs cap %lld play %lld, card xruns %ld\n", card.TimerWakes(),
            (long long)cap.Stats().fUnderruns, (long long)play.Stats().fUnderruns,
            (long long)cap.Stats().fResyncs, (long long)play.Stats().fResyncs, card.Xruns());
-    return 0;
+    return reopen_failed ? 1 : 0;
 }

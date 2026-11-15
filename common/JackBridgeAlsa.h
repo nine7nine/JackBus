@@ -76,11 +76,16 @@ class JackBridgeAlsa
         // connects the directions (either may be NULL), then starts the card and its thread
         bool Start(JackBridgeCapture* capture, JackBridgePlayback* playback);
         void Stop();     // non-RT: joins the thread, closes the card
-        // non-RT, the card lost (unplugged): open it again with what Open and Start were given
-        // and start it, if it comes back the same (rate, channels). Positions go on counting;
-        // the directions see a new epoch and place their delays again. False: not yet.
-        bool Reopen();
+        // non-RT, the card lost (unplugged) or failed: open it again with what Open and Start
+        // were given and start it, if it comes back the same (rate, channels). Positions go on
+        // counting; the directions see a new epoch and place their delays again. 1: started
+        // (State() says whether it runs), 0: the card is not there, -1: it could not be opened
+        // or started (FailReason).
+        int Reopen();
         int State() const { return fState.load(std::memory_order_acquire); }
+        // why the card failed, or why Open or Reopen did not open it ("snd_pcm_start: Broken
+        // pipe"); read after State() says kAlsaFailed, or on Open's or Reopen's thread
+        void FailReason(char* buf, size_t size) const;
         long Xruns() const { return fXruns.load(std::memory_order_relaxed); }
         long TimerWakes() const { return fTimerWakes; }   // informational, card thread's
 
@@ -93,8 +98,11 @@ class JackBridgeAlsa
         bool ReadCapture();
         bool WritePlayback(bool force);
         bool StartStreams();
+        bool Failed(const char* what, int err);   // records why (FailReason); false
 
-        JackBridgeAlsaParams fParams;
+        JackBridgeAlsaParams fParams;   // its names point at the two below
+        char fCaptureName[256];         // the PCM names, kept: what Open was given need not last
+        char fPlaybackName[256];
         snd_pcm_t* fCap;
         snd_pcm_t* fPlay;
         snd_pcm_format_t fCapFormat;
@@ -129,6 +137,9 @@ class JackBridgeAlsa
         int fLastQueued;           // playback frames queued after that fill
         long fTimerWakes;
         float* fConv;              // interleaved float scratch (one buffer)
+
+        const char* fFailWhat;     // the call that failed, and its error (negative errno)
+        int fFailErr;
 
         pthread_t fThread;
         bool fThreadRunning;

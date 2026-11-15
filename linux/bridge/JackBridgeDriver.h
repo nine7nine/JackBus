@@ -63,6 +63,14 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         int fLoggedCard;
         int64_t fLoggedResyncs;
         int64_t fLastReopen;        // us: the last try at reopening a lost card
+        int fReopenTries;           // tries since it was last back (the card there)
+        bool fReopening;            // reopened: is it running?
+        bool fReopenLogged;         // a try failed, and that was said: the next ones are quiet
+        int fReservedCard;          // the card index reserved ("Audio<n>"), -1: none
+        int fReserveFailed;         // the index a reservation was refused for (not asked again)
+
+        bool Reserve();
+        void Release();
 };
 
 } // end of namespace

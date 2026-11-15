@@ -10,10 +10,36 @@
 #include "JackError.h"
 #include "driver_interface.h"
 #include "JackDriverLoader.h"
+#include "JackServerGlobals.h"
 
 #include <alsa/asoundlib.h>
 #include <stdio.h>
 #include <string.h>
+
+// the card's ALSA id in a device name ("hw:U44,0", "plughw:CARD=U44,DEV=0" -> "U44"); false: none
+static bool CardName(const char* device, char* card, size_t size)
+{
+    const char* p = strchr(device, ':');
+    if (!p) {
+        return false;
+    }
+    snprintf(card, size, "%s", p + 1);
+    char* comma = strchr(card, ',');
+    if (comma) {
+        *comma = 0;
+    }
+    if (strncmp(card, "CARD=", 5) == 0) {
+        memmove(card, card + 5, strlen(card + 5) + 1);
+    }
+    return card[0] != 0;
+}
+
+// the card's index now (-1: not a card's device name, or the card is not there); quiet
+static int CardIndex(const char* device)
+{
+    char card[64];
+    return CardName(device, card, sizeof(card)) ? snd_card_get_index(card) : -1;
+}
 
 namespace Jack
 {
@@ -21,7 +47,8 @@ namespace Jack
 JackBridgeDriver::JackBridgeDriver(const char* name, JackLockedEngine* engine, JackSynchro* table)
     : JackAudioDriver(name, "alsa_pcm", engine, table), fHaveCap(false), fHavePlay(false),
       fReportedCapture(0), fReportedPlayback(0), fLoggedCapState(-1), fLoggedPlayState(-1), fLoggedCard(-1),
-      fLoggedResyncs(0), fLastReopen(0)
+      fLoggedResyncs(0), fLastReopen(0), fReopenTries(0), fReopening(false), fReopenLogged(false),
+      fReservedCard(-1), fReserveFailed(-1)
 {
     fDevice[0] = 0;
     memset(fIn, 0, sizeof(fIn));
@@ -29,7 +56,49 @@ JackBridgeDriver::JackBridgeDriver(const char* name, JackLockedEngine* engine, J
 }
 
 JackBridgeDriver::~JackBridgeDriver()
-{}
+{
+    fCard.Stop();
+    Release();
+}
+
+// The card's device reservation (org.freedesktop.ReserveDevice1.Audio<index>, as the master's
+// card has): the desktop's sound server leaves the card alone, and lets go of it if it has it.
+// Taken before the card is opened, kept while it is unplugged (it may come back with the same
+// index), moved if it comes back with another. Without one (no session bus) the card is opened
+// anyway: whether it can be is the open's to say.
+bool JackBridgeDriver::Reserve()
+{
+    if (JackServerGlobals::on_device_acquire == NULL) {
+        return true;
+    }
+    const int index = CardIndex(fDevice);
+    if (index < 0 || index == fReservedCard) {
+        return true;
+    }
+    if (index == fReserveFailed) {
+        return false;   // tried for this index, and said so: not again each second
+    }
+    Release();
+    char name[32];
+    snprintf(name, sizeof(name), "Audio%d", index);
+    if (!JackServerGlobals::on_device_acquire(name)) {
+        fReserveFailed = index;
+        return false;
+    }
+    fReservedCard = index;
+    fReserveFailed = -1;
+    return true;
+}
+
+void JackBridgeDriver::Release()
+{
+    if (fReservedCard >= 0 && JackServerGlobals::on_device_release != NULL) {
+        char name[32];
+        snprintf(name, sizeof(name), "Audio%d", fReservedCard);
+        JackServerGlobals::on_device_release(name);
+    }
+    fReservedCard = -1;
+}
 
 int JackBridgeDriver::OpenBridgeCard(const JackBridgeAlsaParams& requested, int quality)
 {
@@ -41,8 +110,14 @@ int JackBridgeDriver::OpenBridgeCard(const JackBridgeAlsaParams& requested, int 
     JackBridgeAlsaParams card = requested;
     card.fRate = fEngineControl->fSampleRate;     // the master's: the bridge only corrects drift
     card.fPriority = fEngineControl->fRealTime ? fEngineControl->fServerPriority - 1 : 0;
+    if (!Reserve()) {
+        jack_error("bridge %s: the card %s is not reserved: the desktop's sound server may hold it", fClientControl.fName, fDevice);
+    }
     if (!fCard.Open(card)) {
-        jack_error("bridge %s: cannot open the card %s", fClientControl.fName, fDevice);
+        char reason[160];
+        fCard.FailReason(reason, sizeof(reason));
+        jack_error("bridge %s: cannot open the card %s (%s)", fClientControl.fName, fDevice, reason);
+        Release();
         JackDriver::CloseBridge();
         return -1;
     }
@@ -158,6 +233,8 @@ void JackBridgeDriver::UpdateLatencies()
 
 int JackBridgeDriver::Close()
 {
+    fCard.Stop();
+    Release();
     return JackDriver::CloseBridge();   // never JackDriver::Close: it would count fDriverNum down
 }
 
@@ -224,26 +301,58 @@ void JackBridgeDriver::BridgeMonitor()
         fEngine->ComputeTotalLatencies();
     }
 
-    // state changes, once each: locked (with the delays), the card gone or back
+    // The card: gone, failed, back, each said once. A lost or failed card is opened again,
+    // once a second (every 5 s after ten tries that found it there but could not start it);
+    // its ports and their connections stay. Tries that fail are said once, from the third (a
+    // card just plugged in may not open at once), the next ones are quiet; after that, the
+    // card is said back once it has run for 10 s.
+    const int64_t now = GetMicroSeconds();
+    char reason[160];
     int card = fCard.State();
+    if (fReopening && card == kAlsaRunning) {
+        if (!fReopenLogged || now - fLastReopen >= 10000000) {
+            jack_info("bridge %s: the card is back", fClientControl.fName);
+            fReopening = false;
+            fReopenTries = 0;
+            fReopenLogged = false;
+        }
+        fLoggedCard = card;
+    } else if (fReopening && (card == kAlsaLost || card == kAlsaFailed)) {
+        fReopening = false;
+        if (!fReopenLogged && fReopenTries >= 3) {
+            fCard.FailReason(reason, sizeof(reason));
+            jack_error("bridge %s: the card is back but does not run (%s): trying again", fClientControl.fName,
+                       card == kAlsaLost ? "gone again" : reason);
+            fReopenLogged = true;
+        }
+        fLoggedCard = card;
+    }
     if (card != fLoggedCard) {
         if (card == kAlsaLost) {
             jack_info("bridge %s: the card is gone (its ports stay, silent, until it is back)", fClientControl.fName);
         } else if (card == kAlsaFailed) {
-            jack_error("bridge %s: the card failed", fClientControl.fName);
+            fCard.FailReason(reason, sizeof(reason));
+            jack_error("bridge %s: the card failed (%s): trying again", fClientControl.fName, reason);
         }
         fLoggedCard = card;
     }
-    // a lost or failed card: open it again once a second; the ports and their connections stay
-    if (card == kAlsaLost || card == kAlsaFailed) {
-        const int64_t now = GetMicroSeconds();
-        if (now - fLastReopen >= 1000000) {
+    if (!fReopening && (card == kAlsaLost || card == kAlsaFailed)) {
+        if (now - fLastReopen >= (fReopenTries < 10 ? 1000000 : 5000000)) {
             fLastReopen = now;
-            if (fCard.Reopen()) {
-                jack_info("bridge %s: the card is back", fClientControl.fName);
-                card = fCard.State();
-                fLoggedCard = card;
+            Reserve();      // back with another index: the reservation follows (quiet if not back)
+            const int r = fCard.Reopen();
+            if (r != 0) {
+                fReopenTries++;
             }
+            if (r > 0) {
+                fReopening = true;
+            } else if (r < 0 && !fReopenLogged && fReopenTries >= 3) {
+                fCard.FailReason(reason, sizeof(reason));
+                jack_error("bridge %s: the card is back but cannot be opened (%s): trying again", fClientControl.fName, reason);
+                fReopenLogged = true;
+            }
+            card = fCard.State();
+            fLoggedCard = card;
         }
     }
     const int cs = fHaveCap ? fCap.PublishedState() : kBridgeLocked;
@@ -268,18 +377,9 @@ void JackBridgeDriver::BridgeMonitor()
 static void CardId(const char* device, char* id, size_t size)
 {
     snprintf(id, size, "bridge");
-    const char* p = strchr(device, ':');
-    if (!p) {
-        return;
-    }
     char card[64];
-    snprintf(card, sizeof(card), "%s", p + 1);
-    char* comma = strchr(card, ',');
-    if (comma) {
-        *comma = 0;
-    }
-    if (strncmp(card, "CARD=", 5) == 0) {
-        memmove(card, card + 5, strlen(card + 5) + 1);
+    if (!CardName(device, card, sizeof(card))) {
+        return;
     }
     const int index = snd_card_get_index(card);
     if (index < 0) {

@@ -114,8 +114,11 @@ JackBridgeAlsa::JackBridgeAlsa()
     : fCap(NULL), fPlay(NULL), fCapFormat(SND_PCM_FORMAT_UNKNOWN), fPlayFormat(SND_PCM_FORMAT_UNKNOWN),
       fRate(0), fPeriod(0), fBufferSize(0), fCapChannels(0), fPlayChannels(0), fBatch(false),
       fLinked(false), fHaveCap(false), fHavePlay(false), fStartedCap(NULL), fStartedPlay(NULL), fCapRead(0), fPlayWritten(0), fPlayOffset(0), fLastRead(0), fLastFill(0), fLastQueued(0), fTimerWakes(0), fConv(NULL),
-      fThreadRunning(false), fRun(false), fState(kAlsaClosed), fXruns(0)
-{}
+      fFailWhat(NULL), fFailErr(0), fThreadRunning(false), fRun(false), fState(kAlsaClosed), fXruns(0)
+{
+    fCaptureName[0] = 0;
+    fPlaybackName[0] = 0;
+}
 
 JackBridgeAlsa::~JackBridgeAlsa()
 {
@@ -219,18 +222,41 @@ bool JackBridgeAlsa::Configure(snd_pcm_t* pcm, bool capture, int* channels, snd_
 bool JackBridgeAlsa::Open(const JackBridgeAlsaParams& params)
 {
     fParams = params;
+    // Reopen passes our own names back: copy only from elsewhere
+    if (params.fCapture && params.fCapture != fCaptureName) {
+        snprintf(fCaptureName, sizeof(fCaptureName), "%s", params.fCapture);
+    }
+    if (params.fPlayback && params.fPlayback != fPlaybackName) {
+        snprintf(fPlaybackName, sizeof(fPlaybackName), "%s", params.fPlayback);
+    }
+    fParams.fCapture = params.fCapture ? fCaptureName : NULL;
+    fParams.fPlayback = params.fPlayback ? fPlaybackName : NULL;
     fCapChannels = params.fCaptureChannels;
     fPlayChannels = params.fPlaybackChannels;
-    if (params.fCapture) {
-        if (snd_pcm_open(&fCap, params.fCapture, SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK) < 0
-            || !Configure(fCap, true, &fCapChannels, &fCapFormat)) {
+    if (fParams.fCapture) {
+        const int err = snd_pcm_open(&fCap, fParams.fCapture, SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
+        if (err < 0) {
+            fCap = NULL;
+            Failed("opening capture", err);
+            Stop();
+            return false;
+        }
+        if (!Configure(fCap, true, &fCapChannels, &fCapFormat)) {
+            Failed("configuring capture", -EINVAL);
             Stop();
             return false;
         }
     }
-    if (params.fPlayback) {
-        if (snd_pcm_open(&fPlay, params.fPlayback, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK) < 0
-            || !Configure(fPlay, false, &fPlayChannels, &fPlayFormat)) {
+    if (fParams.fPlayback) {
+        const int err = snd_pcm_open(&fPlay, fParams.fPlayback, SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
+        if (err < 0) {
+            fPlay = NULL;
+            Failed("opening playback", err);
+            Stop();
+            return false;
+        }
+        if (!Configure(fPlay, false, &fPlayChannels, &fPlayFormat)) {
+            Failed("configuring playback", -EINVAL);
             Stop();
             return false;
         }
@@ -244,8 +270,50 @@ bool JackBridgeAlsa::Open(const JackBridgeAlsaParams& params)
     return fConv != NULL;
 }
 
-bool JackBridgeAlsa::Reopen()
+// whether the card a PCM name points at is there ("hw:NAME,0", "plughw:CARD=NAME,DEV=0"):
+// snd_card_get_index is quiet; opening a missing card makes alsa-lib print an error each time
+static bool CardPresent(const char* device)
 {
+    if (!device) {
+        return true;
+    }
+    const char* p = strchr(device, ':');
+    if (!p) {
+        return true;    // not a card name ("default"...): let the open decide
+    }
+    char card[64];
+    snprintf(card, sizeof(card), "%s", p + 1);
+    char* comma = strchr(card, ',');
+    if (comma) {
+        *comma = 0;
+    }
+    if (strncmp(card, "CARD=", 5) == 0) {
+        memmove(card, card + 5, strlen(card + 5) + 1);
+    }
+    return snd_card_get_index(card) >= 0;
+}
+
+bool JackBridgeAlsa::Failed(const char* what, int err)
+{
+    fFailWhat = what;
+    fFailErr = err;
+    return false;
+}
+
+void JackBridgeAlsa::FailReason(char* buf, size_t size) const
+{
+    if (fFailWhat) {
+        snprintf(buf, size, "%s: %s", fFailWhat, snd_strerror(fFailErr));
+    } else {
+        snprintf(buf, size, "no reason given");
+    }
+}
+
+int JackBridgeAlsa::Reopen()
+{
+    if (!CardPresent(fParams.fCapture) || !CardPresent(fParams.fPlayback)) {
+        return 0;   // not back yet: nothing to try, nothing to log
+    }
     JackBridgeAlsaParams p = fParams;
     const unsigned rate = fRate;
     const int cch = fCapChannels, pch = fPlayChannels;
@@ -254,20 +322,21 @@ bool JackBridgeAlsa::Reopen()
     p.fPlaybackChannels = pch;
     if (!Open(p)) {
         fState.store(kAlsaLost, std::memory_order_release);
-        return false;
+        return -1;
     }
     if (fRate != rate || fCapChannels != cch || fPlayChannels != pch) {
-        fprintf(stderr, "bridge: the card came back different (%u Hz, %d/%d channels)\n", fRate, fCapChannels, fPlayChannels);
+        Failed("the card came back different (rate or channels)", -EINVAL);
         Stop();
         fState.store(kAlsaLost, std::memory_order_release);
-        return false;
+        return -1;
     }
     if (!Start(fStartedCap, fStartedPlay)) {
+        Failed("starting the card thread", -EAGAIN);
         Stop();
         fState.store(kAlsaLost, std::memory_order_release);
-        return false;
+        return -1;
     }
-    return true;
+    return 1;
 }
 
 bool JackBridgeAlsa::Start(JackBridgeCapture* capture, JackBridgePlayback* playback)
@@ -320,6 +389,7 @@ void JackBridgeAlsa::Stop()
         snd_pcm_close(fCap);
         fCap = NULL;
     }
+    fLinked = false;
     if (fPlay) {
         snd_pcm_close(fPlay);
         fPlay = NULL;
@@ -339,9 +409,14 @@ bool JackBridgeAlsa::StartStreams()
 {
     // Playback starts with one period of silence queued; the graph side places its frames
     // later than that (its target delay), the card side fills the positions before with silence.
+    // a new epoch: what was last read or filled says nothing about when the next period is due
+    fLastRead = 0;
+    fLastFill = 0;
+    fLastQueued = 0;
+    int err;
     if (fPlay) {
-        if (snd_pcm_prepare(fPlay) < 0) {
-            return false;
+        if ((err = snd_pcm_prepare(fPlay)) < 0) {
+            return Failed("preparing playback", err);
         }
         // nothing is queued after a prepare: the playback position is fPlayWritten, the capture
         // one fCapRead, and they start together
@@ -352,8 +427,8 @@ bool JackBridgeAlsa::StartStreams()
         while (left > 0) {
             const snd_pcm_channel_area_t* areas;
             snd_pcm_uframes_t offset, frames = left;
-            if (snd_pcm_mmap_begin(fPlay, &areas, &offset, &frames) < 0) {
-                return false;
+            if ((err = snd_pcm_mmap_begin(fPlay, &areas, &offset, &frames)) < 0) {
+                return Failed("queueing playback", err);
             }
             char* dst = (char*)areas[0].addr + offset * (areas[0].step / 8);
             FromFloat(fConv, fPlayFormat, dst, int(frames) * ch);
@@ -362,8 +437,8 @@ bool JackBridgeAlsa::StartStreams()
         }
         fPlayWritten += fPeriod;
     }
-    if (fCap && !fLinked && snd_pcm_prepare(fCap) < 0) {
-        return false;
+    if (fCap && !fLinked && (err = snd_pcm_prepare(fCap)) < 0) {
+        return Failed("preparing capture", err);
     }
     if (fHaveCap) {
         fCardCap.Start(fCapRead);
@@ -371,10 +446,13 @@ bool JackBridgeAlsa::StartStreams()
     if (fHavePlay) {
         fCardPlay.Start();
     }
-    if (fCap) {
-        return snd_pcm_start(fCap) == 0 && (fLinked || !fPlay || snd_pcm_start(fPlay) == 0);
+    if (fCap && (err = snd_pcm_start(fCap)) < 0) {
+        return Failed("starting capture", err);
     }
-    return snd_pcm_start(fPlay) == 0;
+    if (fPlay && !(fCap && fLinked) && (err = snd_pcm_start(fPlay)) < 0) {
+        return Failed("starting playback", err);
+    }
+    return true;
 }
 
 int JackBridgeAlsa::Recover(snd_pcm_t* pcm, int err, bool capture)
@@ -393,7 +471,9 @@ int JackBridgeAlsa::Recover(snd_pcm_t* pcm, int err, bool capture)
         if (fPlay && !fLinked) {
             snd_pcm_drop(fPlay);
         }
-        if (fCap && snd_pcm_prepare(fCap) < 0) {
+        int e;
+        if (fCap && (e = snd_pcm_prepare(fCap)) < 0) {
+            Failed("preparing capture after an xrun", e);
             fState.store(kAlsaFailed, std::memory_order_release);
             return -1;
         }
@@ -546,6 +626,9 @@ void JackBridgeAlsa::Run()
         const bool sync = !fBatch && fParams.fWake != kWakeIrq;
         if (!sync) {
             wait = due - now + int64_t(2 * fPeriod * ns_per_frame);
+            if (wait < margin) {
+                wait = margin;   // late (a stall, or a restart): never a negative timeout
+            }
         }
         struct timespec tw = { time_t(wait / 1000000000LL), long(wait % 1000000000LL) };
         const int r = ppoll(pfd, n, &tw, NULL);
@@ -553,6 +636,7 @@ void JackBridgeAlsa::Run()
             if (errno == EINTR) {
                 continue;
             }
+            Failed("waiting for the card", -errno);
             fState.store(kAlsaFailed, std::memory_order_release);
             return;
         }

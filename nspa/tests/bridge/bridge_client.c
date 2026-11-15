@@ -41,7 +41,9 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	int seconds = argc > 3 ? atoi(argv[3]) : 30;
-	jack_client_t *c = jack_client_open("bridgetest", JackNoStartServer, NULL);
+	char cname[64];
+	snprintf(cname, sizeof(cname), "bridgetest%s", getenv("JACK_CLIENT_NAME_SUFFIX") ? getenv("JACK_CLIENT_NAME_SUFFIX") : "");
+	jack_client_t *c = jack_client_open(cname, JackNoStartServer, NULL);
 	if (!c) { printf("no server\n"); return 1; }
 	in = jack_port_register(c, "in", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
 	out = jack_port_register(c, "out", JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0);
