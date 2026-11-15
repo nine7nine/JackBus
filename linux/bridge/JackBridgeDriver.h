@@ -36,8 +36,9 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         virtual int Write() { return 0; }
 
         // JackBridgeInterface (the master's cycle)
-        virtual void BridgePlayback(int64_t t_ns, double ns_per_frame, jack_nframes_t n);
+        virtual void BridgeTakePlayback(jack_nframes_t n);
         virtual void BridgeCapture(int64_t t_ns, double ns_per_frame, jack_nframes_t n);
+        virtual void BridgePlayback(int64_t t_ns, double ns_per_frame, jack_nframes_t n);
         virtual int BridgeBufferSize(jack_nframes_t buffer_size);
         virtual int BridgeSampleRate(jack_nframes_t sample_rate);
         virtual void BridgeStatus(struct jackctl_bridge_status* status);
@@ -60,7 +61,9 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         bool fHaveCap;
         bool fHavePlay;
         float* fIn[DRIVER_PORT_NUM];
-        float* fOut[DRIVER_PORT_NUM];
+        const float* fOut[DRIVER_PORT_NUM];     // what plays this cycle (BridgeTakePlayback)
+        float* fTaken;          // its copies: BUFFER_SIZE_MAX frames per playback channel
+        float* fSilence;        // BUFFER_SIZE_MAX zeros: a channel with nothing connected
         // the monitor's (non-RT) view: what the ports report, what was last logged
         jack_nframes_t fReportedCapture;
         jack_nframes_t fReportedPlayback;

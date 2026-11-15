@@ -94,7 +94,8 @@ JackBridgeDriver::JackBridgeDriver(const char* name, JackLockedEngine* engine, J
     : JackAudioDriver(name, "alsa_pcm", engine, table), fHaveCap(false), fHavePlay(false),
       fReportedCapture(0), fReportedPlayback(0), fLoggedCapState(-1), fLoggedPlayState(-1), fLoggedCard(-1),
       fLoggedResyncs(0), fLastReopen(0), fReopenTries(0), fReopening(false), fReopenLogged(false),
-      fReservedCard(-1), fReserveFailed(-1), fLoggedXruns(0), fLoggedUnderruns(0), fLoggedMissing(0), fXrunsLoggedAt(0), fLoggedCapMs(0.0), fLoggedPlayMs(0.0), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0)
+      fReservedCard(-1), fReserveFailed(-1), fLoggedXruns(0), fLoggedUnderruns(0), fLoggedMissing(0), fXrunsLoggedAt(0), fLoggedCapMs(0.0), fLoggedPlayMs(0.0), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0),
+      fTaken(NULL), fSilence(NULL)
 {
     fDevice[0] = 0;
     memset(fIn, 0, sizeof(fIn));
@@ -105,6 +106,8 @@ JackBridgeDriver::~JackBridgeDriver()
 {
     fCard.Stop();
     Release();
+    free(fTaken);
+    free(fSilence);
 }
 
 // The card's device reservation (org.freedesktop.ReserveDevice1.Audio<index>, as the master's
@@ -189,6 +192,31 @@ int JackBridgeDriver::OpenBridgeCard(const JackBridgeAlsaParams& requested, int 
         Release();
         JackDriver::CloseBridge();
         return -1;
+    }
+    // what plays each cycle, copied before the graph runs (BridgeTakePlayback): room for the
+    // largest buffer size, so a change of it needs nothing here; touched now, not in RT
+    if (fPlaybackChannels > 0) {
+        void* taken = NULL;
+        void* silence = NULL;
+        const size_t frames = BUFFER_SIZE_MAX;
+        if (posix_memalign(&taken, 64, size_t(fPlaybackChannels) * frames * sizeof(float)) != 0
+            || posix_memalign(&silence, 64, frames * sizeof(float)) != 0) {
+            free(taken);
+            jack_error("bridge %s: no memory for its playback", fClientControl.fName);
+            fCard.Stop();
+            Release();
+            JackDriver::CloseBridge();
+            return -1;
+        }
+        memset(taken, 0, size_t(fPlaybackChannels) * frames * sizeof(float));
+        memset(silence, 0, frames * sizeof(float));
+        free(fTaken);
+        free(fSilence);
+        fTaken = (float*)taken;
+        fSilence = (float*)silence;
+        for (int i = 0; i < fPlaybackChannels; i++) {
+            fOut[i] = fSilence;
+        }
     }
     jack_info("bridge %s: %s, %u Hz, period %d x %d, %d in / %d out%s", fClientControl.fName, fDevice, fCard.Rate(),
               fCard.Period(), fCard.Periods(), fCaptureChannels, fPlaybackChannels, fCard.Batch() ? ", batch" : "");
@@ -400,15 +428,32 @@ int JackBridgeDriver::Stop()
     return 0;
 }
 
-void JackBridgeDriver::BridgePlayback(int64_t t_ns, double ns_per_frame, jack_nframes_t n)
+void JackBridgeDriver::BridgeTakePlayback(jack_nframes_t n)
 {
-    if (!fHavePlay) {
+    if (!fHavePlay || !fTaken) {
         return;
     }
+    // The mix of what is connected, from the previous cycle. With one connection it is the
+    // other client's own buffer, which that client writes again once woken: copied now. With
+    // nothing connected it is silence (what the port's buffer would be cleared to).
     for (int i = 0; i < fPlaybackChannels; i++) {
-        fOut[i] = GetOutputBuffer(i);   // the mix of what is connected (the previous cycle's)
+        const jack_port_id_t port = fPlaybackPortList[i];
+        if (port && fGraphManager->GetConnectionsNum(port) > 0) {
+            float* taken = fTaken + size_t(i) * BUFFER_SIZE_MAX;
+            memcpy(taken, GetOutputBuffer(i), n * sizeof(float));
+            fOut[i] = taken;
+        } else {
+            fOut[i] = fSilence;
+        }
     }
-    fPlay.Cycle(t_ns, int(n), ns_per_frame, (const float* const*)fOut);
+}
+
+void JackBridgeDriver::BridgePlayback(int64_t t_ns, double ns_per_frame, jack_nframes_t n)
+{
+    if (!fHavePlay || !fTaken) {
+        return;
+    }
+    fPlay.Cycle(t_ns, int(n), ns_per_frame, fOut);     // what BridgeTakePlayback took
 }
 
 void JackBridgeDriver::BridgeCapture(int64_t t_ns, double ns_per_frame, jack_nframes_t n)

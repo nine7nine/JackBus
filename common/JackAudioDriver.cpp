@@ -43,14 +43,17 @@ JackAudioDriver::JackAudioDriver(const char* name, const char* alias, JackLocked
 
 /*
  JackBus: the sound card bridges (JackBridgeSet.h), run by the master in its own cycle.
- Playback first, right after the master's own playback: the previous cycle's buffers, as the
- master's own ports in async mode. It takes this cycle's list and timing. Capture after the
- graph has started: each bridge fills its ports and signals the clients that read them.
+ Before the graph runs, right after the master's own playback: this cycle's list and timing, and
+ each bridge takes what it plays (the previous cycle's buffers, as the master's own ports in async
+ mode). After the slaves' resume, where the freewheel driver wakes the clients (every client
+ waits for it, so none could start before): each bridge fills its capture ports and signals the
+ clients that read them, then resamples what it took for its card. The resampling runs while the
+ clients run; a client that reads no bridge does not wait for it.
  The timing is the master's frame timer (its DLL): the cycle's start, put on CLOCK_MONOTONIC_RAW
  (the bridges' cards' timestamps) by the offset measured now, whatever JACK's clock source, and
  the measured frame period.
 */
-void JackAudioDriver::RunBridgesPlayback()
+void JackAudioDriver::RunBridgesBefore()
 {
     if (!fBridges || !fIsMaster) {
         return;
@@ -84,20 +87,29 @@ void JackAudioDriver::RunBridgesPlayback()
     fBridgeTime = int64_t(current) * 1000 + offset;
     fBridgeFramePeriod = period_us * 1000.0 / double(n);
     for (int i = 0; i < fBridgeList->fCount; i++) {
-        fBridgeList->fBridges[i]->BridgePlayback(fBridgeTime, fBridgeFramePeriod, n);
+        fBridgeList->fBridges[i]->BridgeTakePlayback(n);
     }
 }
 
-void JackAudioDriver::RunBridgesCapture()
+// capture: false when the graph does not run this cycle (sync mode, the last one not finished);
+// the bridges' playback still plays what was taken
+void JackAudioDriver::RunBridgesAfter(bool capture)
 {
     if (!fBridges || !fIsMaster) {
         return;
     }
     if (fBridgeList) {
         const jack_nframes_t n = fEngineControl->fBufferSize;
-        for (int i = 0; i < fBridgeList->fCount; i++) {
-            fBridgeList->fBridges[i]->BridgeCapture(fBridgeTime, fBridgeFramePeriod, n);
+        if (capture) {
+            for (int i = 0; i < fBridgeList->fCount; i++) {
+                fBridgeList->fBridges[i]->BridgeCapture(fBridgeTime, fBridgeFramePeriod, n);
+            }
         }
+        JackTraceMark(kTraceBridgeCapture);
+        for (int i = 0; i < fBridgeList->fCount; i++) {
+            fBridgeList->fBridges[i]->BridgePlayback(fBridgeTime, fBridgeFramePeriod, n);
+        }
+        JackTraceMark(kTraceBridgePlaybackLate);
         fBridgeList = NULL;
     }
     fBridges->CycleDone();
@@ -313,7 +325,7 @@ int JackAudioDriver::ProcessAsync()
         return -1;
     }
     JackTraceMark(kTraceWrite);
-    RunBridgesPlayback();
+    RunBridgesBefore();
     JackTraceMark(kTraceBridgePlayback);
 
     // Process graph
@@ -356,13 +368,12 @@ void JackAudioDriver::ProcessGraphAsyncMaster()
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ResumeRefNum error");
     }
     JackTraceMark(kTraceResume);
-    RunBridgesCapture();
-    JackTraceMark(kTraceBridgeCapture);
 
     if (ProcessReadSlaves() < 0) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ProcessReadSlaves error");
     }
     JackTraceMark(kTraceReadSlaves);
+    RunBridgesAfter(true);
 
     if (ProcessWriteSlaves() < 0) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ProcessWriteSlaves error");
@@ -406,8 +417,8 @@ int JackAudioDriver::ProcessSync()
         trace->SnapshotPrevious();
     }
 
-    // JackBus: bridges' playback from the previous cycle's buffers, before the graph runs
-    RunBridgesPlayback();
+    // JackBus: bridges' playback from the previous cycle's buffers, taken before the graph runs
+    RunBridgesBefore();
     JackTraceMark(kTraceBridgePlayback);
 
     // Process graph
@@ -452,13 +463,14 @@ void JackAudioDriver::ProcessGraphSyncMaster()
             jack_error("JackAudioDriver::ProcessGraphSyncMaster: ResumeRefNum error");
         }
         JackTraceMark(kTraceResume);
-        RunBridgesCapture();
-        JackTraceMark(kTraceBridgeCapture);
 
         if (ProcessReadSlaves() < 0) {
             jack_error("JackAudioDriver::ProcessGraphSync: ProcessReadSlaves error, engine may now behave abnormally!!");
         }
         JackTraceMark(kTraceReadSlaves);
+        // before the slaves' write: with -S the freewheel driver waits there for the graph's
+        // end, which needs the bridges' readers to have been signalled
+        RunBridgesAfter(true);
 
         if (ProcessWriteSlaves() < 0) {
             jack_error("JackAudioDriver::ProcessGraphSync: ProcessWriteSlaves error, engine may now behave abnormally!!");
@@ -472,6 +484,7 @@ void JackAudioDriver::ProcessGraphSyncMaster()
 
     } else { // Graph not finished: do not activate it
         jack_error("JackAudioDriver::ProcessGraphSync: Process error");
+        RunBridgesAfter(false);     // the bridges' playback still plays what it took
     }
 }
 

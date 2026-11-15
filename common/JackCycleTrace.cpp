@@ -160,7 +160,7 @@ void JackCycleTrace::Write()
             (unsigned long long)count, (unsigned long long)fCycles, fClientNum);
     static const char* names[kTracePoints] = {
         "entry", "wake", "read", "write", "bridge_playback", "process", "resume",
-        "bridge_capture", "read_slaves", "write_slaves", "end"
+        "bridge_capture", "read_slaves", "write_slaves", "bridge_playback_late", "end"
     };
     fprintf(f, "points");
     for (int i = 0; i < kTracePoints; i++) {

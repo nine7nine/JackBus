@@ -43,6 +43,7 @@ enum JackCycleTracePoint {
     kTraceBridgeCapture,
     kTraceReadSlaves,       // the slaves' resume (the freewheel driver: the first wakes)
     kTraceWriteSlaves,      // -S: the wait for the graph's end
+    kTraceBridgePlaybackLate,   // the bridges' playback, when it runs after the wakes
     kTraceEnd,
     kTracePoints
 };

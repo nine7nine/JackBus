@@ -2,10 +2,13 @@
  JackBus: sound card bridges as the master driver sees them.
 
  A bridge (the "bridge" driver, linux/bridge) joins a card on its own clock to the master's graph.
- The master runs every bridge in its own cycle: each bridge's playback side right after the
- master's own playback (from the previous cycle's buffers, as the master's own ports in async
- mode), each bridge's capture side right after the graph has started (it fills its ports and
- signals the clients that read them). Neither ever waits.
+ The master runs every bridge in its own cycle. Before the graph runs, right after the master's
+ own playback, each bridge takes what it will play (the previous cycle's buffers, as the master's
+ own ports in async mode) into its own memory. After the graph has started (the freewheel
+ driver's resume, which wakes the clients), each bridge's capture side fills its ports and
+ signals the clients that read them, then each playback side resamples what it took. So the
+ bridges' resampling runs while the clients run, instead of before any of them is woken: a client
+ that reads no bridge no longer waits for it. Neither side ever waits.
 
  Bridges come and go while the server runs, so the master reads a published list: a change
  publishes a new list, and the old one is freed once the master has gone through two cycles
@@ -36,10 +39,17 @@ class SERVER_EXPORT JackBridgeInterface
 
         virtual ~JackBridgeInterface() {}
 
-        // RT, the master's thread. t_ns: the cycle's start (the master's frame timer, on
-        // CLOCK_MONOTONIC_RAW); ns_per_frame: the master's measured frame period; n: frames.
-        virtual void BridgePlayback(int64_t t_ns, double ns_per_frame, jack_nframes_t n) = 0;
+        // RT, the master's thread, before the graph runs: copies what plays this cycle (the
+        // mixes of what is connected, written by the clients in the previous cycle, which they
+        // write again once woken) into the bridge's own memory
+        virtual void BridgeTakePlayback(jack_nframes_t n) = 0;
+
+        // RT, the master's thread, after the clients were woken. t_ns: the cycle's start (the
+        // master's frame timer, on CLOCK_MONOTONIC_RAW); ns_per_frame: the master's measured
+        // frame period; n: frames. Capture fills the ports and signals their readers; playback
+        // plays what BridgeTakePlayback took.
         virtual void BridgeCapture(int64_t t_ns, double ns_per_frame, jack_nframes_t n) = 0;
+        virtual void BridgePlayback(int64_t t_ns, double ns_per_frame, jack_nframes_t n) = 0;
 
         // non-RT, the master stopped: its buffer size changed
         virtual int BridgeBufferSize(jack_nframes_t buffer_size) = 0;
