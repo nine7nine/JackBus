@@ -1,0 +1,44 @@
+#!/bin/sh
+# jackbus-pw: run a PipeWire-native application on JackBus.
+#
+# The application's libpipewire-0.3 is swapped for the JackBus shim, the way
+# pw-jack swaps libjack for PipeWire's: each pw_filter becomes a JACK client
+# that runs in the JACK process thread at the server's rate and period.
+# Without the launcher the application talks to PipeWire as usual.
+usage() {
+    cat <<EOF
+Usage: jackbus-pw [options] <program> [args...]
+  -n NAME   JACK client name (default: the application's node.name)
+  -s NAME   JACK server name (default: \$JACK_DEFAULT_SERVER, else "default")
+  -v        log what the shim does, including the settings it forced
+  -h        show this help
+EOF
+}
+
+libdir=${JACKBUS_PW_LIBDIR:-}
+if [ -z "$libdir" ]; then
+    here=$(dirname "$(readlink -f "$0")")
+    for d in "$here/../../build/pw-shim/lib" /usr/lib/jackbus-pw; do
+        if [ -e "$d/libpipewire-0.3.so.0" ]; then libdir=$(cd "$d" && pwd); break; fi
+    done
+fi
+if [ -z "$libdir" ] || [ ! -e "$libdir/libpipewire-0.3.so.0" ]; then
+    echo "jackbus-pw: the shim library was not found (set JACKBUS_PW_LIBDIR)" >&2
+    exit 1
+fi
+
+while getopts n:s:vh opt; do
+    case $opt in
+        n) JACKBUS_PW_CLIENT_NAME=$OPTARG; export JACKBUS_PW_CLIENT_NAME ;;
+        s) JACK_DEFAULT_SERVER=$OPTARG; export JACK_DEFAULT_SERVER ;;
+        v) JACKBUS_PW_VERBOSE=1; export JACKBUS_PW_VERBOSE ;;
+        h) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+shift $((OPTIND - 1))
+[ $# -gt 0 ] || { usage >&2; exit 2; }
+
+LD_LIBRARY_PATH="$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH
+exec "$@"

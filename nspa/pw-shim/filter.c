@@ -1,0 +1,801 @@
+/*
+ * jackbus-pw: pw_filter as a JACK client.
+ *
+ * One pw_filter is one JACK client; each "32 bit float mono audio" DSP
+ * port is one JACK audio port. The application's process callback runs in
+ * the JACK process thread with the server's rate and period: whatever the
+ * application asked for (node.latency, node.rate, PIPEWIRE_QUANTUM, ...)
+ * is logged and not obeyed, as WineASIO does with a Windows app's
+ * requested buffer size. The application learns the real figures the
+ * PipeWire way, from spa_io_position (clock.rate, clock.duration).
+ */
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdarg.h>
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+#include <pthread.h>
+
+#include <spa/param/audio/format-utils.h>
+#include <spa/param/latency-utils.h>
+#include <spa/pod/builder.h>
+#include <spa/utils/result.h>
+#include <spa/utils/string.h>
+
+#include "shim.h"
+
+#define PORT_DATA_OFFSET SPA_ROUND_UP_N(sizeof(struct filter_port), 16)
+
+enum notify_bits {
+	NOTIFY_START = 1 << 0,
+	NOTIFY_SHUTDOWN = 1 << 1,
+};
+
+struct filter_port {
+	struct spa_list link;
+	struct pw_filter *filter;
+	enum pw_direction direction;
+	uint32_t flags;
+	struct pw_properties *props;
+	jack_port_t *jport;
+	bool is_audio;
+
+	/* per cycle, JACK process thread only */
+	float *buf;
+	bool used;
+
+	/* the DSP buffer seen as a pw_buffer, for dequeue/queue users */
+	struct pw_buffer pwbuf;
+	struct spa_buffer sbuf;
+	struct spa_data sdata;
+	struct spa_chunk chunk;
+};
+
+struct pw_filter {
+	struct pw_core *core;
+	struct pw_context *own_context;
+	struct pw_core *own_core;
+	char *name;
+	struct pw_properties *props;
+	struct spa_hook_list listeners;
+	struct spa_hook simple_listener;
+	enum pw_filter_state state;
+	char *error;
+	enum pw_filter_flags flags;
+	uint32_t node_id;
+
+	pthread_mutex_t ports_lock;	/* main thread writes; process trylocks */
+	struct spa_list ports;
+	uint32_t n_in, n_out;
+
+	jack_client_t *client;
+	jack_nframes_t rate;
+	struct spa_source *notify;
+	atomic_uint pending;
+	atomic_bool streaming;		/* the app has seen STREAMING */
+	atomic_bool active;
+	bool warned_non_rt;
+
+	/* JACK process thread only */
+	bool in_process;
+	jack_nframes_t nframes;
+	struct spa_io_position position;
+	uint64_t pos64;
+	uint32_t last_frames;
+	bool have_frames;
+	atomic_bool freewheel;
+	atomic_uint xruns;
+
+	struct spa_process_latency_info proc_latency;
+};
+
+static uint32_t next_node_id = 1000;
+
+SHIM_EXPORT const char *pw_filter_state_as_string(enum pw_filter_state state)
+{
+	switch (state) {
+	case PW_FILTER_STATE_ERROR: return "error";
+	case PW_FILTER_STATE_UNCONNECTED: return "unconnected";
+	case PW_FILTER_STATE_CONNECTING: return "connecting";
+	case PW_FILTER_STATE_PAUSED: return "paused";
+	case PW_FILTER_STATE_STREAMING: return "streaming";
+	}
+	return "invalid-state";
+}
+
+static void set_state(struct pw_filter *f, enum pw_filter_state state, int res, const char *error)
+{
+	enum pw_filter_state old = f->state;
+
+	if (state == PW_FILTER_STATE_ERROR) {
+		free(f->error);
+		f->error = error ? strdup(error) : NULL;
+	}
+	if (old == state)
+		return;
+	f->state = state;
+	shim_log("%s: %s -> %s%s%s", f->name, pw_filter_state_as_string(old),
+			pw_filter_state_as_string(state), error ? ": " : "", error ? error : "");
+	errno = -res;
+	spa_hook_list_call(&f->listeners, struct pw_filter_events, state_changed, 0,
+			old, state, error);
+}
+
+static inline void *port_user_data(struct filter_port *p)
+{
+	return SPA_PTROFF(p, PORT_DATA_OFFSET, void);
+}
+
+static inline struct filter_port *port_from_user_data(void *data)
+{
+	return SPA_PTROFF(data, -(ptrdiff_t)PORT_DATA_OFFSET, struct filter_port);
+}
+
+/* ------------------------------------------------- the JACK process side */
+
+static int64_t monotonic_minus_raw_ns(void)
+{
+	struct timespec m, r;
+	clock_gettime(CLOCK_MONOTONIC, &m);
+	clock_gettime(CLOCK_MONOTONIC_RAW, &r);
+	return SPA_TIMESPEC_TO_NSEC(&m) - SPA_TIMESPEC_TO_NSEC(&r);
+}
+
+static void fill_position(struct pw_filter *f, jack_nframes_t nframes)
+{
+	struct spa_io_position *pos = &f->position;
+	struct spa_io_clock *clk = &pos->clock;
+	struct spa_io_segment *seg = &pos->segments[0];
+	jack_nframes_t frames;
+	jack_time_t usecs, next_usecs;
+	float period_usecs;
+	jack_position_t tp;
+	jack_transport_state_t ts;
+	int64_t off;
+
+	if (jack_get_cycle_times(f->client, &frames, &usecs, &next_usecs, &period_usecs) != 0) {
+		frames = jack_last_frame_time(f->client);
+		usecs = jack_get_time();
+		period_usecs = nframes * 1e6f / f->rate;
+		next_usecs = usecs + (jack_time_t)period_usecs;
+	}
+	/* JACK frame time is 32 bit; PipeWire's position is 64 bit */
+	if (!f->have_frames) {
+		f->pos64 = frames;
+		f->have_frames = true;
+	} else {
+		f->pos64 += (uint32_t)(frames - f->last_frames);
+	}
+	f->last_frames = frames;
+
+	/* JACK's time base is CLOCK_MONOTONIC_RAW in us; PipeWire's is
+	 * CLOCK_MONOTONIC in ns (both clock reads are vDSO, no syscall) */
+	off = monotonic_minus_raw_ns();
+
+	clk->flags = atomic_load_explicit(&f->freewheel, memory_order_relaxed) ?
+		SPA_IO_CLOCK_FLAG_FREEWHEEL : 0;
+	clk->nsec = usecs * SPA_NSEC_PER_USEC + off;
+	clk->next_nsec = next_usecs * SPA_NSEC_PER_USEC + off;
+	clk->rate = SPA_FRACTION(1, f->rate);
+	clk->position = f->pos64;
+	clk->duration = nframes;
+	clk->delay = 0;
+	clk->rate_diff = period_usecs > 0.0f ?
+		(nframes * 1e6 / f->rate) / period_usecs : 1.0;
+	clk->target_rate = clk->rate;
+	clk->target_duration = nframes;
+	clk->cycle++;
+	clk->xrun = atomic_load_explicit(&f->xruns, memory_order_relaxed);
+
+	ts = jack_transport_query(f->client, &tp);
+	pos->offset = 0;
+	pos->state = ts == JackTransportRolling ? SPA_IO_POSITION_STATE_RUNNING :
+		ts == JackTransportStarting ? SPA_IO_POSITION_STATE_STARTING :
+		SPA_IO_POSITION_STATE_STOPPED;
+	pos->n_segments = 1;
+	seg->flags = 0;
+	seg->start = f->pos64;
+	seg->duration = 0;
+	seg->rate = ts == JackTransportRolling ? 1.0 : 0.0;
+	seg->position = tp.frame;
+	spa_zero(seg->bar);
+	if (tp.valid & JackPositionBBT) {
+		seg->bar.flags = SPA_IO_SEGMENT_BAR_FLAG_VALID;
+		seg->bar.signature_num = tp.beats_per_bar;
+		seg->bar.signature_denom = tp.beat_type;
+		seg->bar.bpm = tp.beats_per_minute;
+		seg->bar.beat = (tp.bar - 1) * tp.beats_per_bar + (tp.beat - 1) +
+			(tp.ticks_per_beat > 0 ? tp.tick / tp.ticks_per_beat : 0);
+		seg->bar.bar_start_tick = tp.bar_start_tick;
+		seg->bar.ticks_per_beat = tp.ticks_per_beat;
+	}
+}
+
+static int on_jack_process(jack_nframes_t nframes, void *arg)
+{
+	struct pw_filter *f = arg;
+	struct filter_port *p;
+	bool run;
+
+	/* a port being added or removed this instant: one silent cycle */
+	if (pthread_mutex_trylock(&f->ports_lock) != 0)
+		return 0;
+
+	f->nframes = nframes;
+	spa_list_for_each(p, &f->ports, link) {
+		p->buf = p->jport ? jack_port_get_buffer(p->jport, nframes) : NULL;
+		p->used = false;
+	}
+
+	run = atomic_load_explicit(&f->streaming, memory_order_acquire) &&
+		atomic_load_explicit(&f->active, memory_order_relaxed);
+	if (run) {
+		fill_position(f, nframes);
+		f->in_process = true;
+		/* as in PipeWire, only the first listener with process gets it */
+		spa_hook_list_call_once(&f->listeners, struct pw_filter_events, process, 0,
+				&f->position);
+		f->in_process = false;
+	}
+
+	/* an output the app didn't ask for this cycle is silent, as in PipeWire
+	 * (a JACK output buffer still holds the previous cycle) */
+	spa_list_for_each(p, &f->ports, link) {
+		if (p->direction == PW_DIRECTION_OUTPUT && p->buf && !p->used)
+			memset(p->buf, 0, nframes * sizeof(float));
+		p->buf = NULL;
+	}
+	pthread_mutex_unlock(&f->ports_lock);
+	return 0;
+}
+
+static jack_nframes_t proc_latency_frames(struct pw_filter *f)
+{
+	struct spa_process_latency_info *l = &f->proc_latency;
+	jack_nframes_t q = jack_get_buffer_size(f->client);
+	return (jack_nframes_t)(l->quantum * q) + l->rate +
+		(jack_nframes_t)(l->ns * (int64_t)f->rate / SPA_NSEC_PER_SEC);
+}
+
+/* the app's ProcessLatency becomes part of the JACK latency ranges */
+static void on_jack_latency(jack_latency_callback_mode_t mode, void *arg)
+{
+	struct pw_filter *f = arg;
+	struct filter_port *p;
+	jack_latency_range_t range, max = { 0, 0 };
+	enum pw_direction from = mode == JackCaptureLatency ? PW_DIRECTION_INPUT : PW_DIRECTION_OUTPUT;
+	jack_nframes_t extra = proc_latency_frames(f);
+
+	pthread_mutex_lock(&f->ports_lock);
+	spa_list_for_each(p, &f->ports, link) {
+		if (p->direction != from || !p->jport)
+			continue;
+		jack_port_get_latency_range(p->jport, mode, &range);
+		max.min = SPA_MAX(max.min, range.min);
+		max.max = SPA_MAX(max.max, range.max);
+	}
+	max.min += extra;
+	max.max += extra;
+	spa_list_for_each(p, &f->ports, link) {
+		if (p->direction == from || !p->jport)
+			continue;
+		jack_port_set_latency_range(p->jport, mode, &max);
+	}
+	pthread_mutex_unlock(&f->ports_lock);
+}
+
+static int on_jack_xrun(void *arg)
+{
+	struct pw_filter *f = arg;
+	atomic_fetch_add_explicit(&f->xruns, 1, memory_order_relaxed);
+	return 0;
+}
+
+static void on_jack_freewheel(int starting, void *arg)
+{
+	struct pw_filter *f = arg;
+	atomic_store_explicit(&f->freewheel, starting != 0, memory_order_relaxed);
+}
+
+static void on_jack_shutdown(jack_status_t code, const char *reason, void *arg)
+{
+	struct pw_filter *f = arg;
+	atomic_store(&f->streaming, false);
+	atomic_fetch_or(&f->pending, NOTIFY_SHUTDOWN);
+	pw_loop_signal_event(f->core->context->main_loop, f->notify);
+}
+
+/* ------------------------------------------------ main-loop notifications */
+
+static void emit_format(struct pw_filter *f, struct filter_port *p)
+{
+	uint8_t buffer[512];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	struct spa_pod *fmt = spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_Format, SPA_PARAM_Format,
+			SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+			SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
+			SPA_FORMAT_AUDIO_format, SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32));
+	spa_hook_list_call(&f->listeners, struct pw_filter_events, param_changed, 0,
+			port_user_data(p), SPA_PARAM_Format, fmt);
+}
+
+static void on_notify(void *data, uint64_t count)
+{
+	struct pw_filter *f = data;
+	unsigned bits = atomic_exchange(&f->pending, 0);
+	struct filter_port *p;
+
+	/* PipeWire's order: PAUSED once bound, the clock and position areas,
+	 * each port's Format, then STREAMING on the Start command */
+	if (bits & NOTIFY_START && f->state == PW_FILTER_STATE_CONNECTING) {
+		set_state(f, PW_FILTER_STATE_PAUSED, 0, NULL);
+		spa_hook_list_call(&f->listeners, struct pw_filter_events, io_changed, 0,
+				NULL, SPA_IO_Clock, &f->position.clock, sizeof(f->position.clock));
+		spa_hook_list_call(&f->listeners, struct pw_filter_events, io_changed, 0,
+				NULL, SPA_IO_Position, &f->position, sizeof(f->position));
+		spa_list_for_each(p, &f->ports, link)
+			if (p->is_audio)
+				emit_format(f, p);
+		if (!(f->flags & PW_FILTER_FLAG_INACTIVE)) {
+			atomic_store(&f->active, true);
+			set_state(f, PW_FILTER_STATE_STREAMING, 0, NULL);
+		}
+		atomic_store_explicit(&f->streaming, true, memory_order_release);
+	}
+	if (bits & NOTIFY_SHUTDOWN)
+		set_state(f, PW_FILTER_STATE_ERROR, -EPIPE, "the JACK server went away");
+}
+
+/* ------------------------------------------------------------------ API */
+
+static void apply_env(struct pw_properties *props)
+{
+	const char *str;
+	struct spa_fraction q;
+
+	if ((str = getenv("PIPEWIRE_PROPS")) != NULL)
+		pw_properties_update_string(props, str, strlen(str));
+	if ((str = getenv("PIPEWIRE_QUANTUM")) != NULL &&
+	    sscanf(str, "%u/%u", &q.num, &q.denom) == 2 && q.denom != 0) {
+		pw_properties_setf(props, PW_KEY_NODE_FORCE_RATE, "%u", q.denom);
+		pw_properties_setf(props, PW_KEY_NODE_FORCE_QUANTUM, "%u", q.num);
+	}
+	if ((str = getenv("PIPEWIRE_LATENCY")) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_LATENCY, str);
+	if ((str = getenv("PIPEWIRE_RATE")) != NULL)
+		pw_properties_set(props, PW_KEY_NODE_RATE, str);
+}
+
+SHIM_EXPORT struct pw_filter *pw_filter_new(struct pw_core *core, const char *name,
+		struct pw_properties *props)
+{
+	struct pw_filter *f = calloc(1, sizeof(*f));
+
+	if (f == NULL) {
+		pw_properties_free(props);
+		return NULL;
+	}
+	f->core = core;
+	f->name = strdup(name ? name : "pw-filter");
+	f->props = props ? props : pw_properties_new(NULL, NULL);
+	if (pw_properties_get(f->props, PW_KEY_NODE_NAME) == NULL)
+		pw_properties_set(f->props, PW_KEY_NODE_NAME, f->name);
+	apply_env(f->props);
+	spa_hook_list_init(&f->listeners);
+	spa_list_init(&f->ports);
+	pthread_mutex_init(&f->ports_lock, NULL);
+	f->node_id = next_node_id++;
+	f->notify = pw_loop_add_event(core->context->main_loop, on_notify, f);
+	return f;
+}
+
+SHIM_EXPORT struct pw_filter *pw_filter_new_simple(struct pw_loop *loop, const char *name,
+		struct pw_properties *props, const struct pw_filter_events *events, void *data)
+{
+	struct pw_context *context;
+	struct pw_core *core;
+	struct pw_filter *f;
+
+	if ((context = pw_context_new(loop, NULL, 0)) == NULL)
+		goto error;
+	if ((core = pw_context_connect(context, NULL, 0)) == NULL) {
+		pw_context_destroy(context);
+		goto error;
+	}
+	if ((f = pw_filter_new(core, name, props)) == NULL) {
+		pw_core_disconnect(core);
+		pw_context_destroy(context);
+		return NULL;
+	}
+	f->own_context = context;
+	f->own_core = core;
+	pw_filter_add_listener(f, &f->simple_listener, events, data);
+	return f;
+error:
+	pw_properties_free(props);
+	return NULL;
+}
+
+SHIM_EXPORT void pw_filter_add_listener(struct pw_filter *f, struct spa_hook *listener,
+		const struct pw_filter_events *events, void *data)
+{
+	spa_hook_list_append(&f->listeners, listener, events, data);
+}
+
+SHIM_EXPORT enum pw_filter_state pw_filter_get_state(struct pw_filter *f, const char **error)
+{
+	if (error)
+		*error = f->error;
+	return f->state;
+}
+
+SHIM_EXPORT const char *pw_filter_get_name(struct pw_filter *f) { return f->name; }
+SHIM_EXPORT struct pw_core *pw_filter_get_core(struct pw_filter *f) { return f->core; }
+SHIM_EXPORT uint32_t pw_filter_get_node_id(struct pw_filter *f) { return f->node_id; }
+
+static int register_jack_port(struct pw_filter *f, struct filter_port *p)
+{
+	const char *name = pw_properties_get(p->props, PW_KEY_PORT_NAME);
+	bool out = p->direction == PW_DIRECTION_OUTPUT;
+	char buf[256];
+
+	if (name == NULL) {
+		snprintf(buf, sizeof(buf), "%s_%u", out ? "output" : "input",
+				out ? f->n_out : f->n_in);
+		name = buf;
+	}
+	p->jport = jack_port_register(f->client, name, JACK_DEFAULT_AUDIO_TYPE,
+			out ? JackPortIsOutput : JackPortIsInput, 0);
+	for (int i = 2; p->jport == NULL && i < 100; i++) {
+		char unique[300];
+		snprintf(unique, sizeof(unique), "%s-%d", name, i);
+		p->jport = jack_port_register(f->client, unique, JACK_DEFAULT_AUDIO_TYPE,
+				out ? JackPortIsOutput : JackPortIsInput, 0);
+	}
+	if (p->jport == NULL)
+		return -EIO;
+	shim_log("%s: port %s", f->name, jack_port_name(p->jport));
+	return 0;
+}
+
+SHIM_EXPORT void *pw_filter_add_port(struct pw_filter *f, enum pw_direction direction,
+		enum pw_filter_port_flags flags, size_t port_data_size,
+		struct pw_properties *props, const struct spa_pod **params, uint32_t n_params)
+{
+	struct filter_port *p;
+	const char *dsp;
+
+	(void)params; (void)n_params;
+	if (props == NULL)
+		props = pw_properties_new(NULL, NULL);
+	dsp = pw_properties_get(props, PW_KEY_FORMAT_DSP);
+	if (dsp == NULL || !spa_streq(dsp, "32 bit float mono audio")) {
+		/* MIDI/UMP and video DSP ports: not in this spike */
+		shim_warn("%s: port format \"%s\" is not supported", f->name, dsp ? dsp : "(none)");
+		pw_properties_free(props);
+		errno = ENOTSUP;
+		return NULL;
+	}
+	if ((p = calloc(1, PORT_DATA_OFFSET + port_data_size)) == NULL) {
+		pw_properties_free(props);
+		return NULL;
+	}
+	p->filter = f;
+	p->direction = direction;
+	p->flags = flags;
+	p->props = props;
+	p->is_audio = true;
+	p->sbuf.n_datas = 1;
+	p->sbuf.datas = &p->sdata;
+	p->sdata.type = SPA_DATA_MemPtr;
+	p->sdata.chunk = &p->chunk;
+	p->pwbuf.buffer = &p->sbuf;
+
+	pthread_mutex_lock(&f->ports_lock);
+	if (f->client && register_jack_port(f, p) < 0) {
+		pthread_mutex_unlock(&f->ports_lock);
+		pw_properties_free(props);
+		free(p);
+		errno = EIO;
+		return NULL;
+	}
+	if (direction == PW_DIRECTION_OUTPUT)
+		f->n_out++;
+	else
+		f->n_in++;
+	spa_list_append(&f->ports, &p->link);
+	pthread_mutex_unlock(&f->ports_lock);
+	return port_user_data(p);
+}
+
+static void free_port(struct pw_filter *f, struct filter_port *p)
+{
+	if (p->jport && f->client)
+		jack_port_unregister(f->client, p->jport);
+	pw_properties_free(p->props);
+	free(p);
+}
+
+SHIM_EXPORT int pw_filter_remove_port(void *port_data)
+{
+	struct filter_port *p = port_from_user_data(port_data);
+	struct pw_filter *f = p->filter;
+
+	pthread_mutex_lock(&f->ports_lock);
+	spa_list_remove(&p->link);
+	pthread_mutex_unlock(&f->ports_lock);
+	free_port(f, p);
+	return 0;
+}
+
+static void parse_node_params(struct pw_filter *f, const struct spa_pod **params, uint32_t n_params)
+{
+	for (uint32_t i = 0; i < n_params; i++) {
+		struct spa_process_latency_info info;
+		if (params[i] == NULL || !spa_pod_is_object_id(params[i], SPA_PARAM_ProcessLatency))
+			continue;
+		if (spa_process_latency_parse(params[i], &info) >= 0) {
+			f->proc_latency = info;
+			shim_log("%s: process latency %.2f quanta + %d samples + %" PRIi64 " ns",
+					f->name, info.quantum, info.rate, info.ns);
+		}
+	}
+}
+
+static void log_forced_settings(struct pw_filter *f)
+{
+	static const char * const keys[] = {
+		PW_KEY_NODE_LATENCY, PW_KEY_NODE_RATE, PW_KEY_NODE_FORCE_QUANTUM,
+		PW_KEY_NODE_FORCE_RATE, PW_KEY_NODE_LOCK_QUANTUM, PW_KEY_NODE_LOCK_RATE,
+		PW_KEY_NODE_MAX_LATENCY, NULL,
+	};
+	char asked[512] = "";
+	size_t len = 0;
+
+	for (int i = 0; keys[i]; i++) {
+		const char *v = pw_properties_get(f->props, keys[i]);
+		if (v && len < sizeof(asked))
+			len += snprintf(asked + len, sizeof(asked) - len, " %s=%s", keys[i], v);
+	}
+	shim_log("%s: asked for:%s", f->name, len ? asked : " nothing");
+	shim_log("%s: forced to JackBus: rate %u Hz, quantum %u frames, f32 planar%s",
+			f->name, f->rate, jack_get_buffer_size(f->client),
+			f->flags & PW_FILTER_FLAG_RT_PROCESS ? "" : " (process still runs in the JACK thread)");
+}
+
+static const char *jack_client_name(struct pw_filter *f)
+{
+	const char *n;
+	if ((n = getenv("JACKBUS_PW_CLIENT_NAME")) != NULL && n[0])
+		return n;
+	if ((n = pw_properties_get(f->props, PW_KEY_NODE_NAME)) != NULL && n[0])
+		return n;
+	return f->name;
+}
+
+SHIM_EXPORT int pw_filter_connect(struct pw_filter *f, enum pw_filter_flags flags,
+		const struct spa_pod **params, uint32_t n_params)
+{
+	jack_status_t status;
+	struct filter_port *p;
+
+	if (f->client != NULL)
+		return -EBUSY;
+	f->flags = flags;
+	parse_node_params(f, params, n_params);
+	set_state(f, PW_FILTER_STATE_CONNECTING, 0, NULL);
+
+	f->client = jack_client_open(jack_client_name(f), JackNoStartServer, &status);
+	if (f->client == NULL) {
+		set_state(f, PW_FILTER_STATE_ERROR, -EIO, "can't connect to the JACK server");
+		return -EIO;
+	}
+	f->rate = jack_get_sample_rate(f->client);
+	/* valid before the first cycle, for apps that read it at io_changed */
+	f->position.clock.rate = SPA_FRACTION(1, f->rate);
+	f->position.clock.duration = jack_get_buffer_size(f->client);
+	f->position.clock.target_rate = f->position.clock.rate;
+	f->position.clock.target_duration = f->position.clock.duration;
+	snprintf(f->position.clock.name, sizeof(f->position.clock.name), "jackbus");
+	if ((flags & PW_FILTER_FLAG_DRIVER) || (flags & PW_FILTER_FLAG_TRIGGER))
+		shim_log("%s: driver/trigger flags ignored: JackBus drives the graph", f->name);
+	if (!(flags & PW_FILTER_FLAG_RT_PROCESS) && !f->warned_non_rt) {
+		shim_log("%s: no RT_PROCESS flag: process still runs in the JACK thread", f->name);
+		f->warned_non_rt = true;
+	}
+
+	pthread_mutex_lock(&f->ports_lock);
+	spa_list_for_each(p, &f->ports, link) {
+		if (register_jack_port(f, p) < 0) {
+			pthread_mutex_unlock(&f->ports_lock);
+			jack_client_close(f->client);
+			f->client = NULL;
+			set_state(f, PW_FILTER_STATE_ERROR, -EIO, "can't register a JACK port");
+			return -EIO;
+		}
+	}
+	pthread_mutex_unlock(&f->ports_lock);
+
+	jack_set_process_callback(f->client, on_jack_process, f);
+	jack_set_latency_callback(f->client, on_jack_latency, f);
+	jack_set_xrun_callback(f->client, on_jack_xrun, f);
+	jack_set_freewheel_callback(f->client, on_jack_freewheel, f);
+	jack_on_info_shutdown(f->client, on_jack_shutdown, f);
+
+	log_forced_settings(f);
+	if (jack_activate(f->client) != 0) {
+		jack_client_close(f->client);
+		f->client = NULL;
+		set_state(f, PW_FILTER_STATE_ERROR, -EIO, "can't activate the JACK client");
+		return -EIO;
+	}
+	atomic_fetch_or(&f->pending, NOTIFY_START);
+	pw_loop_signal_event(f->core->context->main_loop, f->notify);
+	return 0;
+}
+
+SHIM_EXPORT int pw_filter_disconnect(struct pw_filter *f)
+{
+	struct filter_port *p;
+
+	if (f->client == NULL)
+		return 0;
+	atomic_store(&f->streaming, false);
+	jack_deactivate(f->client);
+	pthread_mutex_lock(&f->ports_lock);
+	spa_list_for_each(p, &f->ports, link)
+		p->jport = NULL;	/* closing the client unregisters them */
+	pthread_mutex_unlock(&f->ports_lock);
+	jack_client_close(f->client);
+	f->client = NULL;
+	set_state(f, PW_FILTER_STATE_UNCONNECTED, 0, NULL);
+	return 0;
+}
+
+SHIM_EXPORT void pw_filter_destroy(struct pw_filter *f)
+{
+	struct filter_port *p, *t;
+
+	if (f == NULL)
+		return;
+	pw_filter_disconnect(f);
+	spa_hook_list_call(&f->listeners, struct pw_filter_events, destroy, 0);
+	spa_list_for_each_safe(p, t, &f->ports, link) {
+		spa_list_remove(&p->link);
+		free_port(f, p);
+	}
+	pw_loop_destroy_source(f->core->context->main_loop, f->notify);
+	spa_hook_list_clean(&f->listeners);
+	if (f->own_core)
+		pw_core_disconnect(f->own_core);
+	if (f->own_context)
+		pw_context_destroy(f->own_context);
+	pthread_mutex_destroy(&f->ports_lock);
+	pw_properties_free(f->props);
+	free(f->error);
+	free(f->name);
+	free(f);
+}
+
+SHIM_EXPORT const struct pw_properties *pw_filter_get_properties(struct pw_filter *f, void *port_data)
+{
+	return port_data ? port_from_user_data(port_data)->props : f->props;
+}
+
+SHIM_EXPORT int pw_filter_update_properties(struct pw_filter *f, void *port_data,
+		const struct spa_dict *dict)
+{
+	struct pw_properties *props = port_data ? port_from_user_data(port_data)->props : f->props;
+	return pw_properties_update(props, dict);
+}
+
+SHIM_EXPORT int pw_filter_set_error(struct pw_filter *f, int res, const char *error, ...)
+{
+	char *msg = NULL;
+	va_list ap;
+	va_start(ap, error);
+	if (vasprintf(&msg, error, ap) < 0)
+		msg = NULL;
+	va_end(ap);
+	set_state(f, PW_FILTER_STATE_ERROR, res, msg);
+	free(msg);
+	return res;
+}
+
+SHIM_EXPORT int pw_filter_update_params(struct pw_filter *f, void *port_data,
+		const struct spa_pod **params, uint32_t n_params)
+{
+	if (port_data == NULL) {
+		parse_node_params(f, params, n_params);
+		if (f->client)
+			jack_recompute_total_latencies(f->client);
+	}
+	return 0;
+}
+
+SHIM_EXPORT int pw_filter_set_active(struct pw_filter *f, bool active)
+{
+	atomic_store(&f->active, active);
+	if (f->state == PW_FILTER_STATE_PAUSED || f->state == PW_FILTER_STATE_STREAMING)
+		set_state(f, active ? PW_FILTER_STATE_STREAMING : PW_FILTER_STATE_PAUSED, 0, NULL);
+	return 0;
+}
+
+SHIM_EXPORT int pw_filter_get_time(struct pw_filter *f, struct pw_time *time)
+{
+	memset(time, 0, sizeof(*time));
+	time->now = f->position.clock.nsec;
+	time->rate = f->position.clock.rate;
+	time->ticks = f->position.clock.position;
+	return 0;
+}
+
+SHIM_EXPORT uint64_t pw_filter_get_nsec(struct pw_filter *f)
+{
+	struct timespec ts;
+	(void)f;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return SPA_TIMESPEC_TO_NSEC(&ts);
+}
+
+SHIM_EXPORT struct pw_loop *pw_filter_get_data_loop(struct pw_filter *f)
+{
+	/* not emulated in the spike: invoke on it runs on the main loop */
+	shim_log("%s: pw_filter_get_data_loop returns the main loop", f->name);
+	return f->core->context->main_loop;
+}
+
+SHIM_EXPORT struct pw_buffer *pw_filter_dequeue_buffer(void *port_data)
+{
+	struct filter_port *p = port_from_user_data(port_data);
+	struct pw_filter *f = p->filter;
+
+	if (!f->in_process || p->buf == NULL)
+		return NULL;
+	p->used = true;
+	p->sdata.data = p->buf;
+	p->sdata.maxsize = f->nframes * sizeof(float);
+	p->chunk.offset = 0;
+	p->chunk.size = f->nframes * sizeof(float);
+	p->chunk.stride = sizeof(float);
+	p->pwbuf.size = f->nframes;
+	return &p->pwbuf;
+}
+
+SHIM_EXPORT int pw_filter_queue_buffer(void *port_data, struct pw_buffer *buffer)
+{
+	(void)port_data; (void)buffer;
+	return 0;
+}
+
+SHIM_EXPORT void *pw_filter_get_dsp_buffer(void *port_data, uint32_t n_samples)
+{
+	struct filter_port *p = port_from_user_data(port_data);
+	struct pw_filter *f = p->filter;
+
+	if (!f->in_process || p->buf == NULL || n_samples > f->nframes)
+		return NULL;
+	p->used = true;
+	return p->buf;
+}
+
+SHIM_EXPORT int pw_filter_flush(struct pw_filter *f, bool drain)
+{
+	(void)drain;
+	if (drain)
+		spa_hook_list_call(&f->listeners, struct pw_filter_events, drained, 0);
+	return 0;
+}
+
+SHIM_EXPORT bool pw_filter_is_driving(struct pw_filter *f) { (void)f; return false; }
+SHIM_EXPORT bool pw_filter_is_lazy(struct pw_filter *f) { (void)f; return false; }
+SHIM_EXPORT int pw_filter_trigger_process(struct pw_filter *f) { (void)f; return -ENOTSUP; }
+SHIM_EXPORT int pw_filter_emit_event(struct pw_filter *f, const struct spa_event *event)
+{
+	(void)f; (void)event;
+	return 0;
+}
