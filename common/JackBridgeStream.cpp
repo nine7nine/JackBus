@@ -134,7 +134,72 @@ void JackBridgeDirection::Stop()
 
 double JackBridgeDirection::Latency() const
 {
-    return fTarget * fParams.fMasterRate / fParams.fCardRate;
+    // where the delay is going (once tuned it moves there slowly: the ports say it once)
+    return (fGoal > 0.0 ? fGoal : fTarget) * fParams.fMasterRate / fParams.fCardRate;
+}
+
+void JackBridgeDirection::NoteCardWorst(double frames)
+{
+    double cur = fCardWorst.load(std::memory_order_relaxed);
+    while (frames > cur && !fCardWorst.compare_exchange_weak(cur, frames, std::memory_order_relaxed)) {
+    }
+}
+
+/*
+ Measured, not guessed. The delay first placed is a learned guess (capture: the lateness seen
+ while learning) plus a fixed margin: safe, and longer than most cards need. Once locked, the
+ card side reports the worst case it meets at each read or fill: the peak of the lateness, which
+ the master's cycles only sample, at a phase that drifts slowly (minutes), while the card side
+ sees every peak. The target follows that:
+ - after kTuneSeconds locked, down to the worst case seen plus a safety, slowly (kSlewPpm: a
+   ratio change far too small to hear, a frame a second; the loop follows a few frames behind,
+   on the safe side, without a jump);
+ - up whenever a worse case eats into the safety: by the same slow move if it is a quarter of
+   the safety or less, by placing again (a short fade) if more, since a slow move would come
+   too late.
+ Underruns still place again with more (Cycle). The safety covers what the measurement cannot
+ see coming: the master's own wakeup jitter and the rarer late wakeups of either side.
+*/
+static const double kTuneSeconds = 20.0;
+static const double kSafetySeconds = 0.00075;
+static const double kSlewPpm = 20.0;
+
+bool JackBridgeDirection::Tune(double cover, int n)
+{
+    const double w = fCardWorst.exchange(-1.0, std::memory_order_relaxed);
+    if (fState != kBridgeLocked) {
+        return false;   // what the card side meets while placing and locking is not its normal
+    }
+    if (w > fWorst) {
+        fWorst = w;
+    }
+    if (fWorst < 0.0) {
+        return false;
+    }
+    const double safety = kSafetySeconds * fParams.fCardRate;
+    double required = cover + fWorst + safety;
+    if (fLimit > 0.0 && required > fLimit) {
+        required = fLimit;
+    }
+    double goal = (fGoal > 0.0) ? fGoal : fTarget;
+    const bool measured = double(fStateCycles) * n >= (fParams.fAcquireSeconds + kTuneSeconds) * fParams.fMasterRate;
+    if (required > goal - 0.25 * safety) {
+        goal = required;    // eating into the safety: up
+    } else if (measured && required < goal - 2.0) {
+        goal = required;    // measured long enough: down
+    }
+    fGoal = goal;
+    if (goal > fTarget + 0.25 * safety) {
+        fTarget = goal;     // too far to move slowly: place again
+        return true;
+    }
+    const double step = n * (fParams.fCardRate / fParams.fMasterRate) * kSlewPpm * 1e-6;
+    if (goal < fTarget) {
+        fTarget = (fTarget - step > goal) ? fTarget - step : goal;
+    } else if (goal > fTarget) {
+        fTarget = (fTarget + step < goal) ? fTarget + step : goal;
+    }
+    return false;
 }
 
 void JackBridgeDirection::PublishStats()
@@ -262,7 +327,7 @@ void JackBridgeCapture::SetTarget(int n)
     // lateness, at least the configured margin. Bounded: by default, four card periods and
     // two master cycles more than the minimum.
     const double r = fParams.fCardRate / fParams.fMasterRate;
-    const double base = (n - 1) * r + fResampler.HalfLength() + 1;
+    const double base = Base(n);
     double late = fLate > fParams.fCardPeriod ? fLate : fParams.fCardPeriod;
     double margin = late * 0.25;
     if (margin < fParams.fMargin) {
@@ -274,6 +339,14 @@ void JackBridgeCapture::SetTarget(int n)
     if (fTarget > limit) {
         fTarget = limit;
     }
+    fLimit = limit;
+    fGoal = 0.0;    // tuned again from here (Tune), with what was measured so far
+}
+
+double JackBridgeCapture::Base(int n) const
+{
+    // this cycle's input (the last of n output frames at the ratio), the filter's look-ahead
+    return (n - 1) * (fParams.fCardRate / fParams.fMasterRate) + fResampler.HalfLength() + 1;
 }
 
 bool JackBridgeCapture::Place(const JackBridgeClockState& cs, double p, uint32_t epoch, int64_t index, int64_t pos)
@@ -464,6 +537,12 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
     fStats.fRatio = ratio;
     fStats.fCorrection = corr;
     fStats.fBandwidth = fControl.Bandwidth();
+    if (Tune(Base(n), n)) {
+        fStats.fResyncs++;
+        fState = kBridgeStarting;   // the next cycle places the delay again, longer
+        fStats.fState = fState;
+        return;
+    }
     Schedule();
 }
 
@@ -509,9 +588,10 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
         // The card side keeps the card's buffer full, so the frames placed must reach past it:
         // the buffer, the filter's look-ahead (a cycle's last frames are made the next cycle)
         // and the margin (the card side's wakeup jitter)
-        const double r = fParams.fMasterRate / fParams.fCardRate;
         const int buffer = fParams.fCardBuffer > 0 ? fParams.fCardBuffer : 2 * fParams.fCardPeriod;
-        fTarget = buffer + fResampler.HalfLength() / r + fParams.fMargin;
+        fTarget = Cover() + buffer + fParams.fMargin;
+        fLimit = fTarget + 2.0 * buffer;
+        fGoal = 0.0;    // tuned again from here (Tune), with what was measured so far
     }
 
     const double p = cs.Predict(t_ns);
@@ -583,7 +663,19 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
     fStats.fRatio = ratio;
     fStats.fCorrection = corr;
     fStats.fBandwidth = fControl.Bandwidth();
+    if (Tune(Cover(), n)) {
+        fStats.fResyncs++;
+        fState = kBridgeStarting;   // the next cycle places the delay again, longer
+        fStats.fState = fState;
+        return;
+    }
     Schedule();
+}
+
+double JackBridgePlayback::Cover() const
+{
+    // a cycle's last frames are made the next cycle: the filter's look-ahead, in card frames
+    return fResampler.HalfLength() * fParams.fCardRate / fParams.fMasterRate;
 }
 
 //-----------------------
@@ -596,6 +688,14 @@ void JackBridgeCardCapture::Start(int64_t next)
     fNext = next;
     fDir->Anchor().Set(fEpoch, fDir->Fifo().Written(), next);
     fDir->Clock().Start(fRate, fPpm, fEpoch);
+}
+
+void JackBridgeCardCapture::Arriving(int64_t now_ns)
+{
+    JackBridgeClockState cs;
+    if (fDir->Clock().Snapshot(&cs) && cs.fEpoch == fEpoch) {
+        fDir->NoteCardWorst(cs.Predict(now_ns) - double(fNext));
+    }
 }
 
 void JackBridgeCardCapture::Write(const float* frames, int count)
@@ -618,6 +718,14 @@ void JackBridgeCardPlayback::Start()
 {
     fEpoch++;
     fDir->Clock().Start(fRate, fPpm, fEpoch);
+}
+
+void JackBridgeCardPlayback::Filled(int64_t next, int64_t now_ns)
+{
+    JackBridgeClockState cs;
+    if (fDir->Clock().Snapshot(&cs) && cs.fEpoch == fEpoch) {
+        fDir->NoteCardWorst(double(next) - cs.Predict(now_ns));
+    }
 }
 
 int JackBridgeCardPlayback::Fill(float* frames, int count, int64_t pos, int must)

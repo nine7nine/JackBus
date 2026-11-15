@@ -16,6 +16,7 @@
 
 #include <alsa/asoundlib.h>
 #include <errno.h>
+#include <math.h>
 #include <new>
 #include <stdio.h>
 #include <stdlib.h>
@@ -93,7 +94,7 @@ JackBridgeDriver::JackBridgeDriver(const char* name, JackLockedEngine* engine, J
     : JackAudioDriver(name, "alsa_pcm", engine, table), fHaveCap(false), fHavePlay(false),
       fReportedCapture(0), fReportedPlayback(0), fLoggedCapState(-1), fLoggedPlayState(-1), fLoggedCard(-1),
       fLoggedResyncs(0), fLastReopen(0), fReopenTries(0), fReopening(false), fReopenLogged(false),
-      fReservedCard(-1), fReserveFailed(-1), fLoggedXruns(0), fXrunsLoggedAt(0), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0)
+      fReservedCard(-1), fReserveFailed(-1), fLoggedXruns(0), fXrunsLoggedAt(0), fLoggedCapMs(0.0), fLoggedPlayMs(0.0), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0)
 {
     fDevice[0] = 0;
     memset(fIn, 0, sizeof(fIn));
@@ -512,12 +513,20 @@ void JackBridgeDriver::BridgeMonitor()
     const bool locked = cs == kBridgeLocked && ps == kBridgeLocked;
     const bool was_locked = fLoggedCapState == kBridgeLocked && fLoggedPlayState == kBridgeLocked;
     const int64_t resyncs = (fHaveCap ? fCap.PublishedResyncs() : 0) + (fHavePlay ? fPlay.PublishedResyncs() : 0);
+    const double ms = 1e3 / fEngineControl->fSampleRate;
+    const double cap_ms = cap * ms;
+    const double play_ms = play > 0.0 ? (play + n) * ms : 0.0;
     if (locked && !was_locked) {
-        const double ms = 1e3 / fEngineControl->fSampleRate;
         jack_info("bridge %s: locked, delay %.1f ms in, %.1f ms out%s", fClientControl.fName,
-                  cap * ms, play > 0.0 ? (play + n) * ms : 0.0,
-                  resyncs > fLoggedResyncs ? " (after a resync)" : "");
+                  cap_ms, play_ms, resyncs > fLoggedResyncs ? " (after a resync)" : "");
         fLoggedResyncs = resyncs;
+        fLoggedCapMs = cap_ms;
+        fLoggedPlayMs = play_ms;
+    } else if (locked && (fabs(cap_ms - fLoggedCapMs) >= 0.5 || fabs(play_ms - fLoggedPlayMs) >= 0.5)) {
+        // the delays follow what the card was measured to need (JackBridgeDirection::Tune)
+        jack_info("bridge %s: delay %.1f ms in, %.1f ms out, as measured", fClientControl.fName, cap_ms, play_ms);
+        fLoggedCapMs = cap_ms;
+        fLoggedPlayMs = play_ms;
     }
     fLoggedCapState = cs;
     fLoggedPlayState = ps;

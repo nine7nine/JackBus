@@ -107,6 +107,16 @@ class JackBridgeDirection
         double Latency() const;                            // master frames: the delay + the filter's
         const JackBridgeStats& Stats() const { return fStats; }   // graph side's own thread
 
+        // Card side, its thread: its worst case at this moment, in card frames (capture: how late
+        // its frames come, playback: how far ahead of the card's position it needs them; see
+        // JackBridgeCardCapture::Arriving, JackBridgeCardPlayback::Filled). The graph side takes
+        // the largest since it last looked, and its delay follows it (Tune).
+        void NoteCardWorst(double frames);
+        // graph side's thread: the worst case measured while locked (-1: none yet) and where the
+        // delay target is going (0: not tuned yet), card frames
+        double MeasuredWorst() const { return fWorst; }
+        double Goal() const { return fGoal; }
+
         // for other threads (published at the end of each cycle)
         double PublishedLatency() const { return fPubLatency.load(std::memory_order_relaxed); }
         int PublishedState() const { return fPubState.load(std::memory_order_relaxed); }
@@ -125,6 +135,10 @@ class JackBridgeDirection
         // the card's frame period from its clock, if within 1% of the nominal one (else the
         // nominal one: a clock model that far off is wrong, not the card)
         double CardPeriod(const JackBridgeClockState& cs);
+        // Locked: the delay target follows the measured worst case. `cover`: what the target
+        // must hold besides it (card frames). True: the target must rise more than a slow move
+        // can follow, place again now.
+        bool Tune(double cover, int n);
 
         JackBridgeParams fParams;
         JackBridgeFifo fFifo;
@@ -140,6 +154,10 @@ class JackBridgeDirection
         int64_t fStateCycles;      // cycles in the current state
         int fFadeIn;               // frames of fade-in left (after each placement)
         bool fPeriodChanged = false;   // SetMasterPeriod: targets to compute again
+        double fWorst = -1.0;          // the card side's worst case seen while locked
+        double fGoal = 0.0;            // where the target moves (0: not tuned yet)
+        double fLimit = 0.0;           // the largest target
+        std::atomic<double> fCardWorst{-1.0};   // the card side's worst since the graph side looked
 
         // the card's clock has not moved for a while: the card side stopped
         bool Stale(const JackBridgeClockState& cs, int64_t t_ns) const;
@@ -184,6 +202,7 @@ class JackBridgeCapture : public JackBridgeDirection
         bool Place(const JackBridgeClockState& cs, double p, uint32_t epoch, int64_t index, int64_t pos);
         int Feed(int64_t need, uint32_t epoch, int64_t index, int64_t pos);
         void SetTarget(int n);
+        double Base(int n) const;      // what the delay holds besides the lateness (card frames)
 
         double fLate = 0.0;        // card frames: the lateness the delay covers
         double fLateMin = 0.0;     // while learning: the least and most lateness seen
@@ -213,6 +232,8 @@ class JackBridgePlayback : public JackBridgeDirection
 
     private:
 
+        double Cover() const;      // what the delay holds besides the card's own lead (card frames)
+
         int64_t fWritten;          // card frames the resampler made since the start
 };
 
@@ -232,6 +253,10 @@ class JackBridgeCardCapture
         // frames read from the card, interleaved float, the next ones in card order; a gap
         // (frames the card lost) is given as a new Start
         void Write(const float* frames, int count);
+        // just before a read's frames are written: how late they are (the card's position now,
+        // by its clock, minus the next frame), the peak the lateness reaches (now_ns: the card's
+        // timestamp clock, CLOCK_MONOTONIC_RAW)
+        void Arriving(int64_t now_ns);
         // the card's position (frames captured) at the kernel timestamp t_ns
         void Position(int64_t pos, int64_t t_ns) { fDir->Clock().Update(pos, t_ns); }
         uint32_t Epoch() const { return fEpoch; }
@@ -264,6 +289,9 @@ class JackBridgeCardPlayback
         // the difference; once placed, those positions are counted as missing. Returns the
         // frames filled (at least `must`, at most `count`).
         int Fill(float* frames, int count, int64_t pos, int must);
+        // after a fill up to card position `next`: how far ahead of the card's position now (by
+        // its clock) it needed frames (now_ns: CLOCK_MONOTONIC_RAW)
+        void Filled(int64_t next, int64_t now_ns);
         void Position(int64_t pos, int64_t t_ns) { fDir->Clock().Update(pos, t_ns); }
         int64_t Missing() const { return fMissing; }
 

@@ -110,6 +110,14 @@ static int64_t NowNs()
     return int64_t(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
 }
 
+// the card's timestamps' clock (the clock models run on it)
+static int64_t NowRawNs()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+    return int64_t(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
 JackBridgeAlsa::JackBridgeAlsa()
     : fCap(NULL), fPlay(NULL), fCapFormat(SND_PCM_FORMAT_UNKNOWN), fPlayFormat(SND_PCM_FORMAT_UNKNOWN),
       fRate(0), fPeriod(0), fBufferSize(0), fCapChannels(0), fPlayChannels(0), fBatch(false),
@@ -522,6 +530,9 @@ bool JackBridgeAlsa::ReadCapture()
     if (fHavePlay && fLinked) {
         fCardPlay.Position(pos + fPlayOffset, TimespecNs(ts));
     }
+    if (fHaveCap && avail > 0) {
+        fCardCap.Arriving(NowRawNs());     // the lateness's peak, just before these frames are in
+    }
     const int ch = fCapChannels;
     while (avail > 0) {
         const snd_pcm_channel_area_t* areas;
@@ -598,6 +609,9 @@ bool JackBridgeAlsa::WritePlayback(bool force)
     }
     fLastFill = NowNs();
     fLastQueued = fBufferSize - int(avail);
+    if (fHavePlay) {
+        fCardPlay.Filled(fPlayWritten, NowRawNs());   // how far ahead the card needed frames
+    }
     return true;
 }
 

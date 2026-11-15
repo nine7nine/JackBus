@@ -76,6 +76,8 @@ struct Result
     double wander_cap;      // frames, the spread of the capture path's phase
     double wander_play;
     long long underruns, resyncs, lost;
+    // the delay targets at the end (card frames) and the worst cases the card side measured
+    double cap_target, cap_worst, play_target, play_worst, cap_first, play_first;
 };
 
 // Least squares fits of a sin + b cos over short windows (0.1 s): the SNR per window shows the
@@ -135,7 +137,7 @@ static Result Run(const Scenario& sc, bool verbose)
     params.fCardRate = sc.card_rate;
     params.fMasterPeriod = sc.n;
     params.fCardPeriod = sc.update;
-    params.fMargin = (sc.wake + sc.jitter) * sc.card_rate + 8;
+    params.fMargin = 96;    // as the bridge driver places it first (Tune then follows the card)
     params.fCardBuffer = 2 * sc.update + 2 * 64;      // play_buffer below
 
     JackBridgeCapture cap;
@@ -180,6 +182,11 @@ static Result Run(const Scenario& sc, bool verbose)
     std::vector<double> cap_t, play_t;
     std::vector<float> cap_x, play_x;
     bool record = false;
+    // a delay target moving (Tune): the delay follows it on purpose, a few frames behind, at a
+    // ratio a little off: not counted in the loop's error and the audio's fit
+    bool steady = true;
+    double settled_since = 0.0;     // when the targets last stopped moving (s)
+    double cap_first = 0.0, play_first = 0.0;   // the targets first placed (card frames)
     double lock_t = -1, good_since = -1;
     double e_sum = 0, e_sum2 = 0, e_max = 0, r_sum = 0, r_sum2 = 0;
     long long e_n = 0;
@@ -210,8 +217,9 @@ static Result Run(const Scenario& sc, bool verbose)
             }
             upd_pos += sc.update;
             const double stamp = t_upd + urand(&seed) * sc.jitter;
+            // the I/O thread's work below is ordered by update time (the master sees it then);
+            // its measurements of how late it is use the time it really woke
             const double woke = stamp + urand(&seed) * sc.wake;
-            (void)woke;     // the I/O thread's work below is ordered by time already
             // drift step
             if (!stepped && sc.ppm_step != 0.0 && t_upd >= sc.step_at) {
                 p_origin = double(upd_pos);
@@ -243,6 +251,9 @@ static Result Run(const Scenario& sc, bool verbose)
                         inter[i * ch + c] = float(0.5 * sin(2 * M_PI * f_sig * tc + c));
                     }
                 }
+                if (todo == int(upd_pos - cap_read)) {
+                    ccap.Arriving(int64_t(woke * 1e9));    // the peak of the lateness, at delivery
+                }
                 ccap.Write(&inter[0], k);
                 cap_read += k;
                 todo -= k;
@@ -258,12 +269,13 @@ static Result Run(const Scenario& sc, bool verbose)
                 const int count = space > 8192 / ch ? 8192 / ch : space;
                 const int got = cplay.Fill(&inter[0], count, play_written, count);   // keep it full
                 // what the card will play, at the card's true time
-                for (int i = 0; i < got && record; i++) {
+                for (int i = 0; i < got && record && steady; i++) {
                     play_t.push_back(t_of(double(play_written + i)));
                     play_x.push_back(inter[i * ch]);
                 }
                 play_written += got;
             }
+            cplay.Filled(play_written, int64_t(woke * 1e9));
             next_update_t = t_of(double(upd_pos + sc.update));
         }
 
@@ -294,7 +306,19 @@ static Result Run(const Scenario& sc, bool verbose)
             } else {
                 good_since = -1;
             }
-            if (lock_t >= 0 && t_c > lock_t + 10.0) {
+            const auto moving = [](const JackBridgeDirection& d) { return d.Goal() > 0.0 && fabs(d.TargetDelay() - d.Goal()) > 0.01; };
+            if (moving(cap) || moving(play)) {
+                settled_since = -1.0;
+            } else if (settled_since < 0.0) {
+                settled_since = t_c;
+            }
+            // the loop catches up with a target that stopped in a few seconds
+            steady = settled_since >= 0.0 && t_c - settled_since >= 10.0;
+            if (lock_t >= 0 && cap_first == 0.0) {
+                cap_first = cap.TargetDelay();
+                play_first = play.TargetDelay();
+            }
+            if (lock_t >= 0 && t_c > lock_t + 10.0 && steady) {
                 record = true;
                 e_sum += st.fError; e_sum2 += st.fError * st.fError; e_n++;
                 if (ae > e_max) e_max = ae;
@@ -329,6 +353,12 @@ static Result Run(const Scenario& sc, bool verbose)
     r.underruns = cap.Stats().fUnderruns + play.Stats().fUnderruns;
     r.resyncs = cap.Stats().fResyncs + play.Stats().fResyncs;
     r.lost = cap.Stats().fLost + play.Stats().fLost;
+    r.cap_first = cap_first;
+    r.play_first = play_first;
+    r.cap_target = cap.TargetDelay();
+    r.cap_worst = cap.MeasuredWorst();
+    r.play_target = play.TargetDelay();
+    r.play_worst = play.MeasuredWorst();
     return r;
 }
 
@@ -351,6 +381,8 @@ int main(int argc, char** argv)
         printf("%-20s %7.2f %9.4f %8.3f %9.3fp %7.1fdB %7.1fdB %8.4f %8.4f %4lld %4lld\n", sc.name, r.lock_s,
                r.err_sigma, r.err_max, r.ratio_ppm_sigma, r.snr_db, r.snr_play_db, r.wander_cap, r.wander_play,
                r.underruns, r.resyncs);
+        printf("  targets: capture %.1f -> %.1f (worst %.1f), playback %.1f -> %.1f (worst %.1f) card frames\n",
+               r.cap_first, r.cap_target, r.cap_worst, r.play_first, r.play_target, r.play_worst);
         // steady scenarios: tight; transients (a drift step, a card xrun): no underrun, the
         // delay stays well inside the margin, and only the card's own restarts resync
         const bool xrun = sc.xrun_at > 0 || sc.pause_len > 0 || sc.skip > 0;
