@@ -593,8 +593,18 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
         if (fState != kBridgeIdle && !fPeriodChanged) {
             fStats.fResyncs++;
         }
+        // Learned once: a card that restarts (an xrun, a replug) or a master whose buffer size
+        // changed is placed again at once, with what was learned and measured (how far ahead the
+        // card side needs frames is the card's, not the epoch's); learning again after each
+        // xrun of a card that xruns often meant a second of silence each time
+        const bool learning = fState == kBridgeIdle || fState == kBridgeLearning;   // goes on
         fPeriodChanged = false;
         fEpoch = cs.fEpoch;
+        if (!learning) {
+            fState = kBridgeStarting;
+        }
+    }
+    if (fState == kBridgeIdle) {
         // The card side keeps the card's buffer full, so the frames placed must reach past it:
         // the buffer, the filter's look-ahead (a cycle's last frames are made the next cycle)
         // and the margin (the card side's wakeup jitter). Before placing, how far ahead the card
