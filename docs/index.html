@@ -376,8 +376,11 @@ pre.code .s { color: var(--amber); }
     It also does what stock JACK never did: <b>sound card bridges</b> (§12) join cards that run on their own clocks to
     the graph, each resampled in the master's own cycle, with the delay each card needs measured on the card instead of
     a fixed margin; the master's own card can be unplugged and plugged back without a client noticing (§11); and
-    jackdbus grew the calls a session manager and a settings page need. PatchBox is its patchbay, settings page and
-    session manager.
+    jackdbus grew the calls a session manager and a settings page need.
+    <a href="https://github.com/nine7nine/PatchBox" style="color:var(--teal)"><b>PatchBox</b></a>, built alongside it, is
+    its patchbay, settings page and session manager (<a href="https://nine7nine.github.io/PatchBox/" style="color:var(--teal)">its
+    architecture</a>): a card bridged with a switch, sessions whose applications leave the graph before they stop, and
+    settings changed on the running server.
   </p>
   <ul class="stats">
     <li><b>1.9.22</b><span>base tag · Arch jack2 1.9.22-2</span></li>

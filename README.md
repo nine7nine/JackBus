@@ -18,12 +18,31 @@ It also adds what JACK never had: **sound card bridges** that join other cards
 to the graph, each resampled in the master's own cycle with the delay it needs
 measured on the card; a master card that can be unplugged and plugged back under
 `jackdbus` without clients noticing; and the D-Bus calls a settings page and a
-session manager need. [PatchBox](https://github.com/nine7nine/PatchBox) is its
-patchbay, settings page and session manager.
+session manager need.
 
 **[Architecture document](https://nine7nine.github.io/JackBus/)**: how the
 server, libjack, shared memory and the activation graph work, every change with
 diagrams, and the measurements behind them (source: [`docs/index.html`](docs/index.html)).
+
+## PatchBox
+
+**[PatchBox](https://github.com/nine7nine/PatchBox)** is built alongside JackBus:
+a patchbay for JACK and PipeWire, a jackdbus control panel and an NSM session
+manager in one program. It uses what JackBus adds:
+
+- **Sound cards:** its Devices tab bridges a card with a switch, sets its
+  period, periods and wake-ups, and shows its state each second (locked, the
+  delay each way, drift, xruns). A card switched off keeps its settings.
+- **Sessions that cost the graph nothing:** an application's clients leave the
+  graph before the application is stopped (`DetachProcess`).
+- **Live changes:** the buffer size, the CPU wake-up latency limit, the log
+  settings and the bridges change on the running server; presets and sessions
+  restart it only for what can't.
+- **Sound cards plugged in or removed** show in its device lists at once
+  (`ConstraintsChanged`).
+
+PatchBox also works with stock JACK2 or PipeWire, without these. JackBus needs
+no PatchBox: `jack_control`, qjackctl and any jackdbus client work as before.
 
 ## Why this fork
 
