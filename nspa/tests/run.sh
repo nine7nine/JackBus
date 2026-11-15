@@ -521,6 +521,14 @@ else
     "$here/bus-apps.sh" || fail=1
     # a real DAW: Ardour headless (hardour), skipped without Ardour 9
     "$here/bus-ardour.sh" || fail=1
+    # PipeWire applications through jackbus-pw (the libpipewire shim on JackBus nodes):
+    # needs the shim and PipeWire's examples built (make -C nspa/pw-shim all test-apps
+    # PW_EXAMPLES=<pipewire tree>/src/examples)
+    if [ -x "$JACK_BUILD/pw-shim/audio-src" ] && [ -e "$JACK_BUILD/pw-shim/lib/libpipewire-0.3.so.0" ]; then
+        "$root/nspa/pw-shim/test/run-example.sh" || fail=1
+    else
+        echo "SKIP jackbus-pw (the shim and PipeWire's examples are not built)"
+    fi
 fi
 
 if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then
