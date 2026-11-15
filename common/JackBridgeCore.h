@@ -110,17 +110,16 @@ class JackBridgeClock
         // card side
         void Start(double nominal_rate, double ppm_hint, uint32_t epoch);   // forget everything
         void Update(int64_t pos, int64_t t_ns);
-        // Wide while it locks (fast_seconds after a start), then medium (until medium_seconds),
-        // then narrow: once locked, the timestamps' jitter, and the slow wander of a USB card's
-        // arrival times (its transfer buffering), must not reach the period, which is the
-        // bridge's ratio. The device's own clock is far steadier than its arrival times.
-        void SetBandwidths(double fast, double medium, double slow, double fast_seconds, double medium_seconds)
+        // The bandwidth narrows as k / t (t: seconds since the start or a re-lock), between
+        // fast and slow: the rate of a steady clock is then estimated from all the samples so
+        // far, its error falling as 1/t, the way a growing least squares fit's does. Narrowing in
+        // fixed stages instead locked in what the previous stage had picked up from a USB card's
+        // slowly wandering arrival times (a frame or two over seconds): tens of ppm at 0.1 Hz.
+        void SetBandwidths(double fast, double slow, double k)
         {
             fFast = fast;
-            fMedium = medium;
             fSlow = slow;
-            fFastSeconds = fast_seconds;
-            fMediumSeconds = medium_seconds;
+            fNarrow = k;
         }
         double Bandwidth() const { return fBandwidth; }
         int Outliers() const { return fOutliers; }
@@ -138,15 +137,13 @@ class JackBridgeClock
         double fNominalRate;
         double fBandwidth;
         double fFast;
-        double fMedium;
         double fSlow;
-        double fFastSeconds;
-        double fMediumSeconds;
+        double fNarrow;      // Hz s: the bandwidth is fNarrow / t
         double fElapsed;     // ns of card time since the start
         double fErrMean;     // running mean of the error (ns), about one second
-        double fFastUntil;   // fElapsed until which the loop stays wide (a start, a re-lock)
-        double fMediumUntil; // then medium until this
+        double fSince;       // fElapsed at the start or the last re-lock
         int fRelocks;        // times the error's bias made the loop wide again
+
         // the model (card side only)
         int64_t fPosRef;
         int64_t fTimeRef;

@@ -200,8 +200,8 @@ int JackBridgeFifo::Skip(int frames)
 //-----------------
 
 JackBridgeClock::JackBridgeClock()
-    : fNominalRate(48000.0), fBandwidth(1.0), fFast(1.0), fMedium(0.1), fSlow(0.01), fFastSeconds(2.0),
-      fMediumSeconds(10.0), fElapsed(0.0), fErrMean(0.0), fFastUntil(0.0), fMediumUntil(0.0), fRelocks(0), fPosRef(0), fTimeRef(0), fTimeRefFrac(0.0),
+    : fNominalRate(48000.0), fBandwidth(1.0), fFast(1.0), fSlow(0.01), fNarrow(0.5),
+      fElapsed(0.0), fErrMean(0.0), fSince(0.0), fRelocks(0), fPosRef(0), fTimeRef(0), fTimeRefFrac(0.0),
       fPeriod(1e9 / 48000.0), fErr2(0.0), fUpdates(0), fOutliers(0), fRun(0), fEpoch(0),
       fSeq(0), fPubPosRef(0), fPubTimeRef(0), fPubTimeRefFrac(0.0), fPubPeriod(1e9 / 48000.0),
       fPubEpoch(0), fPubValid(false)
@@ -218,8 +218,7 @@ void JackBridgeClock::Start(double nominal_rate, double ppm_hint, uint32_t epoch
     fBandwidth = fFast;
     fElapsed = 0.0;
     fErrMean = 0.0;
-    fFastUntil = fFastSeconds * 1e9;
-    fMediumUntil = fMediumSeconds * 1e9;
+    fSince = 0.0;
     fUpdates = 0;
     fOutliers = 0;
     fRun = 0;
@@ -328,17 +327,18 @@ void JackBridgeClock::Update(int64_t pos, int64_t t_ns)
     // the second: a USB card's errors are not independent (its transfer sizes vary in a
     // pattern), so their mean wanders more than white noise would. Slow drift (temperature)
     // stays within it; the narrow loop follows that by itself.
-    if (fElapsed >= fFastUntil) {
-        const double spread = sqrt(fErr2);
-        if (fBandwidth != fFast && fabs(fErrMean) > 3.0 * spread && fabs(fErrMean) > 50e3) {
-            fBandwidth = fFast;
-            fFastUntil = fElapsed + fFastSeconds * 1e9;
-            fMediumUntil = fElapsed + fMediumSeconds * 1e9;
-            fRelocks++;
-        } else {
-            fBandwidth = (fElapsed < fMediumUntil) ? fMedium : fSlow;
-        }
+    // Narrow as k / t. A real change of the card's rate (a clock switch, a big step) shows
+    // as errors whose mean over about a second moves beyond their own spread (not the spread's
+    // standard error: a USB card's errors are not independent, its transfer sizes vary in a
+    // pattern): then start the narrowing again. Slow drift (temperature) stays well within it.
+    const double spread = sqrt(fErr2);
+    const double since = (fElapsed - fSince) * 1e-9;
+    if (since > 2.0 && fabs(fErrMean) > 3.0 * spread && fabs(fErrMean) > 50e3) {
+        fSince = fElapsed;
+        fRelocks++;
     }
+    double bw = fNarrow / ((fElapsed - fSince) * 1e-9 + 1e-3);
+    fBandwidth = bw > fFast ? fFast : (bw < fSlow ? fSlow : bw);
     Publish();
 }
 
