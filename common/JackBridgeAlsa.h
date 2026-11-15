@@ -94,6 +94,9 @@ class JackBridgeAlsa
         // pipe"); read after State() says kAlsaFailed, or on Open's or Reopen's thread
         void FailReason(char* buf, size_t size) const;
         long Xruns() const { return fXruns.load(std::memory_order_relaxed); }
+        int64_t PlaybackMissing() const { return fCardPlay.Missing(); }   // any thread
+        int BufferSize() const { return fBufferSize; }                    // frames, as opened
+        int Periods() const { return fPeriod > 0 ? (fBufferSize + fPeriod / 2) / fPeriod : 0; }
         long TimerWakes() const { return fTimerWakes; }   // informational, card thread's
 
     private:

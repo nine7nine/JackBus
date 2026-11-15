@@ -440,6 +440,8 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
         fLearnCycles = 0;
         fLateMin = fLateNow;
         fLateMax = fLateNow;
+        fLearnWorst = -1.0;
+        fCardWorst.store(-1.0, std::memory_order_relaxed);
     }
     if (fState == kBridgeLearning) {
         // Before placing anything, learn how late the card side's frames come. Lateness is the
@@ -454,6 +456,15 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
             fLateMax = fLateNow;
         }
         fLate = fParams.fCardPeriod + (fLateMax - fLateMin);
+        // and the peak the card side meets itself: a card whose transfers are larger than its
+        // period (USB) comes later than a period and the spread the master's cycles sample
+        const double w = fCardWorst.exchange(-1.0, std::memory_order_relaxed);
+        if (w > fLearnWorst) {
+            fLearnWorst = w;
+        }
+        if (fLearnWorst > fLate) {
+            fLate = fLearnWorst;
+        }
         fFifo.Skip(fFifo.Available());     // nothing is read yet: do not let it fill
         if (++fLearnCycles * n < int64_t(fParams.fLearnSeconds * fParams.fMasterRate)) {
             Silence(out, fParams.fChannels, n);
@@ -584,14 +595,35 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
         }
         fPeriodChanged = false;
         fEpoch = cs.fEpoch;
-        fState = kBridgeStarting;
         // The card side keeps the card's buffer full, so the frames placed must reach past it:
         // the buffer, the filter's look-ahead (a cycle's last frames are made the next cycle)
-        // and the margin (the card side's wakeup jitter)
+        // and the margin (the card side's wakeup jitter). Before placing, how far ahead the card
+        // side really needs them is measured (a USB card takes its frames into transfers up to
+        // a buffer ahead of the buffer): placed short of that, it played silence until Tune
+        // caught up, seconds of it.
         const int buffer = fParams.fCardBuffer > 0 ? fParams.fCardBuffer : 2 * fParams.fCardPeriod;
         fTarget = Cover() + buffer + fParams.fMargin;
-        fLimit = fTarget + 2.0 * buffer;
+        fLimit = fTarget + 4.0 * buffer;
         fGoal = 0.0;    // tuned again from here (Tune), with what was measured so far
+        fState = kBridgeLearning;
+        fLearnCycles = 0;
+        fLearnWorst = -1.0;
+        fCardWorst.store(-1.0, std::memory_order_relaxed);
+    }
+    if (fState == kBridgeLearning) {
+        const double w = fCardWorst.exchange(-1.0, std::memory_order_relaxed);
+        if (w > fLearnWorst) {
+            fLearnWorst = w;
+        }
+        if (++fLearnCycles * n < int64_t(fParams.fLearnSeconds * fParams.fMasterRate)) {
+            fStats.fState = fState;
+            return;     // nothing placed yet: the card side plays silence
+        }
+        const double measured = Cover() + fLearnWorst + kSafetySeconds * fParams.fCardRate;
+        if (measured > fTarget) {
+            fTarget = (measured < fLimit) ? measured : fLimit;
+        }
+        fState = kBridgeStarting;
     }
 
     const double p = cs.Predict(t_ns);
@@ -763,7 +795,7 @@ int JackBridgeCardPlayback::Fill(float* frames, int count, int64_t pos, int must
     if (filled < must) {
         memset(frames + filled * ch, 0, (must - filled) * ch * sizeof(float));
         if (placed) {
-            fMissing += must - filled;
+            fMissing.fetch_add(must - filled, std::memory_order_relaxed);
         }
         filled = must;
     }

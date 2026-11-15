@@ -311,6 +311,8 @@ int main(int argc, char** argv)
                    (long long)c.fResyncs, (long long)p.fResyncs, card.Xruns(),
                    cap.Clock().Relocks(), play.Clock().Relocks(), cap.Clock().Outliers(), play.Clock().Outliers(),
                    cap.Clock().ErrorSigma() / 1e3, play.Clock().ErrorSigma() / 1e3);
+            printf("        play missing %lld | targets cap %.1f play %.1f card frames\n",
+                   (long long)card.PlaybackMissing(), cap.TargetDelay(), play.TargetDelay());
             fflush(stdout);
         }
     }

@@ -212,6 +212,7 @@ class JackBridgeCapture : public JackBridgeDirection
                                    // kept running (not if it went away or restarted)
         int64_t fPendingWritten = 0;   // the FIFO's frames written at that underrun
         int64_t fLearnCycles = 0;
+        double fLearnWorst = -1.0; // while learning: the card side's worst (its lateness's peak)
 };
 
 class JackBridgePlayback : public JackBridgeDirection
@@ -235,6 +236,8 @@ class JackBridgePlayback : public JackBridgeDirection
         double Cover() const;      // what the delay holds besides the card's own lead (card frames)
 
         int64_t fWritten;          // card frames the resampler made since the start
+        int64_t fLearnCycles = 0;
+        double fLearnWorst = -1.0; // while learning: how far ahead the card side needed frames
 };
 
 /*!
@@ -293,7 +296,8 @@ class JackBridgeCardPlayback
         // its clock) it needed frames (now_ns: CLOCK_MONOTONIC_RAW)
         void Filled(int64_t next, int64_t now_ns);
         void Position(int64_t pos, int64_t t_ns) { fDir->Clock().Update(pos, t_ns); }
-        int64_t Missing() const { return fMissing; }
+        // positions placed but filled with silence (the graph side's frames came late): any thread
+        int64_t Missing() const { return fMissing.load(std::memory_order_relaxed); }
 
     private:
 
@@ -301,7 +305,7 @@ class JackBridgeCardPlayback
         uint32_t fEpoch;
         double fRate;
         double fPpm;
-        int64_t fMissing = 0;
+        std::atomic<int64_t> fMissing{0};
 };
 
 } // end of namespace

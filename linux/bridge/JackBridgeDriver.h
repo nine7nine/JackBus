@@ -75,6 +75,8 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         int fReservedCard;          // the card index reserved ("Audio<n>"), -1: none
         int fReserveFailed;         // the index a reservation was refused for (not asked again)
         long fLoggedXruns;          // card xruns said so far, and when (us): at most once a minute
+        long fLoggedUnderruns;      // capture underruns, playback frames missed said so far
+        long fLoggedMissing;
         int64_t fXrunsLoggedAt;
         double fLoggedCapMs;        // the delays last said (ms)
         double fLoggedPlayMs;

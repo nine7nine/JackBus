@@ -174,14 +174,18 @@ bool JackBridgeAlsa::Configure(snd_pcm_t* pcm, bool capture, int* channels, snd_
     }
     snd_pcm_uframes_t period = fParams.fPeriod;
     snd_pcm_hw_params_set_period_size_near(pcm, hw, &period, NULL);
-    // Playback with no capture to wake the card side (capture-only cards wake it at each
-    // transfer, duplex ones through the linked capture): the card side waits on playback space
-    // alone. A batch card (USB) takes its frames into transfers well ahead of playing them, so
-    // give it a third period, and wake for a quarter of a period of space (below), not half
-    // the buffer: else the transfers drain the buffer before the next wakeup
+    // A batch card (USB) needs a third period:
+    // - playback with no capture to wake the card side (capture-only cards wake it at each
+    //   transfer, duplex ones through the linked capture): the card side waits on playback space
+    //   alone, and the card takes its frames into transfers well ahead of playing them; it also
+    //   wakes for a quarter of a period of space (below), not half the buffer: else the
+    //   transfers drain the buffer before the next wakeup;
+    // - periods of 256 frames or more: snd-usb's transfers then come in chunks larger than a
+    //   period (a U-44 at 256: 480 and 288 frames, every 16 ms), and two periods (512 frames)
+    //   overran as soon as a chunk was read a millisecond late
     const bool alone = !capture && (fCap == NULL || !fParams.fLink);
     unsigned periods = fParams.fPeriods;
-    if (alone && snd_pcm_hw_params_is_batch(hw) && periods < 3) {
+    if (snd_pcm_hw_params_is_batch(hw) && periods < 3 && (alone || period >= 256)) {
         periods = 3;
     }
     snd_pcm_hw_params_set_periods_near(pcm, hw, &periods, NULL);

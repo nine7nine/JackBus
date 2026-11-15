@@ -94,7 +94,7 @@ JackBridgeDriver::JackBridgeDriver(const char* name, JackLockedEngine* engine, J
     : JackAudioDriver(name, "alsa_pcm", engine, table), fHaveCap(false), fHavePlay(false),
       fReportedCapture(0), fReportedPlayback(0), fLoggedCapState(-1), fLoggedPlayState(-1), fLoggedCard(-1),
       fLoggedResyncs(0), fLastReopen(0), fReopenTries(0), fReopening(false), fReopenLogged(false),
-      fReservedCard(-1), fReserveFailed(-1), fLoggedXruns(0), fXrunsLoggedAt(0), fLoggedCapMs(0.0), fLoggedPlayMs(0.0), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0)
+      fReservedCard(-1), fReserveFailed(-1), fLoggedXruns(0), fLoggedUnderruns(0), fLoggedMissing(0), fXrunsLoggedAt(0), fLoggedCapMs(0.0), fLoggedPlayMs(0.0), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0)
 {
     fDevice[0] = 0;
     memset(fIn, 0, sizeof(fIn));
@@ -191,7 +191,7 @@ int JackBridgeDriver::OpenBridgeCard(const JackBridgeAlsaParams& requested, int 
         return -1;
     }
     jack_info("bridge %s: %s, %u Hz, period %d x %d, %d in / %d out%s", fClientControl.fName, fDevice, fCard.Rate(),
-              fCard.Period(), card.fPeriods, fCaptureChannels, fPlaybackChannels, fCard.Batch() ? ", batch" : "");
+              fCard.Period(), fCard.Periods(), fCaptureChannels, fPlaybackChannels, fCard.Batch() ? ", batch" : "");
     return 0;
 }
 
@@ -214,7 +214,8 @@ bool JackBridgeDriver::SetupDirections(unsigned card_rate, int card_period)
     p.fMasterPeriod = fEngineControl->fBufferSize;
     p.fMaxMasterPeriod = 4096 > p.fMasterPeriod ? 4096 : p.fMasterPeriod;
     p.fCardPeriod = card_period;
-    p.fCardBuffer = card_period * fPeriods;
+    // the buffer the card opened with (a USB card may have been given a third period)
+    p.fCardBuffer = fCard.BufferSize() > 0 ? fCard.BufferSize() : card_period * fPeriods;
     p.fQuality = fQuality;
     p.fMargin = 96;
     if (fCaptureChannels) {
@@ -286,7 +287,7 @@ void JackBridgeDriver::BridgeStatus(jackctl_bridge_status* st)
     st->playback = fHavePlay ? fPlay.PublishedState() : -1;
     st->rate = fCardRate;
     st->period = fCardPeriod;
-    st->nperiods = fPeriods;
+    st->nperiods = fCard.Periods() > 0 ? fCard.Periods() : fPeriods;
     st->capture_channels = fCaptureChannels;
     st->playback_channels = fPlaybackChannels;
     const double cap = fHaveCap ? fCap.PublishedLatency() : 0.0;
@@ -302,7 +303,9 @@ void JackBridgeDriver::BridgeStatus(jackctl_bridge_status* st)
     }
     st->xruns = fCard.Xruns();
     st->resyncs = (fHaveCap ? fCap.PublishedResyncs() : 0) + (fHavePlay ? fPlay.PublishedResyncs() : 0);
-    st->underruns = (fHaveCap ? fCap.PublishedUnderruns() : 0) + (fHavePlay ? fPlay.PublishedUnderruns() : 0);
+    // capture underruns, playback overflows, and playback frames the card played as silence
+    st->underruns = (fHaveCap ? fCap.PublishedUnderruns() : 0) + (fHavePlay ? fPlay.PublishedUnderruns() : 0)
+        + fCard.PlaybackMissing();
 }
 
 int JackBridgeDriver::Attach()
@@ -499,13 +502,22 @@ void JackBridgeDriver::BridgeMonitor()
             fLoggedCard = card;
         }
     }
-    // The card's own xruns (the card thread recovers them): the first said at once, then how
-    // many more at most once a minute
+    // What went wrong, said at most once a minute (the first at once): the card's own xruns
+    // (the card thread recovers them), capture underruns (the card's frames came later than the
+    // delay covers: placed again, longer), playback frames the card played as silence (the
+    // graph side's came late)
     const long xruns = fCard.Xruns();
-    if (xruns > fLoggedXruns && (fXrunsLoggedAt == 0 || now - fXrunsLoggedAt >= 60000000)) {
-        jack_error("bridge %s: %ld card xrun%s%s", fClientControl.fName, xruns - fLoggedXruns, xruns - fLoggedXruns == 1 ? "" : "s",
-                   fXrunsLoggedAt == 0 ? "" : " since the last report");
+    const long underruns = long(fHaveCap ? fCap.PublishedUnderruns() : 0);
+    const long missing = long(fCard.PlaybackMissing());
+    if ((xruns > fLoggedXruns || underruns > fLoggedUnderruns || missing > fLoggedMissing)
+        && (fXrunsLoggedAt == 0 || now - fXrunsLoggedAt >= 60000000)) {
+        jack_error("bridge %s: %ld card xrun%s, %ld capture underrun%s, %ld playback frames missed%s", fClientControl.fName,
+                   xruns - fLoggedXruns, xruns - fLoggedXruns == 1 ? "" : "s",
+                   underruns - fLoggedUnderruns, underruns - fLoggedUnderruns == 1 ? "" : "s",
+                   missing - fLoggedMissing, fXrunsLoggedAt == 0 ? "" : " since the last report");
         fLoggedXruns = xruns;
+        fLoggedUnderruns = underruns;
+        fLoggedMissing = missing;
         fXrunsLoggedAt = now;
     }
     const int cs = fHaveCap ? fCap.PublishedState() : kBridgeLocked;
