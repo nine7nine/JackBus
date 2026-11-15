@@ -22,7 +22,8 @@ page and session manager
 | **Compatible** | Same client API/ABI, shared memory layout and wire protocol as 1.9.22 (protocol 9). A stock libjack, 64- or 32-bit, works with this server, and this libjack works with a stock server. The one addition, a side file for detecting dead clients, is optional: a stock libjack never opens it. |
 | **Real-time safe** | No system calls on the driver thread's side channels, priority-inheriting locks, all memory locked, RT helper threads that never sleep in the API. |
 | **Survives clients** | A client that dies is out of the graph in ~9 ms with no xrun; one that stalls lags alone instead of holding up the server. |
-| **Survives hardware** | A wake timer covers late period interrupts (Intel HDA). Under jackdbus, an unplugged master card hands over to the dummy driver and takes over again when it is back. |
+| **Interrupt or timer** | The ALSA driver wakes on the card's period interrupt, on a timer that reads the card's position, or both. By default it trusts the interrupt and adds the timer once it sees interrupts come late. JACK only ever waited for the interrupt. |
+| **Survives hardware** | Under jackdbus, an unplugged master card hands over to the dummy driver and takes over again when it is back; bridged cards come back by themselves when replugged. |
 | **Several sound cards** | Sound card bridges join cards on their own clocks to the graph, resampled in the master's cycle, with each card's delay measured on the card. Unplug and replug survive. |
 | **Lighter engine** | Per-cycle work follows the clients in use, not compile-time maxima: 3.4× fewer instructions per cycle, 6.7× faster connects. |
 | **jackdbus for tools** | Bridges, buffer size and CPU wake-up latency changed live, detach-before-stop for session managers, per-client timings, device lists that follow hotplug, a bounded log. |
@@ -79,6 +80,26 @@ Measured on the running engine against stock 1.9.22.
 | Metadata | Built against Berkeley DB 5.3, like Arch's `jack2`, so every client's libjack reads the same database. |
 
 ## New in JackBus
+
+### Interrupt or timer wakeups
+
+On some cards, Intel HDA at small buffer sizes above all, the period interrupt
+comes late or is dropped while the card's position is right all along: a server
+that waits only for the interrupt wakes late and overruns. JackBus works out
+when the next period is due from the position and timestamp the card's last
+update left in the status page (no system call). If the interrupt hasn't come
+by then plus a margin, it asks the card for its position (`hwsync`) and runs the
+cycle anyway. An interrupt that comes first still wakes it, as before.
+
+| Mode | Master card: `wake-timer` (`-w`) | Bridged card: `@wake` |
+|---|---|---|
+| Interrupt, timer when needed | `adaptive` (default): the interrupt alone until it is seen late three times, then the timer too | `auto` (default) |
+| Interrupt and timer | `on`, or a margin in µs (default an eighth of a period, 50–500 µs) | `timer` |
+| Interrupt only, as stock JACK | `off` | `irq` |
+
+Intel HDA, 2 periods: **499 → 0 xruns** at 128 frames, **5 574 → 2 773** at 64.
+USB (batch) cards stay on the interrupt: their position only moves when a
+transfer completes, so a timer has nothing earlier to read.
 
 ### Sound card bridges
 
