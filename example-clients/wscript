@@ -6,6 +6,8 @@
 
 example_programs = {
     'jackbus_simple': ['jackbus_simple.c'],
+    'jackbus_tone': ['jackbus_tone.c'],
+    'jackbus_events': ['jackbus_events.c'],
     }
 
 
