@@ -38,6 +38,7 @@
 #include "controller_internal.h"
 #include "xml.h"
 #include "reserve.h"
+#include <pthread.h>
 #include "uptime.h"
 
 struct jack_dbus_interface_descriptor * g_jackcontroller_interfaces[] =
@@ -370,18 +371,20 @@ jack_controller_switch_master(
     return TRUE;
 }
 
-#define DEVICE_MAX 2
+#define DEVICE_MAX 20
 
 typedef struct reserved_audio_device {
 
      char device_name[64];
      rd_device * reserved_device;
+     int count;
 
 } reserved_audio_device;
 
 
 int g_device_count = 0;
 static reserved_audio_device g_reserved_device[DEVICE_MAX];
+static pthread_mutex_t g_reserved_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /*
  Slot bookkeeping: acquire used to write slot [g_device_count] even when that
@@ -391,22 +394,34 @@ static reserved_audio_device g_reserved_device[DEVICE_MAX];
  bounds ([2] or [-1]), leaked ReserveDevice1 names (locking PulseAudio /
  PipeWire out of the card) and released the same reservation twice. Use free
  slots (reserved_device == NULL) and clear them on release.
+ Sound card bridges reserve their cards too, from the server's bridge monitor thread as well as
+ this one (hence the lock), and a bridge may use another device of the master's card: a name
+ asked for twice is held once and counted, released when the last one lets go.
 */
 static
 bool
 on_device_acquire(const char * device_name)
 {
     int ret;
-    int slot;
+    int i;
+    int slot = -1;
     DBusError error;
 
-    for (slot = 0; slot < DEVICE_MAX; slot++) {
-        if (g_reserved_device[slot].reserved_device == NULL)
-            break;
+    pthread_mutex_lock(&g_reserved_lock);
+    for (i = 0; i < DEVICE_MAX; i++) {
+        if (g_reserved_device[i].reserved_device != NULL &&
+            strcmp(g_reserved_device[i].device_name, device_name) == 0) {
+            g_reserved_device[i].count++;
+            pthread_mutex_unlock(&g_reserved_lock);
+            return true;
+        }
+        if (slot < 0 && g_reserved_device[i].reserved_device == NULL)
+            slot = i;
     }
-    if (slot == DEVICE_MAX)
+    if (slot < 0)
     {
         jack_error("Cannot reserve audio card %s: already holding %d cards", device_name, DEVICE_MAX);
+        pthread_mutex_unlock(&g_reserved_lock);
         return false;
     }
 
@@ -425,12 +440,15 @@ on_device_acquire(const char * device_name)
         jack_error("Failed to acquire device name : %s error : %s", device_name, (error.message ? error.message : strerror(-ret)));
         dbus_error_free(&error);
         g_reserved_device[slot].reserved_device = NULL;
+        pthread_mutex_unlock(&g_reserved_lock);
         return false;
     }
 
     snprintf(g_reserved_device[slot].device_name, sizeof(g_reserved_device[slot].device_name), "%s", device_name);
+    g_reserved_device[slot].count = 1;
     g_device_count++;
     jack_info("Acquired audio card %s", device_name);
+    pthread_mutex_unlock(&g_reserved_lock);
     return true;
 }
 
@@ -440,6 +458,7 @@ on_device_release(const char * device_name)
 {
     int i;
 
+    pthread_mutex_lock(&g_reserved_lock);
     // Look for corresponding reserved device
     for (i = 0; i < DEVICE_MAX; i++) {
         if (g_reserved_device[i].reserved_device != NULL &&
@@ -447,15 +466,16 @@ on_device_release(const char * device_name)
             break;
     }
 
-    if (i < DEVICE_MAX) {
+    if (i == DEVICE_MAX) {
+        jack_error("Audio card %s not found!!", device_name);
+    } else if (--g_reserved_device[i].count == 0) {
         jack_info("Released audio card %s", device_name);
         rd_release(g_reserved_device[i].reserved_device);
         g_reserved_device[i].reserved_device = NULL;
         g_reserved_device[i].device_name[0] = 0;
         g_device_count--;
-    } else {
-        jack_error("Audio card %s not found!!", device_name);
     }
+    pthread_mutex_unlock(&g_reserved_lock);
 }
 
 #define controller_ptr ((struct jack_controller *)obj)
