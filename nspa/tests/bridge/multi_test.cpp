@@ -48,8 +48,19 @@ struct Card
     int64_t cost_n;
 };
 
+struct Slow   // a cycle whose share for one card cost more than 200 us
+{
+    double at;   // s since the start
+    int period;
+    int card;
+    int64_t ns;
+    int cap_state, play_state;
+};
+
 struct Master
 {
+    Slow slow[256];
+    int nslow;
     std::vector<Card*> cards;
     std::vector<int> periods;   // BRIDGE_PERIODS=256,64,1024: the master's buffer size, in turn
     double switch_seconds;      // every this long
@@ -108,6 +119,18 @@ static void* MasterThread(void* arg)
             if (c->pch) c->play.Cycle(t_c, m->n, 1e9 / m->rate, &c->inp[0]);
             spent[i] += Now() - a;
         }
+        for (size_t i = 0; i < m->cards.size(); i++) {
+            if (spent[i] > 200000 && m->nslow < 256) {
+                Card* c = m->cards[i];
+                Slow& w = m->slow[m->nslow++];
+                w.at = double(t_c - (t0 - base * cycle_ns)) * 1e-9;
+                w.period = m->n;
+                w.card = int(i);
+                w.ns = spent[i];
+                w.cap_state = c->cap.Stats().fState;
+                w.play_state = c->play.Stats().fState;
+            }
+        }
         if (k > int64_t(2 * m->rate / 256)) {   // after the first seconds (allocation-free anyway)
             for (size_t i = 0; i < m->cards.size(); i++) {
                 Card* c = m->cards[i];
@@ -151,6 +174,7 @@ int main(int argc, char** argv)
     const int periods = atoi(argv[4]);
     m.rate = 48000;
     m.done = false;
+    m.nslow = 0;
     m.switch_seconds = getenv("BRIDGE_SWITCH") ? atof(getenv("BRIDGE_SWITCH")) : 10.0;
     m.periods.push_back(m.n);
     if (getenv("BRIDGE_PERIODS")) {
@@ -248,6 +272,11 @@ int main(int argc, char** argv)
     pthread_join(th, NULL);
     printf("end:\n");
     Report(m, int(m.seconds));
+    printf("cycles over 200 us for one card: %d\n", m.nslow);
+    for (int i = 0; i < m.nslow && i < 40; i++) {
+        printf("  %8.3f s period %4d %-12s %7.1f us  states cap %d play %d\n", m.slow[i].at, m.slow[i].period,
+               m.cards[m.slow[i].card]->name, m.slow[i].ns / 1e3, m.slow[i].cap_state, m.slow[i].play_state);
+    }
     for (size_t i = 0; i < m.cards.size(); i++) {
         m.cards[i]->alsa.Stop();
     }
