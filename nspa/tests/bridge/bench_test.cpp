@@ -10,6 +10,9 @@
    g++ -std=gnu++11 -faligned-new -O2 -march=x86-64 -g -Icommon common/JackBridgeCore.cpp \
        common/JackBridgeStream.cpp common/JackBridgeResampler.cpp nspa/tests/bridge/bench_test.cpp \
        -o /tmp/bridge_bench && taskset -c 2 /tmp/bridge_bench [channels...]
+
+ JACK_BRIDGE_RESAMPLER=portable|sse2|avx2|avx512 picks the resampler's inner loop (if the CPU has
+ it), for A/B measurements.
 */
 
 #include "JackBridgeStream.h"
@@ -112,6 +115,9 @@ int main(int argc, char** argv)
         chans = { 1, 2, 4, 8 };
     }
     const int n = 256;
+    JackBridgeResampler probe;
+    probe.Init(1, 1.0, 1, n, n);
+    printf("resampler: %s\n", JackBridgeResampler::VariantName(probe.ActiveVariant()));
     printf("%4s %12s %12s %12s %16s\n", "ch", "capture", "playback", "both", "both ns/ch-frame");
     for (size_t i = 0; i < chans.size(); i++) {
         const int ch = chans[i];

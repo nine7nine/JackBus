@@ -24,7 +24,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <string.h>
 
 #if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
-#define JACK_BRIDGE_AVX2 1
+#define JACK_BRIDGE_X86_SIMD 1
 #include <immintrin.h>
 #endif
 
@@ -215,7 +215,53 @@ struct ScalarKernel
     }
 };
 
-#ifdef JACK_BRIDGE_AVX2
+#ifdef JACK_BRIDGE_X86_SIMD
+
+// 128 bits, SSE2 only (every x86-64 CPU): mul + add, 4 taps per vector
+struct Sse2Kernel
+{
+    enum { kGroup = 8 };    // 8 accumulators of the 16 xmm registers
+
+    template <int C>
+    __attribute__((target("sse2")))
+    static inline void Dot(const float* x, size_t stride, const float* c0, const float* c1,
+                           float a, int taps, float* y)
+    {
+        // the add is the dependency chain: two accumulators for one or two channels
+        const int kAcc = (C <= 2) ? 2 : 1;
+        const __m128 va = _mm_set1_ps(a);
+        __m128 acc[kAcc][C];
+        JACK_UNROLL
+        for (int j = 0; j < kAcc; j++) {
+            JACK_UNROLL
+            for (int c = 0; c < C; c++) {
+                acc[j][c] = _mm_setzero_ps();
+            }
+        }
+        // taps is a multiple of 8: no remainder
+        for (int i = 0; i < taps; i += 4 * kAcc) {
+            JACK_UNROLL
+            for (int j = 0; j < kAcc; j++) {
+                const __m128 r0 = _mm_load_ps(c0 + i + 4 * j);
+                const __m128 row = _mm_add_ps(r0, _mm_mul_ps(va, _mm_sub_ps(_mm_load_ps(c1 + i + 4 * j), r0)));
+                JACK_UNROLL
+                for (int c = 0; c < C; c++) {
+                    acc[j][c] = _mm_add_ps(acc[j][c], _mm_mul_ps(_mm_loadu_ps(x + c * stride + i + 4 * j), row));
+                }
+            }
+        }
+        JACK_UNROLL
+        for (int c = 0; c < C; c++) {
+            __m128 s = acc[0][c];
+            if (kAcc > 1) {
+                s = _mm_add_ps(s, acc[kAcc - 1][c]);
+            }
+            s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+            s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+            y[c] = _mm_cvtss_f32(s);
+        }
+    }
+};
 
 struct Avx2Kernel
 {
@@ -265,6 +311,74 @@ struct Avx2Kernel
                 t = _mm256_add_ps(t, acc[kAcc - 1][c]);
             }
             __m128 s = _mm_add_ps(_mm256_castps256_ps128(t), _mm256_extractf128_ps(t, 1));
+            s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+            s = _mm_add_ss(s, _mm_movehdup_ps(s));
+            y[c] = _mm_cvtss_f32(s);
+        }
+    }
+};
+
+// 512 bits, AVX-512F: 16 taps per vector, the last block of 8 (taps % 16) masked
+struct Avx512Kernel
+{
+    enum { kGroup = 8 };
+
+    template <int C>
+    __attribute__((target("avx512f")))
+    static inline void Dot(const float* x, size_t stride, const float* c0, const float* c1,
+                           float a, int taps, float* y)
+    {
+        const int kAcc = (C <= 2) ? 2 : 1;
+        const __m512 va = _mm512_set1_ps(a);
+        __m512 acc[kAcc][C];
+        JACK_UNROLL
+        for (int j = 0; j < kAcc; j++) {
+            JACK_UNROLL
+            for (int c = 0; c < C; c++) {
+                acc[j][c] = _mm512_setzero_ps();
+            }
+        }
+        // rows are 32-byte aligned only (taps a multiple of 8): unaligned loads
+        int i = 0;
+        for (; i + 16 * kAcc <= taps; i += 16 * kAcc) {
+            JACK_UNROLL
+            for (int j = 0; j < kAcc; j++) {
+                const __m512 r0 = _mm512_loadu_ps(c0 + i + 16 * j);
+                const __m512 row = _mm512_fmadd_ps(va, _mm512_sub_ps(_mm512_loadu_ps(c1 + i + 16 * j), r0), r0);
+                JACK_UNROLL
+                for (int c = 0; c < C; c++) {
+                    acc[j][c] = _mm512_fmadd_ps(_mm512_loadu_ps(x + c * stride + i + 16 * j), row, acc[j][c]);
+                }
+            }
+        }
+        if (kAcc > 1 && i + 16 <= taps) {
+            const __m512 r0 = _mm512_loadu_ps(c0 + i);
+            const __m512 row = _mm512_fmadd_ps(va, _mm512_sub_ps(_mm512_loadu_ps(c1 + i), r0), r0);
+            JACK_UNROLL
+            for (int c = 0; c < C; c++) {
+                acc[0][c] = _mm512_fmadd_ps(_mm512_loadu_ps(x + c * stride + i), row, acc[0][c]);
+            }
+            i += 16;
+        }
+        if (i < taps) {
+            // 8 taps left: the masked-off lanes load nothing and add zero
+            const __mmask16 m = 0x00ff;
+            const __m512 r0 = _mm512_maskz_loadu_ps(m, c0 + i);
+            const __m512 row = _mm512_fmadd_ps(va, _mm512_sub_ps(_mm512_maskz_loadu_ps(m, c1 + i), r0), r0);
+            JACK_UNROLL
+            for (int c = 0; c < C; c++) {
+                acc[0][c] = _mm512_fmadd_ps(_mm512_maskz_loadu_ps(m, x + c * stride + i), row, acc[0][c]);
+            }
+        }
+        JACK_UNROLL
+        for (int c = 0; c < C; c++) {
+            __m512 t = acc[0][c];
+            if (kAcc > 1) {
+                t = _mm512_add_ps(t, acc[kAcc - 1][c]);
+            }
+            const __m256 h = _mm256_add_ps(_mm512_castps512_ps256(t),
+                                           _mm256_castpd_ps(_mm512_extractf64x4_pd(_mm512_castps_pd(t), 1)));
+            __m128 s = _mm_add_ps(_mm256_castps256_ps128(h), _mm256_extractf128_ps(h, 1));
             s = _mm_add_ps(s, _mm_movehl_ps(s, s));
             s = _mm_add_ss(s, _mm_movehdup_ps(s));
             y[c] = _mm_cvtss_f32(s);
@@ -362,13 +476,46 @@ int LoopScalar(Run& r, float* const* out, int n)
     return Passes<ScalarKernel>(r, out, n);
 }
 
-#ifdef JACK_BRIDGE_AVX2
+#ifdef JACK_BRIDGE_X86_SIMD
+__attribute__((target("sse2"), flatten))
+int LoopSse2(Run& r, float* const* out, int n)
+{
+    return Passes<Sse2Kernel>(r, out, n);
+}
+
 __attribute__((target("avx2,fma"), flatten))
 int LoopAvx2(Run& r, float* const* out, int n)
 {
     return Passes<Avx2Kernel>(r, out, n);
 }
+
+__attribute__((target("avx512f"), flatten))
+int LoopAvx512(Run& r, float* const* out, int n)
+{
+    return Passes<Avx512Kernel>(r, out, n);
+}
 #endif
+
+bool VariantSupported(int variant)
+{
+    if (variant == JackBridgeResampler::kPortable) {
+        return true;
+    }
+#ifdef JACK_BRIDGE_X86_SIMD
+    __builtin_cpu_init();
+    switch (variant) {
+        case JackBridgeResampler::kSse2:
+            return __builtin_cpu_supports("sse2");
+        case JackBridgeResampler::kAvx2:
+            return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
+        case JackBridgeResampler::kAvx512:
+            return __builtin_cpu_supports("avx512f");
+    }
+#endif
+    return false;
+}
+
+const char* const kVariantNames[4] = { "portable", "sse2", "avx2", "avx512" };
 
 } // namespace
 
@@ -376,7 +523,7 @@ JackBridgeResampler::JackBridgeResampler()
     : fChannels(0), fTaps(0), fHalf(0), fPhaseBits(0), fCapacity(0), fStride(0), fTable(0),
       fHistory(0), fTableMem(0), fHistoryMem(0), fPushed(0), fBase(0), fIndex(0), fFrac(0),
       fRatio(kOne), fNominal(kOne), fMinRatio(kOne), fMaxRatio(kOne), fSmoothK(0),
-      fSimd(false), fSimdAvailable(false)
+      fSimd(false), fSimdVariant(kPortable)
 {
     SetRatioSmoothing(100);
 }
@@ -483,13 +630,22 @@ bool JackBridgeResampler::Init(int channels, double nominal_ratio, int quality, 
     fMinRatio = (uint64_t)(nominal_ratio * 0.8 * (double)kOne);
     fMaxRatio = (uint64_t)(max_ratio * (double)kOne);
 
-#ifdef JACK_BRIDGE_AVX2
-    __builtin_cpu_init();
-    fSimdAvailable = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
-#else
-    fSimdAvailable = false;
+    // AVX2 + FMA; else SSE2 on x86-64 (on i386 its 8 xmm registers are too few)
+    fSimdVariant = VariantSupported(kAvx2) ? (int)kAvx2 : (int)kPortable;
+#ifdef __x86_64__
+    if (fSimdVariant == kPortable && VariantSupported(kSse2)) {
+        fSimdVariant = kSse2;
+    }
 #endif
-    fSimd = fSimdAvailable;
+    // measurement: another variant by name
+    if (const char* name = getenv("JACK_BRIDGE_RESAMPLER")) {
+        for (int v = 0; v < 4; v++) {
+            if (!strcmp(name, kVariantNames[v]) && VariantSupported(v)) {
+                fSimdVariant = v;
+            }
+        }
+    }
+    fSimd = (fSimdVariant != kPortable);
 
     Reset();
     return true;
@@ -520,7 +676,22 @@ void JackBridgeResampler::SetRatioSmoothing(int samples)
 
 void JackBridgeResampler::ForceScalar(bool scalar)
 {
-    fSimd = fSimdAvailable && !scalar;
+    fSimd = (fSimdVariant != kPortable) && !scalar;
+}
+
+bool JackBridgeResampler::ForceVariant(int variant)
+{
+    if (variant < kPortable || variant > kAvx512 || !VariantSupported(variant)) {
+        return false;
+    }
+    fSimdVariant = variant;
+    fSimd = (variant != kPortable);
+    return true;
+}
+
+const char* JackBridgeResampler::VariantName(int variant)
+{
+    return (variant >= kPortable && variant <= kAvx512) ? kVariantNames[variant] : "?";
 }
 
 int JackBridgeResampler::Push(const float* const* in, int frames)
@@ -619,11 +790,23 @@ int JackBridgeResampler::Produce(float* const* out, int n, uint64_t target)
     r.ratio = fRatio;
     r.target = target;
     r.k = fSmoothK;
-#ifdef JACK_BRIDGE_AVX2
-    const int done = fSimd ? LoopAvx2(r, out, n) : LoopScalar(r, out, n);
-#else
-    const int done = LoopScalar(r, out, n);
+    int done;
+    switch (ActiveVariant()) {
+#ifdef JACK_BRIDGE_X86_SIMD
+        case kSse2:
+            done = LoopSse2(r, out, n);
+            break;
+        case kAvx2:
+            done = LoopAvx2(r, out, n);
+            break;
+        case kAvx512:
+            done = LoopAvx512(r, out, n);
+            break;
 #endif
+        default:
+            done = LoopScalar(r, out, n);
+            break;
+    }
     fIndex = r.index;
     fFrac = r.frac;
     fRatio = r.ratio;

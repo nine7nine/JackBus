@@ -34,7 +34,8 @@ namespace Jack
  rate. The coefficient row of the exact phase is linearly interpolated between
  the two nearest table phases once per output frame and shared by all
  channels (one dot product per channel). AVX2 + FMA when the CPU has it,
- portable C++ otherwise.
+ else SSE2 on x86-64, else portable C++; an AVX-512 path exists for
+ measurement (ForceVariant()).
 
  quality  taps  phases  band edge (x lower rate)  worst SNR in band, 48 kHz drift
     0       32    256    0.42 (20 kHz at 48k)      77 dB
@@ -69,6 +70,9 @@ class JackBridgeResampler
     public:
 
         enum { kFracBits = 56 };  //!< fractional bits of positions and ratios
+
+        //! Implementations of the inner loop (ForceVariant()).
+        enum Variant { kPortable = 0, kSse2 = 1, kAvx2 = 2, kAvx512 = 3 };
 
         JackBridgeResampler();
         ~JackBridgeResampler();
@@ -136,8 +140,23 @@ class JackBridgeResampler
         int Phases() const { return 1 << fPhaseBits; }
         bool UsesSimd() const { return fSimd; }
 
-        //! Testing: use the portable path even if the CPU has AVX2 + FMA.
+        //! Testing: use the portable path even if the CPU has a SIMD path.
         void ForceScalar(bool scalar);
+
+        /*!
+         Measurement: make `variant` the SIMD path (the one ForceScalar(false)
+         selects) if this CPU has it, kPortable for none; returns false and
+         changes nothing otherwise. Init() sets the default (kAvx2 with AVX2 +
+         FMA, else kSse2 on x86-64, else kPortable), or the variant named by the
+         environment variable JACK_BRIDGE_RESAMPLER (portable, sse2, avx2,
+         avx512) if set and supported.
+        */
+        bool ForceVariant(int variant);
+
+        //! The variant Pull uses now.
+        int ActiveVariant() const { return fSimd ? fSimdVariant : (int)kPortable; }
+
+        static const char* VariantName(int variant);
 
     private:
 
@@ -161,8 +180,8 @@ class JackBridgeResampler
         uint64_t fMinRatio;
         uint64_t fMaxRatio;
         uint32_t fSmoothK;      // 1 - exp(-1 / tau), 2^-32 units; 0: no smoothing
-        bool fSimd;
-        bool fSimdAvailable;
+        bool fSimd;             // fSimdVariant in use (else the portable path)
+        int fSimdVariant;       // Variant; kPortable: no SIMD path
 
         int64_t Needed(int n, uint64_t target) const;
         int Produce(float* const* out, int n, uint64_t target);
