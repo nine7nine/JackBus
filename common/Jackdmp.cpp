@@ -233,6 +233,8 @@ static void usage(FILE* file, jackctl_server_t *server, bool full = true)
     fprintf(file,
             "               [ --replace-registry ]\n"
             "               [ --cpu-dma-latency usecs (hold a PM QoS request while running) ]\n"
+            "               [ --bridge OR -B card[/period[/nperiods]][@auto|timer|irq] ]\n"
+            "                 (a sound card on its own clock, resampled into the graph; repeatable)\n"
             "               [ --silent OR -s ]\n"
             "               [ --sync OR -S ]\n"
             "               [ --temporary OR -T ]\n"
@@ -321,7 +323,7 @@ int main(int argc, char** argv)
     union jackctl_parameter_value value;
 
     std::list<char*> internals_list;
-    std::list<char*> bridges_list;      // jack2-nspa: --bridge device[/period][@wake]
+    std::list<char*> bridges_list;      // jack2-nspa: --bridge device[/period[/nperiods]][@wake]
     std::list<char*> slaves_list;
     std::list<char*>::iterator it;
 
@@ -645,39 +647,9 @@ int main(int argc, char** argv)
         goto close_server;
     }
 
-    // jack2-nspa: sound card bridges, once the server runs
+    // jack2-nspa: sound card bridges, once the server runs (device[/period[/nperiods]][@wake])
     for (std::list<char*>::iterator it = bridges_list.begin(); it != bridges_list.end(); it++) {
-        jackctl_driver_t * bridge = jackctl_server_get_driver(server_ctl, "bridge");
-        if (!bridge) {
-            fprintf(stderr, "No bridge driver: cannot bridge %s\n", *it);
-            break;
-        }
-        char spec[256];
-        snprintf(spec, sizeof(spec), "%s", *it);
-        char * at = strchr(spec, '@');
-        char * slash = strchr(spec, '/');
-        union jackctl_parameter_value v;
-        const JSList * params = jackctl_driver_get_parameters(bridge);
-        jackctl_parameter_t * param;
-        if (at) {
-            *at = 0;
-            if ((param = jackctl_get_parameter(params, "wake"))) {
-                snprintf(v.str, sizeof(v.str), "%s", at + 1);
-                jackctl_parameter_set_value(param, &v);
-            }
-        }
-        if (slash) {
-            *slash = 0;
-            if ((param = jackctl_get_parameter(params, "period"))) {
-                v.ui = (uint32_t)atoi(slash + 1);
-                jackctl_parameter_set_value(param, &v);
-            }
-        }
-        if ((param = jackctl_get_parameter(params, "device"))) {
-            snprintf(v.str, sizeof(v.str), "%s", spec);
-            jackctl_parameter_set_value(param, &v);
-        }
-        if (!jackctl_server_add_bridge(server_ctl, bridge)) {
+        if (!jackctl_server_add_bridge_spec(server_ctl, *it, NULL)) {
             fprintf(stderr, "Cannot bridge %s\n", *it);
         }
     }

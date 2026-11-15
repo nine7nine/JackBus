@@ -2,8 +2,7 @@
 # A sound card bridge inside a JACK server (the fork's jackd, isolated: nspa/run-isolated.sh): the
 # dummy driver as master, the card bridged (--bridge), a client reading its first capture port
 # and writing silence to its first playback port; xruns, the ports' latencies and flags, and the
-# server's log. The card's device reservation is held and every playback control of the card is
-# set to 0 and muted for the run (restored afterwards). Not the live server's card.
+# server's log. The cards are held and muted for the run (with-cards.sh). Not the live server's card.
 #   nspa/tests/bridge/server-bridge.sh <card id[,card id...]> [seconds=30] [master period=256] [bridge spec suffix, e.g. /64@timer]
 # (several cards: all bridged, the client on the first; the HDA card: through nspa/tests/hw/with-card.sh)
 set -u
@@ -12,54 +11,7 @@ card=${cards%%,*}
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
-    work=$(mktemp -d /tmp/nspa-bridge-mixer.XXXXXX)
-    # every playback control at 0 and muted
-    mute() {
-        amixer -c "$1" scontrols 2>/dev/null | sed -n "s/^Simple mixer control '\(.*\)',\([0-9]*\)$/\1,\2/p" | while IFS= read -r x; do
-            caps=$(amixer -c "$1" sget "$x" | sed -n 's/^ *Capabilities: //p')
-            case " $caps " in *" pvolume"*) amixer -q -c "$1" sset "$x" 0% ;; esac
-            case " $caps " in *" pswitch"*) amixer -q -c "$1" sset "$x" mute ;; esac
-        done
-    }
-    # the card's device reservation, so the desktop's sound server leaves it alone
-    reserve() {
-        pw-reserve -n "Audio$1" -a nspa-bridge-test -p 1000 -r >/dev/null 2>&1 &
-        echo $! >> "$work/reserve.pids"
-    }
-    index() { readlink "/proc/asound/$1" 2>/dev/null | sed 's/^card//'; }
-    for c in $(echo "$cards" | tr ',' ' '); do
-        idx=$(index "$c")
-        [ -n "$idx" ] || { echo "SKIP: no card $c"; exit 0; }
-        reserve "$idx"
-        echo "$idx" > "$work/$c.idx"
-        # kept by card id: an unplugged card can come back with another index
-        if [ -n "$(amixer -c "$c" scontrols 2>/dev/null)" ] && alsactl -f "$work/$c.state" store "$c"; then
-            mute "$c"
-        fi
-    done
-    # A card unplugged and plugged in again during the run comes back with its usual volumes
-    # (udev restores them): reserved again if its index changed, muted again (twice: the restore
-    # may come after the first)
-    (
-        while :; do
-            for c in $(echo "$cards" | tr ',' ' '); do
-                idx=$(index "$c")
-                if [ -z "$idx" ]; then
-                    rm -f "$work/$c.present"
-                elif [ ! -e "$work/$c.present" ]; then
-                    touch "$work/$c.present"
-                    [ "$idx" = "$(cat "$work/$c.idx")" ] || { reserve "$idx"; echo "$idx" > "$work/$c.idx"; }
-                    mute "$c"; sleep 2; mute "$c"
-                fi
-            done
-            sleep 0.2
-        done
-    ) &
-    watcher=$!
-    trap 'kill $watcher 2>/dev/null; for f in "$work"/*.state; do [ -f "$f" ] && alsactl -f "$f" restore "$(basename "$f" .state)" >/dev/null 2>&1; done; [ -f "$work/reserve.pids" ] && kill $(cat "$work/reserve.pids") 2>/dev/null; rm -rf "$work"' EXIT INT TERM
-    sleep 1
-    "$root/nspa/run-isolated.sh" "$0" "$@"
-    exit $?
+    exec "$here/with-cards.sh" "$cards" "$0" "$@"
 fi
 work=$(mktemp -d /tmp/nspa-bridge-server.XXXXXX)
 # A private session bus (nothing on it can be activated): the bridges' device reservations

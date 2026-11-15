@@ -34,6 +34,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackError.h"
 #include "JackMessageBuffer.h"
 #include "JackInternalSessionLoader.h"
+#include "JackControlNspa.h"
 
 const char * jack_get_self_connect_mode_description(char mode);
 
@@ -558,6 +559,7 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
     }
     fAudioDriverClosed = false;
     RestoreMasterConnections();
+    BridgesFollowMaster(old_buffer_size, old_sample_rate);
 
     // Notify clients of new values (jack2-nspa: only those that changed)
     if (fEngineControl->fBufferSize != old_buffer_size) {
@@ -578,6 +580,29 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
 // jack2-nspa: sound card bridges
 //------------------------------------
 
+void JackServer::BridgesFollowMaster(jack_nframes_t old_buffer_size, jack_nframes_t old_sample_rate)
+{
+    const jack_nframes_t rate = fEngineControl->fSampleRate;
+    const jack_nframes_t n = fEngineControl->fBufferSize;
+    if (rate == old_sample_rate && n == old_buffer_size) {
+        return;
+    }
+    pthread_mutex_lock(&fBridgeLock);
+    for (std::list<JackDriverInfo*>::iterator it = fBridgeInfos.begin(); it != fBridgeInfos.end(); it++) {
+        JackBridgeInterface* bridge = dynamic_cast<JackBridgeInterface*>((*it)->GetBackend());
+        if (!bridge) {
+            continue;
+        }
+        // a new rate sets the bridge up afresh (for the new buffer size too)
+        if (rate != old_sample_rate) {
+            bridge->BridgeSampleRate(rate);
+        } else {
+            bridge->BridgeBufferSize(n);
+        }
+    }
+    pthread_mutex_unlock(&fBridgeLock);
+}
+
 void JackServer::CloseBridge(JackDriverInfo* info)
 {
     JackDriverClientInterface* driver = info->GetBackend();
@@ -589,7 +614,7 @@ void JackServer::CloseBridge(JackDriverInfo* info)
     delete info;
 }
 
-int JackServer::AddBridge(jack_driver_desc_t* driver_desc, JSList* driver_params)
+int JackServer::AddBridge(jack_driver_desc_t* driver_desc, JSList* driver_params, char* name)
 {
     JackDriverInfo* info = new JackDriverInfo();
     // the bridge driver's factory opens the card and the bridge's client (OpenBridge)
@@ -630,6 +655,9 @@ int JackServer::AddBridge(jack_driver_desc_t* driver_desc, JSList* driver_params
     fBridgeInfos.push_back(info);
     pthread_mutex_unlock(&fBridgeLock);
     StartBridgeMonitor();
+    if (name) {
+        snprintf(name, JACK_CLIENT_NAME_SIZE + 1, "%s", driver->GetClientControl()->fName);
+    }
     return 0;
 }
 
@@ -707,12 +735,28 @@ int JackServer::RemoveBridge(const char* name)
 int JackServer::GetBridgeNames(char names[][JACK_CLIENT_NAME_SIZE + 1], int max)
 {
     int n = 0;
+    pthread_mutex_lock(&fBridgeLock);
     for (std::list<JackDriverInfo*>::iterator it = fBridgeInfos.begin(); it != fBridgeInfos.end() && n < max; it++) {
         JackDriverClientInterface* driver = (*it)->GetBackend();
         if (driver) {
             snprintf(names[n++], JACK_CLIENT_NAME_SIZE + 1, "%s", driver->GetClientControl()->fName);
         }
     }
+    pthread_mutex_unlock(&fBridgeLock);
+    return n;
+}
+
+int JackServer::GetBridgeStatus(jackctl_bridge_status* status, int max)
+{
+    int n = 0;
+    pthread_mutex_lock(&fBridgeLock);
+    for (std::list<JackDriverInfo*>::iterator it = fBridgeInfos.begin(); it != fBridgeInfos.end() && n < max; it++) {
+        JackBridgeInterface* bridge = dynamic_cast<JackBridgeInterface*>((*it)->GetBackend());
+        if (bridge) {
+            bridge->BridgeStatus(&status[n++]);
+        }
+    }
+    pthread_mutex_unlock(&fBridgeLock);
     return n;
 }
 

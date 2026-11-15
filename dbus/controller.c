@@ -257,6 +257,10 @@ jack_controller_start_server(
 
     controller_ptr->started = true;
 
+    /* jack2-nspa: the sound card bridges listed */
+    controller_ptr->bridges_running = 0;
+    jack_controller_bridges_apply(controller_ptr);
+
     return TRUE;
 
 fail_patchbay_uninit:
@@ -342,6 +346,7 @@ jack_controller_stop_server(
     }
 
     controller_ptr->started = false;
+    controller_ptr->bridges_running = 0;    /* closed with the server */
 
     return TRUE;
 }
@@ -574,6 +579,429 @@ static union jackctl_parameter_value slave_drivers_parameter_get_default_value(v
 
 #undef controller_ptr
 
+/*
+ jack2-nspa: sound card bridges. The "bridges" engine parameter lists them as jackd's --bridge
+ takes them, device[/period[/nperiods]][@wake], separated by spaces (device names have commas:
+ "hw:U44,0"). They are added once the server runs, and while it runs a change to the list adds
+ and removes bridges at once. A listed card that is not there, or cannot be opened, stays listed
+ but not running: it is tried again whenever sound cards change (a card plugged in).
+*/
+
+#define BRIDGE_SEPARATORS " \t;"
+#define BRIDGE_DEVICE_SIZE (JACK_PARAM_STRING_MAX + 8)     /* a spec's device, "hw:" and ",0" added */
+
+static int
+jack_controller_bridges_split(
+    const char * list,
+    char specs[][JACK_PARAM_STRING_MAX + 1],
+    int max)
+{
+    char buffer[JACK_PARAM_STRING_MAX + 1];
+    char * save;
+    char * token;
+    int n = 0;
+
+    snprintf(buffer, sizeof(buffer), "%s", list);
+    for (token = strtok_r(buffer, BRIDGE_SEPARATORS, &save);
+         token != NULL && n < max;
+         token = strtok_r(NULL, BRIDGE_SEPARATORS, &save))
+    {
+        snprintf(specs[n++], JACK_PARAM_STRING_MAX + 1, "%s", token);
+    }
+    return n;
+}
+
+/* the device a spec names, as one name for one device: "U44", "hw:U44" and "hw:U44,0" are all
+   "hw:U44,0" */
+static void
+jack_controller_bridge_device(
+    const char * spec,
+    char * device,
+    size_t size)
+{
+    char buffer[JACK_PARAM_STRING_MAX + 1];
+    const size_t len = strcspn(spec, "/@");
+
+    snprintf(buffer, sizeof(buffer), "%.*s", (int)(len < sizeof(buffer) ? len : sizeof(buffer) - 1), spec);
+    if (strchr(buffer, ':') == NULL)
+    {
+        snprintf(device, size, "hw:%s,0", buffer);
+    }
+    else if ((strncmp(buffer, "hw:", 3) == 0 || strncmp(buffer, "plughw:", 7) == 0) && strchr(buffer, ',') == NULL)
+    {
+        snprintf(device, size, "%s,0", buffer);
+    }
+    else
+    {
+        snprintf(device, size, "%s", buffer);
+    }
+}
+
+/* whether the card a spec names is there now (/proc/asound/<id> or card<n>; other device names
+   than hw: and plughw: ones: assumed) */
+static bool
+jack_controller_bridge_card_present(
+    const char * spec)
+{
+    char device[BRIDGE_DEVICE_SIZE];
+    char card[64];
+    char path[128];
+    const char * p;
+
+    jack_controller_bridge_device(spec, device, sizeof(device));
+    if (strncmp(device, "hw:", 3) == 0)
+    {
+        p = device + 3;
+    }
+    else if (strncmp(device, "plughw:", 7) == 0)
+    {
+        p = device + 7;
+    }
+    else
+    {
+        return true;
+    }
+    if (strncmp(p, "CARD=", 5) == 0)
+    {
+        p += 5;
+    }
+    snprintf(card, sizeof(card), "%.*s", (int)strcspn(p, ","), p);
+    if (card[0] == 0)
+    {
+        return true;
+    }
+    if (card[strspn(card, "0123456789")] == 0)
+    {
+        snprintf(path, sizeof(path), "/proc/asound/card%s", card);
+    }
+    else
+    {
+        snprintf(path, sizeof(path), "/proc/asound/%s", card);
+    }
+    return access(path, F_OK) == 0;
+}
+
+static int
+jack_controller_bridges_running_index(
+    struct jack_controller * controller_ptr,
+    const char * spec)
+{
+    int i;
+
+    for (i = 0; i < controller_ptr->bridges_running; i++)
+    {
+        if (strcmp(controller_ptr->bridge_spec[i], spec) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const char *
+jack_controller_bridges_running_name(
+    struct jack_controller * controller_ptr,
+    const char * spec)
+{
+    const int i = jack_controller_bridges_running_index(controller_ptr, spec);
+
+    return i < 0 ? NULL : controller_ptr->bridge_name[i];
+}
+
+static void
+jack_controller_bridges_forget(
+    struct jack_controller * controller_ptr,
+    int i)
+{
+    for (; i + 1 < controller_ptr->bridges_running; i++)
+    {
+        memcpy(controller_ptr->bridge_spec[i], controller_ptr->bridge_spec[i + 1], sizeof(controller_ptr->bridge_spec[i]));
+        memcpy(controller_ptr->bridge_name[i], controller_ptr->bridge_name[i + 1], sizeof(controller_ptr->bridge_name[i]));
+    }
+    controller_ptr->bridges_running--;
+}
+
+static void
+jack_controller_bridges_remember(
+    struct jack_controller * controller_ptr,
+    const char * spec,
+    const char * name)
+{
+    const int i = controller_ptr->bridges_running;
+
+    if (i >= JACK_CONTROLLER_BRIDGES_MAX)
+    {
+        return;
+    }
+    snprintf(controller_ptr->bridge_spec[i], sizeof(controller_ptr->bridge_spec[i]), "%s", spec);
+    snprintf(controller_ptr->bridge_name[i], sizeof(controller_ptr->bridge_name[i]), "%s", name);
+    controller_ptr->bridges_running++;
+}
+
+/* the server running: the bridges it runs follow the list */
+void
+jack_controller_bridges_apply(
+    struct jack_controller * controller_ptr)
+{
+    char specs[JACK_CONTROLLER_BRIDGES_MAX][JACK_PARAM_STRING_MAX + 1];
+    char name[64 + 1];
+    int n;
+    int i;
+    int j;
+    bool listed;
+
+    if (!controller_ptr->started)
+    {
+        return;
+    }
+    n = jack_controller_bridges_split(controller_ptr->bridges_vparam_value.str, specs, JACK_CONTROLLER_BRIDGES_MAX);
+
+    /* no longer listed: removed */
+    for (i = 0; i < controller_ptr->bridges_running; )
+    {
+        listed = false;
+        for (j = 0; j < n; j++)
+        {
+            if (strcmp(specs[j], controller_ptr->bridge_spec[i]) == 0)
+            {
+                listed = true;
+            }
+        }
+        if (listed)
+        {
+            i++;
+        }
+        else if (jackctl_server_remove_bridge(controller_ptr->server, controller_ptr->bridge_name[i]))
+        {
+            jack_info("bridge %s removed", controller_ptr->bridge_name[i]);
+            jack_controller_bridges_forget(controller_ptr, i);
+        }
+        else
+        {
+            i++;    /* the server still has it */
+        }
+    }
+
+    /* listed and not running: added, if the card is there (else when sound cards change) */
+    for (j = 0; j < n; j++)
+    {
+        if (jack_controller_bridges_running_index(controller_ptr, specs[j]) >= 0 ||
+            !jack_controller_bridge_card_present(specs[j]))
+        {
+            continue;
+        }
+        if (jackctl_server_add_bridge_spec(controller_ptr->server, specs[j], name))
+        {
+            jack_controller_bridges_remember(controller_ptr, specs[j], name);
+        }
+        else
+        {
+            jack_error("bridge %s not added: tried again when sound cards change", specs[j]);
+        }
+    }
+}
+
+/* the list, checked (each spec, each device once) and with single spaces; false: not stored */
+static bool
+jack_controller_bridges_store(
+    struct jack_controller * controller_ptr,
+    const char * list,
+    char * error,
+    size_t error_size)
+{
+    char specs[JACK_CONTROLLER_BRIDGES_MAX + 1][JACK_PARAM_STRING_MAX + 1];
+    char device_i[BRIDGE_DEVICE_SIZE];
+    char device_j[BRIDGE_DEVICE_SIZE];
+    char joined[JACK_PARAM_STRING_MAX + 1];
+    size_t len = 0;
+    int n;
+    int i;
+    int j;
+
+    if (strlen(list) > JACK_PARAM_STRING_MAX)
+    {
+        snprintf(error, error_size, "the bridges list is longer than %d characters", JACK_PARAM_STRING_MAX);
+        return false;
+    }
+    n = jack_controller_bridges_split(list, specs, JACK_CONTROLLER_BRIDGES_MAX + 1);
+    if (n > JACK_CONTROLLER_BRIDGES_MAX)
+    {
+        snprintf(error, error_size, "no more than %d bridges", JACK_CONTROLLER_BRIDGES_MAX);
+        return false;
+    }
+    joined[0] = 0;
+    for (i = 0; i < n; i++)
+    {
+        if (!jackctl_bridge_spec_check(specs[i]))
+        {
+            snprintf(error, error_size, "not a bridge: \"%s\" (device[/period[/nperiods]][@auto|timer|irq])", specs[i]);
+            return false;
+        }
+        jack_controller_bridge_device(specs[i], device_i, sizeof(device_i));
+        for (j = 0; j < i; j++)
+        {
+            jack_controller_bridge_device(specs[j], device_j, sizeof(device_j));
+            if (strcmp(device_i, device_j) == 0)
+            {
+                snprintf(error, error_size, "%s is bridged already (%s)", device_i, specs[j]);
+                return false;
+            }
+        }
+        len += snprintf(joined + len, sizeof(joined) - len, "%s%s", i ? " " : "", specs[i]);
+    }
+    snprintf(controller_ptr->bridges_vparam_value.str, sizeof(controller_ptr->bridges_vparam_value.str), "%s", joined);
+    controller_ptr->bridges_set = (n > 0);
+    return true;
+}
+
+#define controller_ptr ((struct jack_controller *)obj)
+
+static bool bridges_parameter_is_set(void * obj)
+{
+    return controller_ptr->bridges_set;
+}
+
+static bool bridges_parameter_set_value(void * obj, const union jackctl_parameter_value * value_ptr)
+{
+    char error[256];
+
+    if (!jack_controller_bridges_store(controller_ptr, value_ptr->str, error, sizeof(error)))
+    {
+        jack_error("bridges: %s", error);
+        return false;
+    }
+    jack_controller_bridges_apply(controller_ptr);
+    return true;
+}
+
+static bool bridges_parameter_reset(void * obj)
+{
+    union jackctl_parameter_value value;
+
+    value.str[0] = 0;
+    return bridges_parameter_set_value(obj, &value);
+}
+
+static union jackctl_parameter_value bridges_parameter_get_value(void * obj)
+{
+    return controller_ptr->bridges_vparam_value;
+}
+
+static union jackctl_parameter_value bridges_parameter_get_default_value(void * obj)
+{
+    union jackctl_parameter_value value;
+    value.str[0] = 0;
+    return value;
+}
+
+#undef controller_ptr
+
+bool
+jack_controller_bridges_add(
+    struct jack_controller * controller_ptr,
+    const char * spec,
+    char name[64 + 1],
+    char * error,
+    size_t error_size)
+{
+    char list[2 * JACK_PARAM_STRING_MAX + 2];
+    char saved[JACK_PARAM_STRING_MAX + 1];
+
+    name[0] = 0;
+    if (strpbrk(spec, BRIDGE_SEPARATORS) != NULL || spec[0] == 0)
+    {
+        snprintf(error, error_size, "not a bridge: \"%s\"", spec);
+        return false;
+    }
+    snprintf(saved, sizeof(saved), "%s", controller_ptr->bridges_vparam_value.str);
+    snprintf(list, sizeof(list), "%s%s%s", saved, saved[0] ? " " : "", spec);
+    if (!jack_controller_bridges_store(controller_ptr, list, error, error_size))
+    {
+        return false;
+    }
+    if (!controller_ptr->started)
+    {
+        return true;    /* added when the server starts */
+    }
+    /* now, or not at all */
+    if (!jack_controller_bridge_card_present(spec))
+    {
+        snprintf(error, error_size, "the card of %s is not there", spec);
+    }
+    else if (jackctl_server_add_bridge_spec(controller_ptr->server, spec, name))
+    {
+        jack_controller_bridges_remember(controller_ptr, spec, name);
+        return true;
+    }
+    else
+    {
+        snprintf(error, error_size, "%s could not be bridged (the server's log says why)", spec);
+    }
+    jack_controller_bridges_store(controller_ptr, saved, error + strlen(error), 0);
+    return false;
+}
+
+bool
+jack_controller_bridges_remove(
+    struct jack_controller * controller_ptr,
+    const char * what,
+    char * error,
+    size_t error_size)
+{
+    char specs[JACK_CONTROLLER_BRIDGES_MAX][JACK_PARAM_STRING_MAX + 1];
+    char device[BRIDGE_DEVICE_SIZE];
+    char wanted[BRIDGE_DEVICE_SIZE];
+    char list[JACK_PARAM_STRING_MAX + 1];
+    const char * name;
+    size_t len = 0;
+    int found = -1;
+    int running;
+    int n;
+    int i;
+
+    /* by the bridge's client name, its spec, or its device */
+    n = jack_controller_bridges_split(controller_ptr->bridges_vparam_value.str, specs, JACK_CONTROLLER_BRIDGES_MAX);
+    jack_controller_bridge_device(what, wanted, sizeof(wanted));
+    for (i = 0; i < n && found < 0; i++)
+    {
+        name = jack_controller_bridges_running_name(controller_ptr, specs[i]);
+        jack_controller_bridge_device(specs[i], device, sizeof(device));
+        if (strcmp(specs[i], what) == 0 || strcmp(device, wanted) == 0 || (name != NULL && strcmp(name, what) == 0))
+        {
+            found = i;
+        }
+    }
+    if (found < 0)
+    {
+        snprintf(error, error_size, "no bridge %s", what);
+        return false;
+    }
+    running = jack_controller_bridges_running_index(controller_ptr, specs[found]);
+    if (running >= 0)
+    {
+        if (!jackctl_server_remove_bridge(controller_ptr->server, controller_ptr->bridge_name[running]))
+        {
+            snprintf(error, error_size, "the bridge %s could not be removed", controller_ptr->bridge_name[running]);
+            return false;
+        }
+        jack_info("bridge %s removed", controller_ptr->bridge_name[running]);
+        jack_controller_bridges_forget(controller_ptr, running);
+    }
+    list[0] = 0;
+    for (i = 0; i < n; i++)
+    {
+        if (i != found)
+        {
+            len += snprintf(list + len, sizeof(list) - len, "%s%s", len ? " " : "", specs[i]);
+        }
+    }
+    return jack_controller_bridges_store(controller_ptr, list, error, error_size);
+}
+
+#define controller_ptr ((struct jack_controller *)obj)
+
+#undef controller_ptr
+
 /* jack2-nspa: sound card hotplug. The ALSA driver's device list was built once, when jackdbus
    started; a card plugged in later never appeared. jackdbus watches /dev/snd (inotify, read
    without blocking from the main loop, which wakes every 200 ms anyway) and, once the changes
@@ -760,6 +1188,8 @@ static void jack_controller_snd_watch_run(struct jack_controller * controller_pt
     controller_ptr->snd_first_change = 0;
     controller_ptr->snd_last_change = 0;
     jack_controller_snd_refresh(controller_ptr);
+    /* a listed bridge's card plugged in: bridged now */
+    jack_controller_bridges_apply(controller_ptr);
 }
 
 /* jack2-nspa: surviving an unplugged card. When the master driver's device goes away (a USB
@@ -1092,6 +1522,24 @@ jack_controller_create(
     address[0] = PTNODE_ENGINE;
     address[1] = NULL;
     jack_params_add_parameter(controller_ptr->params, address, true, &controller_ptr->slave_drivers_vparam);
+
+    controller_ptr->bridges_set = false;
+    controller_ptr->bridges_running = 0;
+    controller_ptr->bridges_vparam_value.str[0] = 0;
+    controller_ptr->bridges_vparam.obj = controller_ptr;
+    controller_ptr->bridges_vparam.vtable.is_set = bridges_parameter_is_set;
+    controller_ptr->bridges_vparam.vtable.reset = bridges_parameter_reset;
+    controller_ptr->bridges_vparam.vtable.get_value = bridges_parameter_get_value;
+    controller_ptr->bridges_vparam.vtable.set_value = bridges_parameter_set_value;
+    controller_ptr->bridges_vparam.vtable.get_default_value = bridges_parameter_get_default_value;
+    controller_ptr->bridges_vparam.type = JackParamString;
+    controller_ptr->bridges_vparam.name = "bridges";
+    controller_ptr->bridges_vparam.short_decr = "Sound card bridges";
+    controller_ptr->bridges_vparam.long_descr =
+        "Sound cards on their own clocks, resampled into the graph: device[/period[/nperiods]][@auto|timer|irq], "
+        "separated by spaces (\"U44 Headset/64\"). Changes apply at once while the server runs.";
+    controller_ptr->bridges_vparam.constraint_flags = 0;
+    jack_params_add_parameter(controller_ptr->params, address, true, &controller_ptr->bridges_vparam);
 
     controller_ptr->dbus_descriptor.context = controller_ptr;
     controller_ptr->dbus_descriptor.interfaces = g_jackcontroller_interfaces;

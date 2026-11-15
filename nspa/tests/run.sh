@@ -517,6 +517,14 @@ if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then
     "$here/hotplug.sh" "$JACK_BUILD/dbus/jackdbus" || fail=1
 fi
 
+# sound card bridges through jackdbus: the "bridges" parameter, Add/Remove/GetBridges, buffer
+# size and master rate changes (on snd-aloop: skips without it)
+if [ -n "$san" ]; then
+    echo "SKIP jackdbus-bridge (sanitizer run)"
+elif [ -x "$JACK_BUILD/dbus/jackdbus" ]; then
+    "$here/bridge/jackdbus-bridge.sh" || fail=1
+fi
+
 if [ "$san" = tsan ]; then
     # Under TSan, JACK's asynchronous thread cancellation aborts clients at
     # close and timing checks are meaningless: only the reports gate the run.

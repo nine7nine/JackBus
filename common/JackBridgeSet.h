@@ -22,6 +22,8 @@
 #include <stdint.h>
 #include <string.h>
 
+struct jackctl_bridge_status;
+
 namespace Jack
 {
 
@@ -41,6 +43,14 @@ class SERVER_EXPORT JackBridgeInterface
 
         // non-RT, the master stopped: its buffer size changed
         virtual int BridgeBufferSize(jack_nframes_t buffer_size) = 0;
+
+        // non-RT, the master stopped (a new master): its sample rate changed (and maybe its buffer
+        // size). The card is opened again at the new rate, the bridge set up afresh for it; the
+        // ports and their connections stay.
+        virtual int BridgeSampleRate(jack_nframes_t sample_rate) = 0;
+
+        // non-RT, under the server's bridge lock: the bridge as it is now
+        virtual void BridgeStatus(struct jackctl_bridge_status* status) = 0;
 
         // non-RT, about four times a second (the server's bridge monitor): the ports' latencies
         // follow the delays as placed; state changes are logged

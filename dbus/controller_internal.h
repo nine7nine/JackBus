@@ -49,6 +49,8 @@ struct jack_session_pending_command
     const char * path;
 };
 
+#define JACK_CONTROLLER_BRIDGES_MAX 16
+
 struct jack_controller
 {
     jackctl_server_t *server;
@@ -86,9 +88,43 @@ struct jack_controller
     jackctl_driver_t * fallback_from;
     int64_t fallback_next_try;  /* ms */
     int fallback_failures;
+
+    /* jack2-nspa: sound card bridges. The "bridges" engine parameter (kept with the settings)
+       lists them; these are the ones running now (spec as listed, the bridge's client name). */
+    struct jack_parameter bridges_vparam;
+    union jackctl_parameter_value bridges_vparam_value;
+    bool bridges_set;
+    int bridges_running;
+    char bridge_spec[JACK_CONTROLLER_BRIDGES_MAX][JACK_PARAM_STRING_MAX + 1];
+    char bridge_name[JACK_CONTROLLER_BRIDGES_MAX][64 + 1];
 };
 
 #define DEFAULT_DRIVER "dummy"
+
+/* jack2-nspa: sound card bridges (controller.c) */
+void
+jack_controller_bridges_apply(
+    struct jack_controller * controller_ptr);
+
+bool
+jack_controller_bridges_add(
+    struct jack_controller * controller_ptr,
+    const char * spec,
+    char name[64 + 1],
+    char * error,
+    size_t error_size);
+
+bool
+jack_controller_bridges_remove(
+    struct jack_controller * controller_ptr,
+    const char * what,
+    char * error,
+    size_t error_size);
+
+const char *
+jack_controller_bridges_running_name(
+    struct jack_controller * controller_ptr,
+    const char * spec);
 
 #define JACK_CONF_HEADER_TEXT                       \
     "JACK settings, as persisted by D-Bus object.\n"        \

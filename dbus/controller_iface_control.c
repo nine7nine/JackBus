@@ -59,6 +59,161 @@ jack_controller_control_send_signal_server_stopped()
 
 #define controller_ptr ((struct jack_controller *)call->context)
 
+/* jack2-nspa: the sound card bridges listed (the "bridges" engine parameter), each as it is now:
+   (spec, client name, card, capture, playback, rate, period, nperiods, capture channels, playback
+   channels, capture latency, playback latency, drift ppm, xruns, resyncs, underruns). A bridge
+   not running (the server stopped, its card not there) has an empty name and card "stopped" or
+   "absent", and zeros. */
+static const char *
+jack_control_bridge_card_state(int state)
+{
+    switch (state)
+    {
+    case 0: return "closed";
+    case 1: return "running";
+    case 2: return "gone";
+    case 3: return "failed";
+    }
+    return "unknown";
+}
+
+static const char *
+jack_control_bridge_direction_state(int state)
+{
+    switch (state)
+    {
+    case -1: return "none";
+    case 0: return "idle";
+    case 1: return "learning";
+    case 2: return "starting";
+    case 3: return "acquiring";
+    case 4: return "locked";
+    case 5: return "lost";
+    }
+    return "unknown";
+}
+
+static
+void
+jack_control_get_bridges(
+    struct jack_dbus_method_call * call)
+{
+    char specs[JACK_CONTROLLER_BRIDGES_MAX][JACK_PARAM_STRING_MAX + 1];
+    jackctl_bridge_status_t status[JACK_CONTROLLER_BRIDGES_MAX];
+    jackctl_bridge_status_t none;
+    const jackctl_bridge_status_t * st;
+    DBusMessageIter iter;
+    DBusMessageIter array_iter;
+    DBusMessageIter struct_iter;
+    const char * str;
+    const char * name;
+    dbus_uint32_t u;
+    double d;
+    dbus_uint64_t t;
+    char * save;
+    char * token;
+    char list[JACK_PARAM_STRING_MAX + 1];
+    int count = 0;
+    int nspecs = 0;
+    int i;
+    int k;
+    bool ok = true;
+
+    union jackctl_parameter_value value = controller_ptr->bridges_vparam.vtable.get_value(controller_ptr);
+    snprintf(list, sizeof(list), "%s", value.str);
+    for (token = strtok_r(list, " \t;", &save); token != NULL && nspecs < JACK_CONTROLLER_BRIDGES_MAX;
+         token = strtok_r(NULL, " \t;", &save))
+    {
+        snprintf(specs[nspecs++], sizeof(specs[0]), "%s", token);
+    }
+    if (controller_ptr->started)
+    {
+        count = jackctl_server_get_bridge_status(controller_ptr->server, status, JACK_CONTROLLER_BRIDGES_MAX);
+    }
+    memset(&none, 0, sizeof(none));
+    none.capture = -1;
+    none.playback = -1;
+
+    call->reply = dbus_message_new_method_return(call->message);
+    if (!call->reply)
+    {
+        goto fail;
+    }
+    dbus_message_iter_init_append(call->reply, &iter);
+    if (!dbus_message_iter_open_container(&iter, DBUS_TYPE_ARRAY, "(sssssuuuuudddttt)", &array_iter))
+    {
+        goto fail_unref;
+    }
+
+    for (i = 0; i < nspecs && ok; i++)
+    {
+        name = jack_controller_bridges_running_name(controller_ptr, specs[i]);
+        st = &none;
+        for (k = 0; name != NULL && k < count; k++)
+        {
+            if (strcmp(status[k].name, name) == 0)
+            {
+                st = &status[k];
+            }
+        }
+        ok = dbus_message_iter_open_container(&array_iter, DBUS_TYPE_STRUCT, NULL, &struct_iter);
+        if (!ok)
+        {
+            break;
+        }
+        str = specs[i];
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &str);
+        str = (st != &none) ? st->name : "";
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &str);
+        str = (st != &none) ? jack_control_bridge_card_state(st->card)
+                            : (controller_ptr->started ? "absent" : "stopped");
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &str);
+        str = jack_control_bridge_direction_state(st->capture);
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &str);
+        str = jack_control_bridge_direction_state(st->playback);
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &str);
+        u = st->rate;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT32, &u);
+        u = (dbus_uint32_t)st->period;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT32, &u);
+        u = (dbus_uint32_t)st->nperiods;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT32, &u);
+        u = (dbus_uint32_t)st->capture_channels;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT32, &u);
+        u = (dbus_uint32_t)st->playback_channels;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT32, &u);
+        d = st->capture_latency;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_DOUBLE, &d);
+        d = st->playback_latency;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_DOUBLE, &d);
+        d = st->drift_ppm;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_DOUBLE, &d);
+        t = (dbus_uint64_t)st->xruns;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT64, &t);
+        t = (dbus_uint64_t)st->resyncs;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT64, &t);
+        t = (dbus_uint64_t)st->underruns;
+        ok = ok && dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_UINT64, &t);
+        ok = dbus_message_iter_close_container(&array_iter, &struct_iter) && ok;
+    }
+    if (!ok)
+    {
+        dbus_message_iter_close_container(&iter, &array_iter);
+        goto fail_unref;
+    }
+    if (!dbus_message_iter_close_container(&iter, &array_iter))
+    {
+        goto fail_unref;
+    }
+    return;
+
+fail_unref:
+    dbus_message_unref(call->reply);
+    call->reply = NULL;
+fail:
+    jack_dbus_error(call, JACK_DBUS_ERROR_GENERIC, "out of memory");
+}
+
 /*
  * jack2-nspa: how each client in the graph keeps up, as an array of (client name,
  * cycles it had not finished when the next one began, its longest cycle in us).
@@ -409,6 +564,48 @@ jack_control_run_method(
             jack_controller_pending_save(controller_ptr);
         }
     }
+    else if (strcmp (call->method_name, "AddBridge") == 0)
+    {
+        const char *spec;
+        char name[64 + 1];
+        char error[256];
+        message_arg_t ret;
+
+        if (!jack_dbus_get_method_args(call, DBUS_TYPE_STRING, &spec, DBUS_TYPE_INVALID))
+        {
+            goto exit;
+        }
+        if (!jack_controller_bridges_add(controller_ptr, spec, name, error, sizeof(error)))
+        {
+            jack_dbus_error(call, JACK_DBUS_ERROR_GENERIC, "%s", error);
+            goto exit;
+        }
+        jack_controller_pending_save(controller_ptr);
+        ret.string = name;      /* "": the server is not running, added when it starts */
+        jack_dbus_construct_method_return_single(call, DBUS_TYPE_STRING, ret);
+        goto exit;
+    }
+    else if (strcmp (call->method_name, "RemoveBridge") == 0)
+    {
+        const char *what;
+        char error[256];
+
+        if (!jack_dbus_get_method_args(call, DBUS_TYPE_STRING, &what, DBUS_TYPE_INVALID))
+        {
+            goto exit;
+        }
+        if (!jack_controller_bridges_remove(controller_ptr, what, error, sizeof(error)))
+        {
+            jack_dbus_error(call, JACK_DBUS_ERROR_GENERIC, "%s", error);
+            goto exit;
+        }
+        jack_controller_pending_save(controller_ptr);
+    }
+    else if (strcmp (call->method_name, "GetBridges") == 0)
+    {
+        jack_control_get_bridges(call);
+        goto exit;
+    }
     else if (strcmp (call->method_name, "UnloadInternal") == 0)
     {
         const char *internal_name;
@@ -526,6 +723,19 @@ JACK_DBUS_METHOD_ARGUMENTS_BEGIN(RemoveSlaveDriver)
     JACK_DBUS_METHOD_ARGUMENT("driver_name", "s", false)
 JACK_DBUS_METHOD_ARGUMENTS_END
 
+JACK_DBUS_METHOD_ARGUMENTS_BEGIN(AddBridge)
+    JACK_DBUS_METHOD_ARGUMENT("spec", "s", false)
+    JACK_DBUS_METHOD_ARGUMENT("name", "s", true)
+JACK_DBUS_METHOD_ARGUMENTS_END
+
+JACK_DBUS_METHOD_ARGUMENTS_BEGIN(RemoveBridge)
+    JACK_DBUS_METHOD_ARGUMENT("bridge", "s", false)
+JACK_DBUS_METHOD_ARGUMENTS_END
+
+JACK_DBUS_METHOD_ARGUMENTS_BEGIN(GetBridges)
+    JACK_DBUS_METHOD_ARGUMENT("bridges", "a(sssssuuuuudddttt)", true)
+JACK_DBUS_METHOD_ARGUMENTS_END
+
 JACK_DBUS_METHODS_BEGIN
     JACK_DBUS_METHOD_DESCRIBE(IsStarted, NULL)
     JACK_DBUS_METHOD_DESCRIBE(StartServer, NULL)
@@ -545,6 +755,9 @@ JACK_DBUS_METHODS_BEGIN
     JACK_DBUS_METHOD_DESCRIBE(UnloadInternal, NULL)
     JACK_DBUS_METHOD_DESCRIBE(AddSlaveDriver, NULL)
     JACK_DBUS_METHOD_DESCRIBE(RemoveSlaveDriver, NULL)
+    JACK_DBUS_METHOD_DESCRIBE(AddBridge, NULL)
+    JACK_DBUS_METHOD_DESCRIBE(RemoveBridge, NULL)
+    JACK_DBUS_METHOD_DESCRIBE(GetBridges, NULL)
 JACK_DBUS_METHODS_END
 
 JACK_DBUS_SIGNAL_ARGUMENTS_BEGIN(ServerStarted)

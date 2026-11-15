@@ -113,6 +113,9 @@ class JackBridgeDirection
         int64_t PublishedResyncs() const { return fPubResyncs.load(std::memory_order_relaxed); }
         int64_t PublishedLost() const { return fPubLost.load(std::memory_order_relaxed); }
         int64_t PublishedUnderruns() const { return fPubUnderruns.load(std::memory_order_relaxed); }
+        // the resampling ratio over the nominal one, once a delay is placed (else 1): above 1, more
+        // input frames per output frame than the rates say
+        double PublishedRatio() const { return fPubRatio.load(std::memory_order_relaxed); }
         void PublishStats();
 
     protected:
@@ -153,6 +156,7 @@ class JackBridgeDirection
         std::atomic<int64_t> fPubResyncs;
         std::atomic<int64_t> fPubLost;
         std::atomic<int64_t> fPubUnderruns;
+        std::atomic<double> fPubRatio{1.0};
 
         // publishes the stats however Cycle returns
         struct Publisher

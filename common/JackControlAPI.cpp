@@ -1607,6 +1607,136 @@ SERVER_EXPORT int jackctl_server_get_bridges(jackctl_server * server_ptr, char n
     return server_ptr->engine->GetBridgeNames(names, max);
 }
 
+// "device[/period[/nperiods]][@wake]" (jackctl_server_add_bridge_spec): false if it is not one.
+// period, nperiods: 0 when not given; wake: "" when not given.
+static bool jackctl_parse_bridge_spec(const char * spec, char * device, size_t device_size,
+                                      unsigned * period, unsigned * nperiods, char * wake, size_t wake_size)
+{
+    char buf[JACK_PARAM_STRING_MAX + 1];
+    if (!spec || strlen(spec) >= sizeof(buf)) {
+        return false;
+    }
+    snprintf(buf, sizeof(buf), "%s", spec);
+    *period = 0;
+    *nperiods = 0;
+    wake[0] = 0;
+    char * at = strchr(buf, '@');
+    if (at) {
+        *at = 0;
+        if (strcmp(at + 1, "auto") && strcmp(at + 1, "timer") && strcmp(at + 1, "irq")) {
+            return false;
+        }
+        snprintf(wake, wake_size, "%s", at + 1);
+    }
+    char * slash = strchr(buf, '/');
+    if (slash) {
+        *slash = 0;
+        char * end;
+        const unsigned long p = strtoul(slash + 1, &end, 10);
+        if (end == slash + 1 || p < 16 || p > 8192) {
+            return false;
+        }
+        *period = (unsigned)p;
+        if (*end == '/') {
+            const char * n_start = end + 1;
+            const unsigned long n = strtoul(n_start, &end, 10);
+            if (end == n_start || n < 2 || n > 32) {
+                return false;
+            }
+            *nperiods = (unsigned)n;
+        }
+        if (*end != 0) {
+            return false;
+        }
+    }
+    // a card's id alone is its first device
+    if (buf[0] == 0 || strchr(buf, ',') == buf || strpbrk(buf, " \t")) {
+        return false;
+    }
+    if (strchr(buf, ':')) {
+        snprintf(device, device_size, "%s", buf);
+    } else {
+        snprintf(device, device_size, "hw:%s", buf);
+    }
+    return strlen(device) < JACK_PARAM_STRING_MAX;
+}
+
+SERVER_EXPORT bool jackctl_bridge_spec_check(const char * spec)
+{
+    char device[256], wake[16];
+    unsigned period, nperiods;
+    return jackctl_parse_bridge_spec(spec, device, sizeof(device), &period, &nperiods, wake, sizeof(wake));
+}
+
+SERVER_EXPORT bool jackctl_server_add_bridge_spec(jackctl_server * server_ptr, const char * spec, char name[64 + 1])
+{
+    if (!server_ptr || !server_ptr->engine) {
+        return false;
+    }
+    char device[256], wake[16];
+    unsigned period, nperiods;
+    if (!jackctl_parse_bridge_spec(spec, device, sizeof(device), &period, &nperiods, wake, sizeof(wake))) {
+        jack_error("Not a bridge: \"%s\" (device[/period[/nperiods]][@auto|timer|irq])", spec ? spec : "");
+        return false;
+    }
+    jackctl_driver * bridge = NULL;
+    for (const JSList * node = server_ptr->drivers; node; node = jack_slist_next(node)) {
+        jackctl_driver * driver = (jackctl_driver *)node->data;
+        if (strcmp(driver->desc_ptr->name, "bridge") == 0) {
+            bridge = driver;
+            break;
+        }
+    }
+    if (!bridge) {
+        jack_error("No bridge driver: cannot bridge %s", device);
+        return false;
+    }
+    // every parameter at its default, then the spec's (the driver's parameters are its state:
+    // an earlier spec's must not carry over)
+    for (JSList * node = bridge->parameters; node; node = jack_slist_next(node)) {
+        jackctl_parameter * param = (jackctl_parameter *)node->data;
+        jackctl_parameter_reset(param);
+        union jackctl_parameter_value value;
+        if (strcmp(param->name, "device") == 0) {
+            snprintf(value.str, sizeof(value.str), "%.*s", int(sizeof(value.str) - 1), device);
+            jackctl_parameter_set_value(param, &value);
+        } else if (strcmp(param->name, "period") == 0 && period) {
+            value.ui = period;
+            jackctl_parameter_set_value(param, &value);
+        } else if (strcmp(param->name, "nperiods") == 0 && nperiods) {
+            value.ui = nperiods;
+            jackctl_parameter_set_value(param, &value);
+        } else if (strcmp(param->name, "wake") == 0 && wake[0]) {
+            snprintf(value.str, sizeof(value.str), "%s", wake);
+            jackctl_parameter_set_value(param, &value);
+        }
+    }
+    JSList * paramlist;
+    if (!jackctl_create_param_list(bridge->parameters, &paramlist)) {
+        return false;
+    }
+    char added[JACK_CLIENT_NAME_SIZE + 1];
+    const int res = server_ptr->engine->AddBridge(bridge->desc_ptr, paramlist, added);
+    jackctl_destroy_param_list(paramlist);
+    // back to the defaults: a controller that keeps every driver's parameters (jackdbus) has no
+    // business keeping the last spec's
+    for (JSList * node = bridge->parameters; node; node = jack_slist_next(node)) {
+        jackctl_parameter_reset((jackctl_parameter *)node->data);
+    }
+    if (res == 0 && name) {
+        snprintf(name, 64 + 1, "%s", added);
+    }
+    return res == 0;
+}
+
+SERVER_EXPORT int jackctl_server_get_bridge_status(jackctl_server * server_ptr, jackctl_bridge_status_t * status, int max)
+{
+    if (!server_ptr || !server_ptr->engine || !status || max <= 0) {
+        return 0;
+    }
+    return server_ptr->engine->GetBridgeStatus(status, max);
+}
+
 SERVER_EXPORT bool jackctl_server_add_slave(jackctl_server * server_ptr, jackctl_driver * driver_ptr)
 {
     if (server_ptr && server_ptr->engine) {

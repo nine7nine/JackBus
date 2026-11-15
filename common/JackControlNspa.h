@@ -98,6 +98,44 @@ jackctl_server_set_backend_lost_callback(struct jackctl_server * server, void (*
 JACK_NSPA_CONTROL_EXPORT bool
 jackctl_server_add_bridge(struct jackctl_server * server, struct jackctl_driver * driver);
 
+/*
+ * A bridge from a spec, as jackd's --bridge and jackdbus's "bridges" take it:
+ *   device[/period[/nperiods]][@wake]
+ * device: an ALSA PCM name ("hw:U44", "hw:U44,0") or a card's id alone ("U44" is "hw:U44");
+ * period, nperiods: the card's; wake: auto, timer or irq. The bridge driver's other parameters
+ * are at their defaults. name: if not NULL, receives the bridge's client name.
+ * check: the spec's syntax only (nothing is opened); a valid spec gives true.
+ */
+JACK_NSPA_CONTROL_EXPORT bool
+jackctl_server_add_bridge_spec(struct jackctl_server * server, const char * spec, char name[64 + 1]);
+
+JACK_NSPA_CONTROL_EXPORT bool
+jackctl_bridge_spec_check(const char * spec);
+
+/* A bridge as it is now (jackctl_server_get_bridge_status). */
+typedef struct jackctl_bridge_status {
+    char name[64 + 1];          /* the bridge's client name */
+    char device[128];           /* the card's PCM name */
+    int card;                   /* 0 closed, 1 running, 2 gone (unplugged), 3 failed */
+    int capture;                /* each direction: -1 none, 0 idle, 1 learning, 2 starting, */
+    int playback;               /*   3 acquiring, 4 locked, 5 lost (the card side stopped) */
+    unsigned rate;              /* the card's sample rate */
+    int period;                 /* the card's period, frames */
+    int nperiods;
+    int capture_channels;
+    int playback_channels;
+    double capture_latency;     /* master frames, card to ports, as placed (0: not yet) */
+    double playback_latency;    /* master frames, ports to card, as the ports report it */
+    double drift_ppm;           /* the card's clock against the master's (+: faster) */
+    int64_t xruns;              /* the card's own */
+    int64_t resyncs;            /* delays placed again after a break */
+    int64_t underruns;
+} jackctl_bridge_status_t;
+
+/* The bridges' states, at most max of them; returns how many. */
+JACK_NSPA_CONTROL_EXPORT int
+jackctl_server_get_bridge_status(struct jackctl_server * server, jackctl_bridge_status_t * status, int max);
+
 JACK_NSPA_CONTROL_EXPORT bool
 jackctl_server_remove_bridge(struct jackctl_server * server, const char * name);
 

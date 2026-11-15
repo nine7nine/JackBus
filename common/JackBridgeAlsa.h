@@ -76,12 +76,19 @@ class JackBridgeAlsa
         // connects the directions (either may be NULL), then starts the card and its thread
         bool Start(JackBridgeCapture* capture, JackBridgePlayback* playback);
         void Stop();     // non-RT: joins the thread, closes the card
-        // non-RT, the card lost (unplugged) or failed: open it again with what Open and Start
-        // were given and start it, if it comes back the same (rate, channels). Positions go on
-        // counting; the directions see a new epoch and place their delays again. 1: started
-        // (State() says whether it runs), 0: the card is not there, -1: it could not be opened
-        // or started (FailReason).
+        // non-RT, the card lost (unplugged) or failed: open it again with what Open was last
+        // given and start it with the directions Start was last given, if it comes back as they
+        // were set up for (the rate and channel counts Start saw). Positions go on counting;
+        // the directions see a new epoch and place their delays again. 1: started (State() says
+        // whether it runs), 0: the card is not there, -1: it could not be opened or started
+        // (FailReason).
         int Reopen();
+        // non-RT, the card closed (Stop) and not opened again as wanted (a new rate, while it is
+        // away or busy): lost, for Reopen, with the directions set up for this card rate and the
+        // channel counts they had
+        void SetLost(JackBridgeCapture* capture, JackBridgePlayback* playback, unsigned rate);
+        // what Open was last given (its names are the card's own copies)
+        const JackBridgeAlsaParams& Params() const { return fParams; }
         int State() const { return fState.load(std::memory_order_acquire); }
         // why the card failed, or why Open or Reopen did not open it ("snd_pcm_start: Broken
         // pipe"); read after State() says kAlsaFailed, or on Open's or Reopen's thread
@@ -119,8 +126,11 @@ class JackBridgeAlsa
         JackBridgeCardPlayback fCardPlay;
         bool fHaveCap;
         bool fHavePlay;
-        JackBridgeCapture* fStartedCap;      // what Start was given (Reopen)
+        JackBridgeCapture* fStartedCap;      // what Start was given, and what it saw (Reopen)
         JackBridgePlayback* fStartedPlay;
+        unsigned fStartedRate;
+        int fStartedCapChannels;
+        int fStartedPlayChannels;
         int64_t fCapRead;          // card frames read (capture position of the next one)
         int64_t fPlayWritten;      // card frames written (playback position of the next one)
         // One card, one clock: when capture and playback are linked, the playback direction's

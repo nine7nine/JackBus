@@ -39,6 +39,8 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         virtual void BridgePlayback(int64_t t_ns, double ns_per_frame, jack_nframes_t n);
         virtual void BridgeCapture(int64_t t_ns, double ns_per_frame, jack_nframes_t n);
         virtual int BridgeBufferSize(jack_nframes_t buffer_size);
+        virtual int BridgeSampleRate(jack_nframes_t sample_rate);
+        virtual void BridgeStatus(struct jackctl_bridge_status* status);
         virtual void BridgeMonitor();
 
     protected:
@@ -46,6 +48,10 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         virtual void UpdateLatencies();
 
     private:
+
+        // the two directions, afresh, for the master's rate and buffer size now and this card
+        // rate and period (non-RT; the card thread stopped, the master not calling them)
+        bool SetupDirections(unsigned card_rate, int card_period);
 
         JackBridgeAlsa fCard;
         JackBridgeCapture fCap;
@@ -68,6 +74,10 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         bool fReopenLogged;         // a try failed, and that was said: the next ones are quiet
         int fReservedCard;          // the card index reserved ("Audio<n>"), -1: none
         int fReserveFailed;         // the index a reservation was refused for (not asked again)
+        int fQuality;
+        int fPeriods;               // the card's periods
+        unsigned fCardRate;         // what the directions are set up for
+        int fCardPeriod;
 
         bool Reserve();
         void Release();

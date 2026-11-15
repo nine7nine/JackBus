@@ -83,6 +83,8 @@ class SERVER_EXPORT JackServer
         JackBridgeSet fBridges;
         std::list<JackDriverInfo*> fBridgeInfos;
         void CloseBridge(JackDriverInfo* info);
+        // a new master (SwitchMaster, the master stopped): the bridges follow its rate and buffer size
+        void BridgesFollowMaster(jack_nframes_t old_buffer_size, jack_nframes_t old_sample_rate);
         // the bridge monitor: a plain thread (not RT), four times a second, BridgeMonitor() on
         // each bridge; fBridgeLock keeps it, adding, removing and buffer size changes apart
         pthread_mutex_t fBridgeLock;
@@ -138,9 +140,11 @@ class SERVER_EXPORT JackServer
 
         // jack2-nspa: a sound card bridge (the "bridge" driver), added and removed while the
         // server runs; by its client name (the card's)
-        int AddBridge(jack_driver_desc_t* driver_desc, JSList* driver_params);
+        // name: if not NULL, receives the new bridge's client name (JACK_CLIENT_NAME_SIZE + 1)
+        int AddBridge(jack_driver_desc_t* driver_desc, JSList* driver_params, char* name = NULL);
         int RemoveBridge(const char* name);
         int GetBridgeNames(char names[][JACK_CLIENT_NAME_SIZE + 1], int max);
+        int GetBridgeStatus(struct jackctl_bridge_status* status, int max);
 
         // Object access
         JackLockedEngine* GetEngine();

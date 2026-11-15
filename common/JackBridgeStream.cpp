@@ -65,8 +65,8 @@ bool JackBridgeAnchor::Get(uint32_t* epoch, int64_t* index, int64_t* pos) const
 
 JackBridgeDirection::JackBridgeDirection()
     : fHaveLast(false), fEpoch(0), fState(kBridgeIdle), fStateCycles(0), fFadeIn(0), fTarget(0.0),
-      fPubLatency(0.0), fPubState(kBridgeIdle), fPubResyncs(0), fPubLost(0), fPubUnderruns(0),
-      fRatio(1.0), fBase(0)
+      fRatio(1.0), fBase(0),
+      fPubLatency(0.0), fPubState(kBridgeIdle), fPubResyncs(0), fPubLost(0), fPubUnderruns(0)
 {
     memset(&fStats, 0, sizeof(fStats));
     memset(&fLast, 0, sizeof(fLast));
@@ -146,6 +146,8 @@ void JackBridgeDirection::PublishStats()
     fPubResyncs.store(fStats.fResyncs, std::memory_order_relaxed);
     fPubLost.store(fStats.fLost, std::memory_order_relaxed);
     fPubUnderruns.store(fStats.fUnderruns, std::memory_order_relaxed);
+    const double nominal = NominalRatio();
+    fPubRatio.store(placed && nominal > 0.0 ? fStats.fRatio / nominal : 1.0, std::memory_order_relaxed);
 }
 
 double JackBridgeDirection::CardPeriod(const JackBridgeClockState& cs)

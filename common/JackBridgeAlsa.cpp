@@ -113,7 +113,7 @@ static int64_t NowNs()
 JackBridgeAlsa::JackBridgeAlsa()
     : fCap(NULL), fPlay(NULL), fCapFormat(SND_PCM_FORMAT_UNKNOWN), fPlayFormat(SND_PCM_FORMAT_UNKNOWN),
       fRate(0), fPeriod(0), fBufferSize(0), fCapChannels(0), fPlayChannels(0), fBatch(false),
-      fLinked(false), fHaveCap(false), fHavePlay(false), fStartedCap(NULL), fStartedPlay(NULL), fCapRead(0), fPlayWritten(0), fPlayOffset(0), fLastRead(0), fLastFill(0), fLastQueued(0), fTimerWakes(0), fConv(NULL),
+      fLinked(false), fHaveCap(false), fHavePlay(false), fStartedCap(NULL), fStartedPlay(NULL), fStartedRate(0), fStartedCapChannels(0), fStartedPlayChannels(0), fCapRead(0), fPlayWritten(0), fPlayOffset(0), fLastRead(0), fLastFill(0), fLastQueued(0), fTimerWakes(0), fConv(NULL),
       fFailWhat(NULL), fFailErr(0), fThreadRunning(false), fRun(false), fState(kAlsaClosed), fXruns(0)
 {
     fCaptureName[0] = 0;
@@ -315,8 +315,8 @@ int JackBridgeAlsa::Reopen()
         return 0;   // not back yet: nothing to try, nothing to log
     }
     JackBridgeAlsaParams p = fParams;
-    const unsigned rate = fRate;
-    const int cch = fCapChannels, pch = fPlayChannels;
+    const unsigned rate = fStartedRate;
+    const int cch = fStartedCapChannels, pch = fStartedPlayChannels;
     Stop();                 // the card thread has ended; closes what is left
     p.fCaptureChannels = cch;
     p.fPlaybackChannels = pch;
@@ -339,10 +339,21 @@ int JackBridgeAlsa::Reopen()
     return 1;
 }
 
+void JackBridgeAlsa::SetLost(JackBridgeCapture* capture, JackBridgePlayback* playback, unsigned rate)
+{
+    fStartedCap = capture;
+    fStartedPlay = playback;
+    fStartedRate = rate;
+    fState.store(kAlsaLost, std::memory_order_release);
+}
+
 bool JackBridgeAlsa::Start(JackBridgeCapture* capture, JackBridgePlayback* playback)
 {
     fStartedCap = capture;
     fStartedPlay = playback;
+    fStartedRate = fRate;
+    fStartedCapChannels = fCapChannels;
+    fStartedPlayChannels = fPlayChannels;
     fHaveCap = (capture && fCap);
     fHavePlay = (playback && fPlay);
     if (fHaveCap) {

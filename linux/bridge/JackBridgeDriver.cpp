@@ -12,8 +12,13 @@
 #include "JackDriverLoader.h"
 #include "JackServerGlobals.h"
 
+#include "JackControlNspa.h"
+
 #include <alsa/asoundlib.h>
+#include <errno.h>
+#include <new>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // the card's ALSA id in a device name ("hw:U44,0", "plughw:CARD=U44,DEV=0" -> "U44"); false: none
@@ -41,6 +46,46 @@ static int CardIndex(const char* device)
     return CardName(device, card, sizeof(card)) ? snd_card_get_index(card) : -1;
 }
 
+// the PCM device number in a device name ("hw:PCH,3" -> 3, "hw:CARD=PCH,DEV=3" -> 3; else 0)
+static int DeviceNumber(const char* device)
+{
+    const char* d = strstr(device, "DEV=");
+    if (d) {
+        return atoi(d + 4);
+    }
+    d = strchr(device, ',');
+    return (d && d[1] >= '0' && d[1] <= '9') ? atoi(d + 1) : 0;
+}
+
+// Whether a card's PCM device has this stream (a USB microphone has no playback, a USB DAC no
+// capture), asked quietly of the card's control device. Names other than "hw:"/"plughw:" ones,
+// or a card not there: assumed (the open says).
+static bool HasStream(const char* device, snd_pcm_stream_t stream)
+{
+    if (strncmp(device, "hw:", 3) != 0 && strncmp(device, "plughw:", 7) != 0) {
+        return true;
+    }
+    const int index = CardIndex(device);
+    if (index < 0) {
+        return true;
+    }
+    const int dev = DeviceNumber(device);
+    char ctl[32];
+    snprintf(ctl, sizeof(ctl), "hw:%d", index);
+    snd_ctl_t* handle;
+    if (snd_ctl_open(&handle, ctl, 0) < 0) {
+        return true;
+    }
+    snd_pcm_info_t* info;
+    snd_pcm_info_alloca(&info);
+    snd_pcm_info_set_device(info, unsigned(dev));
+    snd_pcm_info_set_subdevice(info, 0);
+    snd_pcm_info_set_stream(info, stream);
+    const int err = snd_ctl_pcm_info(handle, info);
+    snd_ctl_close(handle);
+    return err != -ENOENT;
+}
+
 namespace Jack
 {
 
@@ -48,7 +93,7 @@ JackBridgeDriver::JackBridgeDriver(const char* name, JackLockedEngine* engine, J
     : JackAudioDriver(name, "alsa_pcm", engine, table), fHaveCap(false), fHavePlay(false),
       fReportedCapture(0), fReportedPlayback(0), fLoggedCapState(-1), fLoggedPlayState(-1), fLoggedCard(-1),
       fLoggedResyncs(0), fLastReopen(0), fReopenTries(0), fReopening(false), fReopenLogged(false),
-      fReservedCard(-1), fReserveFailed(-1)
+      fReservedCard(-1), fReserveFailed(-1), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0)
 {
     fDevice[0] = 0;
     memset(fIn, 0, sizeof(fIn));
@@ -110,6 +155,8 @@ int JackBridgeDriver::OpenBridgeCard(const JackBridgeAlsaParams& requested, int 
     JackBridgeAlsaParams card = requested;
     card.fRate = fEngineControl->fSampleRate;     // the master's: the bridge only corrects drift
     card.fPriority = fEngineControl->fRealTime ? fEngineControl->fServerPriority - 1 : 0;
+    fQuality = quality;
+    fPeriods = card.fPeriods;
     if (!Reserve()) {
         jack_error("bridge %s: the card %s is not reserved: the desktop's sound server may hold it", fClientControl.fName, fDevice);
     }
@@ -126,6 +173,7 @@ int JackBridgeDriver::OpenBridgeCard(const JackBridgeAlsaParams& requested, int 
     if (fCaptureChannels > DRIVER_PORT_NUM || fPlaybackChannels > DRIVER_PORT_NUM) {
         jack_error("bridge %s: too many channels", fClientControl.fName);
         fCard.Stop();
+        Release();
         JackDriver::CloseBridge();
         return -1;
     }
@@ -134,14 +182,39 @@ int JackBridgeDriver::OpenBridgeCard(const JackBridgeAlsaParams& requested, int 
     memset(fPlaybackPortList, 0, sizeof(fPlaybackPortList));
     memset(fMonitorPortList, 0, sizeof(fMonitorPortList));
 
+    if (!SetupDirections(fCard.Rate(), fCard.Period())) {
+        jack_error("bridge %s: cannot set up its resampling", fClientControl.fName);
+        fCard.Stop();
+        Release();
+        JackDriver::CloseBridge();
+        return -1;
+    }
+    jack_info("bridge %s: %s, %u Hz, period %d x %d, %d in / %d out%s", fClientControl.fName, fDevice, fCard.Rate(),
+              fCard.Period(), card.fPeriods, fCaptureChannels, fPlaybackChannels, fCard.Batch() ? ", batch" : "");
+    return 0;
+}
+
+bool JackBridgeDriver::SetupDirections(unsigned card_rate, int card_period)
+{
+    // new objects in the same places: nothing of the old state (clock, delays, FIFO) is kept,
+    // and the card side's pointers to them stay valid
+    fCap.~JackBridgeCapture();
+    new (&fCap) JackBridgeCapture();
+    fPlay.~JackBridgePlayback();
+    new (&fPlay) JackBridgePlayback();
+    fHaveCap = false;
+    fHavePlay = false;
+    fCardRate = card_rate;
+    fCardPeriod = card_period;
+
     JackBridgeParams p;
     p.fMasterRate = fEngineControl->fSampleRate;
-    p.fCardRate = fCard.Rate();
+    p.fCardRate = card_rate;
     p.fMasterPeriod = fEngineControl->fBufferSize;
     p.fMaxMasterPeriod = 4096 > p.fMasterPeriod ? 4096 : p.fMasterPeriod;
-    p.fCardPeriod = fCard.Period();
-    p.fCardBuffer = fCard.Period() * card.fPeriods;
-    p.fQuality = quality;
+    p.fCardPeriod = card_period;
+    p.fCardBuffer = card_period * fPeriods;
+    p.fQuality = fQuality;
     p.fMargin = 96;
     if (fCaptureChannels) {
         p.fChannels = fCaptureChannels;
@@ -151,15 +224,84 @@ int JackBridgeDriver::OpenBridgeCard(const JackBridgeAlsaParams& requested, int 
         p.fChannels = fPlaybackChannels;
         fHavePlay = fPlay.Init(p);
     }
-    if ((fCaptureChannels && !fHaveCap) || (fPlaybackChannels && !fHavePlay)) {
-        jack_error("bridge %s: cannot set up its resampling", fClientControl.fName);
+    return (!fCaptureChannels || fHaveCap) && (!fPlaybackChannels || fHavePlay);
+}
+
+int JackBridgeDriver::BridgeSampleRate(jack_nframes_t sample_rate)
+{
+    // the card at the new rate (the ports stay, so the same channels); a card that cannot do it
+    // runs at the rate it can, resampled
+    fCard.Stop();
+    JackBridgeAlsaParams card = fCard.Params();
+    card.fRate = sample_rate;
+    card.fCaptureChannels = fCaptureChannels;
+    card.fPlaybackChannels = fPlaybackChannels;
+    bool open = fCard.Open(card);
+    if (open && ((card.fCapture && fCard.CaptureChannels() != fCaptureChannels)
+                 || (card.fPlayback && fCard.PlaybackChannels() != fPlaybackChannels))) {
         fCard.Stop();
-        JackDriver::CloseBridge();
+        open = false;
+    }
+    const unsigned card_rate = open ? fCard.Rate() : sample_rate;
+    const int card_period = open ? fCard.Period() : fCardPeriod;
+    if (!SetupDirections(card_rate, card_period)) {
+        jack_error("bridge %s: cannot set up its resampling for %u Hz", fClientControl.fName, sample_rate);
+        fCard.Stop();
         return -1;
     }
-    jack_info("bridge %s: %s, %u Hz, period %d x %d, %d in / %d out%s", fClientControl.fName, fDevice, fCard.Rate(),
-              fCard.Period(), card.fPeriods, fCaptureChannels, fPlaybackChannels, fCard.Batch() ? ", batch" : "");
+    JackBridgeCapture* cap = fHaveCap ? &fCap : NULL;
+    JackBridgePlayback* play = fHavePlay ? &fPlay : NULL;
+    if (open && fCard.Start(cap, play)) {
+        if (card_rate == sample_rate) {
+            jack_info("bridge %s: %u Hz now, as the master", fClientControl.fName, card_rate);
+        } else {
+            jack_info("bridge %s: %u Hz now (the master's %u Hz, resampled)", fClientControl.fName, card_rate, sample_rate);
+        }
+    } else {
+        // away or busy: lost, and opened again at the new rate when it can be (BridgeMonitor)
+        char reason[160];
+        fCard.FailReason(reason, sizeof(reason));
+        if (open) {
+            fCard.Stop();
+        }
+        jack_error("bridge %s: the card is not open at %u Hz (%s): trying again", fClientControl.fName, sample_rate, reason);
+        fCard.SetLost(cap, play, card_rate);
+    }
+    // the monitor's view of it starts again
+    fLoggedCapState = -1;
+    fLoggedPlayState = -1;
+    fLoggedResyncs = 0;
+    UpdateLatencies();
     return 0;
+}
+
+void JackBridgeDriver::BridgeStatus(jackctl_bridge_status* st)
+{
+    memset(st, 0, sizeof(*st));
+    snprintf(st->name, sizeof(st->name), "%s", fClientControl.fName);
+    snprintf(st->device, sizeof(st->device), "%s", fDevice);
+    st->card = fCard.State();
+    st->capture = fHaveCap ? fCap.PublishedState() : -1;
+    st->playback = fHavePlay ? fPlay.PublishedState() : -1;
+    st->rate = fCardRate;
+    st->period = fCardPeriod;
+    st->nperiods = fPeriods;
+    st->capture_channels = fCaptureChannels;
+    st->playback_channels = fPlaybackChannels;
+    const double cap = fHaveCap ? fCap.PublishedLatency() : 0.0;
+    const double play = fHavePlay ? fPlay.PublishedLatency() : 0.0;
+    st->capture_latency = cap;
+    st->playback_latency = play > 0.0 ? play + fEngineControl->fBufferSize : 0.0;
+    // capture takes more card frames per master frame from a faster card; playback fewer
+    // master frames per card frame
+    if (cap > 0.0) {
+        st->drift_ppm = (fCap.PublishedRatio() - 1.0) * 1e6;
+    } else if (play > 0.0 && fPlay.PublishedRatio() > 0.0) {
+        st->drift_ppm = (1.0 / fPlay.PublishedRatio() - 1.0) * 1e6;
+    }
+    st->xruns = fCard.Xruns();
+    st->resyncs = (fHaveCap ? fCap.PublishedResyncs() : 0) + (fHavePlay ? fPlay.PublishedResyncs() : 0);
+    st->underruns = (fHaveCap ? fCap.PublishedUnderruns() : 0) + (fHavePlay ? fPlay.PublishedUnderruns() : 0);
 }
 
 int JackBridgeDriver::Attach()
@@ -208,8 +350,9 @@ void JackBridgeDriver::UpdateLatencies()
     // (capture learns the card side's lateness first), the usual one. Playback also waits a
     // cycle: it takes the previous cycle's buffers, as the master's own ports in async mode.
     const jack_nframes_t n = fEngineControl->fBufferSize;
-    const double card_to_master = double(fEngineControl->fSampleRate) / double(fCard.Rate());
-    const int period = fCard.Period();
+    // the card as the directions are set up for it (the card itself may be away now)
+    const double card_to_master = fCardRate ? double(fEngineControl->fSampleRate) / double(fCardRate) : 1.0;
+    const int period = fCardPeriod;
     jack_latency_range_t range;
     double cap = fHaveCap ? fCap.PublishedLatency() : 0.0;
     if (cap <= 0.0) {
@@ -373,7 +516,9 @@ void JackBridgeDriver::BridgeMonitor()
 
 } // end of namespace
 
-// the card's ALSA id from its device name ("hw:U44,0" -> "U44"), for the client's name
+
+// the card's ALSA id from its device name ("hw:U44,0" -> "U44"), for the client's name; another
+// device than the first gets its number ("hw:PCH,3" -> "PCH-3": two bridges on one card)
 static void CardId(const char* device, char* id, size_t size)
 {
     snprintf(id, size, "bridge");
@@ -382,21 +527,27 @@ static void CardId(const char* device, char* id, size_t size)
         return;
     }
     const int index = snd_card_get_index(card);
-    if (index < 0) {
-        snprintf(id, size, "%s", card);
-        return;
-    }
-    char ctl[32];
-    snprintf(ctl, sizeof(ctl), "hw:%d", index);
-    snd_ctl_t* handle;
-    snd_ctl_card_info_t* info;
-    snd_ctl_card_info_alloca(&info);
-    if (snd_ctl_open(&handle, ctl, 0) == 0) {
-        if (snd_ctl_card_info(handle, info) == 0) {
-            snprintf(id, size, "%s", snd_ctl_card_info_get_id(info));
+    if (index >= 0) {
+        char ctl[32];
+        snprintf(ctl, sizeof(ctl), "hw:%d", index);
+        snd_ctl_t* handle;
+        snd_ctl_card_info_t* info;
+        snd_ctl_card_info_alloca(&info);
+        if (snd_ctl_open(&handle, ctl, 0) == 0) {
+            if (snd_ctl_card_info(handle, info) == 0) {
+                snprintf(card, sizeof(card), "%s", snd_ctl_card_info_get_id(info));
+            }
+            snd_ctl_close(handle);
         }
-        snd_ctl_close(handle);
     }
+    // the number kept whole: the card's id is cut instead (ids are at most 15 characters anyway)
+    char suffix[16] = "";
+    const int dev = DeviceNumber(device);
+    if (dev > 0) {
+        snprintf(suffix, sizeof(suffix), "-%d", dev);
+    }
+    const int room = int(size) - 1 - int(strlen(suffix));
+    snprintf(id, size, "%.*s%s", room > 0 ? room : 0, card, suffix);
 }
 
 #ifdef __cplusplus
@@ -421,7 +572,8 @@ SERVER_EXPORT const jack_driver_desc_t* driver_get_descriptor()
         "Client name (default: the card's ALSA id)", NULL);
     strcpy(value.str, "duplex");
     jack_driver_descriptor_add_parameter(desc, &filler, "mode", 'm', JackDriverParamString, &value, NULL,
-        "duplex, capture or playback", NULL);
+        "duplex, capture or playback",
+        "duplex: whichever of capture and playback the card has; capture or playback: that one only");
     value.ui = 128;
     jack_driver_descriptor_add_parameter(desc, &filler, "period", 'p', JackDriverParamUInt, &value, NULL,
         "The card's period (frames)", NULL);
@@ -450,11 +602,11 @@ SERVER_EXPORT Jack::JackDriverClientInterface* driver_initialize(Jack::JackLocke
         const jack_driver_param_t* param = (const jack_driver_param_t*)node->data;
         switch (param->character) {
             case 'd': snprintf(device, sizeof(device), "%s", param->value.str); break;
-            case 'c': snprintf(name, sizeof(name), "%s", param->value.str); break;
-            case 'm': snprintf(mode, sizeof(mode), "%s", param->value.str); break;
+            case 'c': snprintf(name, sizeof(name), "%.*s", int(sizeof(name) - 1), param->value.str); break;
+            case 'm': snprintf(mode, sizeof(mode), "%.*s", int(sizeof(mode) - 1), param->value.str); break;
             case 'p': period = param->value.ui; break;
             case 'n': nperiods = param->value.ui; break;
-            case 'w': snprintf(wake, sizeof(wake), "%s", param->value.str); break;
+            case 'w': snprintf(wake, sizeof(wake), "%.*s", int(sizeof(wake) - 1), param->value.str); break;
             case 'q': quality = param->value.ui; break;
         }
     }
@@ -462,8 +614,14 @@ SERVER_EXPORT Jack::JackDriverClientInterface* driver_initialize(Jack::JackLocke
         CardId(device, name, sizeof(name));
     }
     Jack::JackBridgeAlsaParams card;
-    card.fCapture = strcmp(mode, "playback") ? device : NULL;
-    card.fPlayback = strcmp(mode, "capture") ? device : NULL;
+    // duplex: what the card has (a USB microphone has no playback, a USB DAC no capture)
+    const bool duplex = strcmp(mode, "capture") && strcmp(mode, "playback");
+    card.fCapture = strcmp(mode, "playback") && (!duplex || HasStream(device, SND_PCM_STREAM_CAPTURE)) ? device : NULL;
+    card.fPlayback = strcmp(mode, "capture") && (!duplex || HasStream(device, SND_PCM_STREAM_PLAYBACK)) ? device : NULL;
+    if (!card.fCapture && !card.fPlayback) {
+        jack_error("bridge: %s has neither capture nor playback", device);
+        return NULL;
+    }
     card.fPeriod = int(period);
     card.fPeriods = int(nperiods);
     card.fWake = !strcmp(wake, "irq") ? Jack::kWakeIrq : !strcmp(wake, "timer") ? Jack::kWakeTimer : Jack::kWakeAuto;
