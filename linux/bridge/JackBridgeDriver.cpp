@@ -93,7 +93,7 @@ JackBridgeDriver::JackBridgeDriver(const char* name, JackLockedEngine* engine, J
     : JackAudioDriver(name, "alsa_pcm", engine, table), fHaveCap(false), fHavePlay(false),
       fReportedCapture(0), fReportedPlayback(0), fLoggedCapState(-1), fLoggedPlayState(-1), fLoggedCard(-1),
       fLoggedResyncs(0), fLastReopen(0), fReopenTries(0), fReopening(false), fReopenLogged(false),
-      fReservedCard(-1), fReserveFailed(-1), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0)
+      fReservedCard(-1), fReserveFailed(-1), fLoggedXruns(0), fXrunsLoggedAt(0), fQuality(1), fPeriods(2), fCardRate(0), fCardPeriod(0)
 {
     fDevice[0] = 0;
     memset(fIn, 0, sizeof(fIn));
@@ -497,6 +497,15 @@ void JackBridgeDriver::BridgeMonitor()
             card = fCard.State();
             fLoggedCard = card;
         }
+    }
+    // The card's own xruns (the card thread recovers them): the first said at once, then how
+    // many more at most once a minute
+    const long xruns = fCard.Xruns();
+    if (xruns > fLoggedXruns && (fXrunsLoggedAt == 0 || now - fXrunsLoggedAt >= 60000000)) {
+        jack_error("bridge %s: %ld card xrun%s%s", fClientControl.fName, xruns - fLoggedXruns, xruns - fLoggedXruns == 1 ? "" : "s",
+                   fXrunsLoggedAt == 0 ? "" : " since the last report");
+        fLoggedXruns = xruns;
+        fXrunsLoggedAt = now;
     }
     const int cs = fHaveCap ? fCap.PublishedState() : kBridgeLocked;
     const int ps = fHavePlay ? fPlay.PublishedState() : kBridgeLocked;

@@ -74,6 +74,8 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         bool fReopenLogged;         // a try failed, and that was said: the next ones are quiet
         int fReservedCard;          // the card index reserved ("Audio<n>"), -1: none
         int fReserveFailed;         // the index a reservation was refused for (not asked again)
+        long fLoggedXruns;          // card xruns said so far, and when (us): at most once a minute
+        int64_t fXrunsLoggedAt;
         int fQuality;
         int fPeriods;               // the card's periods
         unsigned fCardRate;         // what the directions are set up for

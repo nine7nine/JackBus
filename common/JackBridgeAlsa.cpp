@@ -424,9 +424,14 @@ void* JackBridgeAlsa::ThreadEntry(void* arg)
 
 bool JackBridgeAlsa::StartStreams()
 {
-    // Playback starts with one period of silence queued; the graph side places its frames
-    // later than that (its target delay), the card side fills the positions before with silence.
-    // a new epoch: what was last read or filled says nothing about when the next period is due
+    // Playback starts with its whole buffer of silence queued (as JACK's ALSA driver starts);
+    // the graph side places its frames later than that (its target delay). One period was not
+    // enough: a USB card whose buffer is larger than its driver's transfer queue plays in
+    // snd-usb's low-latency mode, which fills its transfers from the buffer at once when the
+    // stream starts. With one period there, it ran dry at the start: an xrun, a restart with
+    // one period again, another xrun (a U-44 at 256 x 2 never locked; 128 x 2, a buffer within
+    // the queue, played in the classic mode and did).
+    // A new epoch: what was last read or filled says nothing about when the next period is due
     fLastRead = 0;
     fLastFill = 0;
     fLastQueued = 0;
@@ -439,8 +444,8 @@ bool JackBridgeAlsa::StartStreams()
         // one fCapRead, and they start together
         fPlayOffset = fPlayWritten - fCapRead;
         const int ch = fPlayChannels;
-        memset(fConv, 0, size_t(fPeriod) * ch * sizeof(float));
-        int left = fPeriod;
+        memset(fConv, 0, size_t(fBufferSize) * ch * sizeof(float));
+        int left = fBufferSize;
         while (left > 0) {
             const snd_pcm_channel_area_t* areas;
             snd_pcm_uframes_t offset, frames = left;
@@ -452,7 +457,7 @@ bool JackBridgeAlsa::StartStreams()
             snd_pcm_mmap_commit(fPlay, offset, frames);
             left -= int(frames);
         }
-        fPlayWritten += fPeriod;
+        fPlayWritten += fBufferSize;
     }
     if (fCap && !fLinked && (err = snd_pcm_prepare(fCap)) < 0) {
         return Failed("preparing capture", err);
