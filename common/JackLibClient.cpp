@@ -176,6 +176,14 @@ int JackLibClient::ClientNotifyImp(int refnum, const char* name, int notify, int
 {
     int res = 0;
     assert(JackGlobals::fSynchroMutex);
+    /*
+     JackBus: this runs on the notification thread, which jack_client_close() cancels
+     (JackClient::Close, fChannel->Stop()). Cancelled while it holds the process-wide synchro
+     mutex (Connect's shm_open is a cancellation point), it left the mutex locked, and the
+     close then waited for it forever, as would every other client of the process. Seen with
+     clients that come and go while the server adds clients (sound card bridges at start).
+     */
+    JackNoCancelScope no_cancel;
     JackGlobals::fSynchroMutex->Lock();
 
     // Done all time
