@@ -15,6 +15,16 @@ if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
 fi
 
 mount -t tmpfs -o size=1g,mode=1777 nspa-shm /dev/shm
+# A private runtime directory too: a test server's JackBus socket
+# ($XDG_RUNTIME_DIR/jackbus) must never land in the user's real one, and tests
+# must not reach the session's PipeWire or D-Bus sockets there
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+    mount -t tmpfs -o size=64m,mode=0700 nspa-run "$XDG_RUNTIME_DIR"
+else
+    XDG_RUNTIME_DIR=/dev/shm/nspa-run
+    mkdir -m 0700 "$XDG_RUNTIME_DIR"
+fi
+export XDG_RUNTIME_DIR
 ulimit -c 0  # crashes show up as exit status; no core files in the tree
 unset DBUS_SESSION_BUS_ADDRESS NOTIFY_SOCKET JACK_DEFAULT_SERVER JACK_PROMISCUOUS_SERVER
 export JACK_BUILD="${NSPA_BUILD_DIR:-$here/build}"
