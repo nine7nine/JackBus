@@ -12,7 +12,7 @@
 pkgname=jackbus
 pkgver=1.9.22.r0.g0
 pkgrel=1
-pkgdesc="JackBus: the JACK low-latency audio server (JACK2 1.9.22 compatible), with D-Bus (jackdbus), RT fixes and sound card bridges"
+pkgdesc="Real-time JACK audio server for Linux: a drop-in JACK2 with Modern Features & Improvements."
 arch=(x86_64)
 url="https://github.com/nine7nine/JackBus"
 license=(GPL-2.0-or-later LGPL-2.1-or-later)
