@@ -27,6 +27,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackGraphManager.h"
 #include "JackLockedEngine.h"
 #include "JackException.h"
+#include "JackCycleTrace.h"
 #include <assert.h>
 #include <time.h>
 
@@ -57,6 +58,9 @@ void JackAudioDriver::RunBridgesPlayback()
     fBridgeList = fBridges->Acquire();
     if (!fBridgeList || fBridgeList->fCount == 0) {
         return;
+    }
+    if (JackCycleTrace* trace = JackCycleTrace::Get()) {
+        trace->Bridges(fBridgeList->fCount);
     }
     const jack_nframes_t n = fEngineControl->fBufferSize;
     JackTimer timer;
@@ -288,10 +292,19 @@ synchronize to the end of client graph execution.
 
 int JackAudioDriver::ProcessAsync()
 {
+    JackCycleTrace* trace = fIsMaster ? JackCycleTrace::Get() : NULL;
+    if (trace) {
+        trace->Begin();
+    }
+
     // Read input buffers for the current cycle
     if (Read() < 0) {
         jack_error("JackAudioDriver::ProcessAsync: read error, stopping...");
         return -1;
+    }
+    if (trace) {
+        trace->Mark(kTraceRead);
+        trace->SnapshotPrevious();
     }
 
     // Write output buffers from the previous cycle
@@ -299,13 +312,18 @@ int JackAudioDriver::ProcessAsync()
         jack_error("JackAudioDriver::ProcessAsync: write error, stopping...");
         return -1;
     }
+    JackTraceMark(kTraceWrite);
     RunBridgesPlayback();
+    JackTraceMark(kTraceBridgePlayback);
 
     // Process graph
     ProcessGraphAsync();
 
     // Keep end cycle time
     JackDriver::CycleTakeEndTime();
+    if (trace) {
+        trace->End(fBeginDateUst);
+    }
     return 0;
 }
 
@@ -328,20 +346,28 @@ void JackAudioDriver::ProcessGraphAsyncMaster()
     // fBeginDateUst is set in the "low level" layer, fEndDateUst is from previous cycle
     if (!fEngine->Process(fBeginDateUst, fEndDateUst)) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: Process error");
+        if (JackCycleTrace* trace = JackCycleTrace::Get()) {
+            trace->Flag(kTraceFlagUnfinished);
+        }
     }
+    JackTraceMark(kTraceProcess);
 
     if (ResumeRefNum() < 0) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ResumeRefNum error");
     }
+    JackTraceMark(kTraceResume);
     RunBridgesCapture();
+    JackTraceMark(kTraceBridgeCapture);
 
     if (ProcessReadSlaves() < 0) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ProcessReadSlaves error");
     }
+    JackTraceMark(kTraceReadSlaves);
 
     if (ProcessWriteSlaves() < 0) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ProcessWriteSlaves error");
     }
+    JackTraceMark(kTraceWriteSlaves);
 
     // Does not wait on graph execution end
 }
@@ -364,14 +390,25 @@ if graph process succeed, output buffers computed at the *current cycle* are use
 
 int JackAudioDriver::ProcessSync()
 {
+    JackCycleTrace* trace = fIsMaster ? JackCycleTrace::Get() : NULL;
+    if (trace) {
+        trace->Begin();
+        trace->Flag(kTraceFlagSync);
+    }
+
     // Read input buffers for the current cycle
     if (Read() < 0) {
         jack_error("JackAudioDriver::ProcessSync: read error, stopping...");
         return -1;
     }
+    if (trace) {
+        trace->Mark(kTraceRead);
+        trace->SnapshotPrevious();
+    }
 
     // JackBus: bridges' playback from the previous cycle's buffers, before the graph runs
     RunBridgesPlayback();
+    JackTraceMark(kTraceBridgePlayback);
 
     // Process graph
     ProcessGraphSync();
@@ -381,9 +418,13 @@ int JackAudioDriver::ProcessSync()
         jack_error("JackAudioDriver::ProcessSync: write error, stopping...");
         return -1;
     }
+    JackTraceMark(kTraceWrite);
 
     // Keep end cycle time
     JackDriver::CycleTakeEndTime();
+    if (trace) {
+        trace->End(fBeginDateUst);
+    }
     return 0;
 }
 
@@ -405,19 +446,24 @@ void JackAudioDriver::ProcessGraphSyncMaster()
 {
     // fBeginDateUst is set in the "low level" layer, fEndDateUst is from previous cycle
     if (fEngine->Process(fBeginDateUst, fEndDateUst)) {
+        JackTraceMark(kTraceProcess);
 
         if (ResumeRefNum() < 0) {
             jack_error("JackAudioDriver::ProcessGraphSyncMaster: ResumeRefNum error");
         }
+        JackTraceMark(kTraceResume);
         RunBridgesCapture();
+        JackTraceMark(kTraceBridgeCapture);
 
         if (ProcessReadSlaves() < 0) {
             jack_error("JackAudioDriver::ProcessGraphSync: ProcessReadSlaves error, engine may now behave abnormally!!");
         }
+        JackTraceMark(kTraceReadSlaves);
 
         if (ProcessWriteSlaves() < 0) {
             jack_error("JackAudioDriver::ProcessGraphSync: ProcessWriteSlaves error, engine may now behave abnormally!!");
         }
+        JackTraceMark(kTraceWriteSlaves);
 
         // Waits for graph execution end
         if (SuspendRefNum() < 0) {

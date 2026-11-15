@@ -270,6 +270,7 @@ def build(bld):
     serverlib.source += [
         'JackAudioDriver.cpp',
         'JackBridgeSet.cpp',
+        'JackCycleTrace.cpp',
         'JackTimedDriver.cpp',
         'JackMidiDriver.cpp',
         'JackDriver.cpp',

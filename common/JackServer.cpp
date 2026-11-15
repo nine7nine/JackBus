@@ -35,6 +35,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackMessageBuffer.h"
 #include "JackInternalSessionLoader.h"
 #include "JackControlNspa.h"
+#include "JackCycleTrace.h"
 
 const char * jack_get_self_connect_mode_description(char mode);
 
@@ -180,6 +181,7 @@ int JackServer::Start()
         jack_error("JackServer::Start: no master driver (a previous master switch failed)");
         return -1;
     }
+    JackCycleTrace::Setup(fGraphManager, fEngineControl);   // JACK_CYCLE_TRACE: measurements
     if (fAudioDriver->Start() < 0) {
         return -1;
     }
@@ -203,6 +205,7 @@ int JackServer::Stop()
         }
     }
     
+    JackCycleTrace::Dump();     // the master's thread has stopped
     fEngine->NotifyQuit();
     fRequestChannel.Stop();
     fEngine->NotifyFailure(JackFailure | JackServerError, JACK_SERVER_FAILURE);

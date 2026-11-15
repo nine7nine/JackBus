@@ -39,6 +39,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackPort.h"
 #include "JackGraphManager.h"
 #include "JackLockedEngine.h"
+#include "JackCycleTrace.h"
 #ifdef __ANDROID__
 #include "JackAndroidThread.h"
 #else
@@ -453,6 +454,9 @@ int JackAlsaDriver::Read()
 retry:
 
     nframes = alsa_driver_wait((alsa_driver_t *)fDriver, -1, &wait_status, &fDelayedUsecs);
+    if (fIsMaster) {
+        JackTraceMark(kTraceWake);   // JACK_CYCLE_TRACE only
+    }
 
     if (wait_status < 0)
         return -1;		/* driver failed */
