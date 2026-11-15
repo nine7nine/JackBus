@@ -5,8 +5,10 @@
                           removed while running, process latency
    bus_node rtwrite       writes into an unconnected audio input (must crash:
                           the shared zero buffer is read-only)
-   bus_node steady <s>    a node at work for <s> seconds; prints "rt-tid <tid>"
-                          (for the system-call trace in bus.sh)
+   bus_node steady <s>    a node at work for <s> seconds (for the system-call
+                          trace in bus.sh)
+   bus_node shutdown      runs until the server goes away: prints "ready", then
+                          whether a SHUTDOWN event came and the close returned
 
  Prints PASS/FAIL lines; exit 0 if all passed.
 */
@@ -342,6 +344,37 @@ static int steady(int seconds)
     return 0;
 }
 
+static int shutdown_case(void)
+{
+    if (!(node = open_node("goner"))) return 1;
+    ain = jackbus_port_add(node, "in", JACKBUS_AUDIO, JackPortIsInput);
+    aout = jackbus_port_add(node, "out", JACKBUS_AUDIO, JackPortIsOutput);
+    jackbus_node_set_process(node, process, NULL);
+    jackbus_node_activate(node);
+    printf("ready\n");
+    fflush(stdout);
+    // the server is killed now: the event must come, within 10 s
+    struct pollfd p = { jackbus_node_event_fd(node), POLLIN, 0 };
+    int got = 0;
+    for (int i = 0; i < 100 && !got; i++) {
+        jackbus_event_t e;
+        while (jackbus_node_next_event(node, &e) == 1) {
+            if (e.type == JACKBUS_EVENT_SHUTDOWN) {
+                got = 1;
+                printf("shutdown event: %s\n", e.name);
+            }
+        }
+        if (!got) poll(&p, 1, 100);
+    }
+    unsigned long before = atomic_load(&cycles);
+    usleep(200000);
+    int stopped = atomic_load(&cycles) == before;
+    int res = jackbus_node_close(node);
+    printf("%s: SHUTDOWN event %s, process stopped %s, close returned %d\n",
+           got && stopped ? "PASS" : "FAIL", got ? "yes" : "no", stopped ? "yes" : "no", res);
+    return got && stopped ? 0 : 1;
+}
+
 static int write_zero(void)
 {
     if (!(node = open_node("rtwrite"))) return 1;
@@ -359,12 +392,13 @@ static int write_zero(void)
 int main(int argc, char* argv[])
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: bus_node full | rtwrite | steady <seconds>\n");
+        fprintf(stderr, "usage: bus_node full | rtwrite | steady <seconds> | shutdown\n");
         return 2;
     }
     rt_syscall = getenv("BUS_NODE_RT_SYSCALL") != NULL;
     if (strcmp(argv[1], "full") == 0) return full();
     if (strcmp(argv[1], "rtwrite") == 0) return write_zero();
+    if (strcmp(argv[1], "shutdown") == 0) return shutdown_case();
     if (strcmp(argv[1], "steady") == 0) return steady(argc > 2 ? atoi(argv[2]) : 3);
     return 2;
 }

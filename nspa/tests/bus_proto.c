@@ -26,6 +26,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/uio.h>
 
 enum { kClientOpen = 23, kBusHello = 100, kBusClientOpen = 101 };
@@ -149,7 +150,7 @@ static int recv_trailer(int sock)   /* closes what came; the fd count, -1 on err
 }
 
 static const char* victim_name;
-static volatile int victim_ref = -1;
+static atomic_int victim_ref = -1;      /* written by the notification thread */
 
 static void* notify_thread(void* arg)
 {
@@ -165,7 +166,7 @@ static void* notify_thread(void* arg)
         memcpy(&sync, ev + 4 + NAME1 + 16, 4);
         if (notify == 0) {          /* kAddClient: its futex trailer */
             if (recv_trailer(fd) < 0) break;
-            if (victim_name && strcmp(name, victim_name) == 0) victim_ref = refnum;
+            if (victim_name && strcmp(name, victim_name) == 0) atomic_store(&victim_ref, refnum);
         }
         if (sync) {
             int ok = 0;
@@ -238,15 +239,18 @@ static int spoof(int fd, const char* victim)
     close(sv[1]);
     if (read_all(fd, opres, sizeof(opres)) < 0 || opres[0] != 0 || recv_trailer(fd) != 5) return 0;
     int own = opres[4];
-    if (victim_ref < 0) {
+    int vref = atomic_load(&victim_ref);
+    if (vref < 0) {
         fprintf(stderr, "spoof: no client named %s\n", victim);
         return 0;
     }
     int foreign = 0, mine = -1;
-    if (register_port(fd, victim_ref, "spoofed", &foreign) < 0) return 0;
+    if (register_port(fd, vref, "spoofed", &foreign) < 0) return 0;
     if (register_port(fd, own, "mine", &mine) < 0) return 0;
-    printf("spoof: own refnum %d, %s is %d: for it %d, for itself %d\n", own, victim, victim_ref, foreign, mine);
-    shutdown(sv[0], SHUT_RDWR);
+    printf("spoof: own refnum %d, %s is %d: for it %d, for itself %d\n", own, victim, vref, foreign, mine);
+    shutdown(sv[0], SHUT_RDWR);     /* the notification thread's read ends */
+    pthread_join(t, NULL);
+    close(sv[0]);
     return foreign == -1 && mine == 0;
 }
 

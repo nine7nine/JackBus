@@ -158,7 +158,8 @@ else
 fi
 # writing into an unconnected input (the shared zero buffer) is a crash, and only
 # the writer's; the server goes on
-timeout 20 "$out/bus_node" rtwrite >"$out/node-rtwrite" 2>&1; rc=$?
+# (under ASan, its SEGV handler would catch the deliberate fault: the kernel's must)
+ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}handle_segv=0" timeout 20 "$out/bus_node" rtwrite >"$out/node-rtwrite" 2>&1; rc=$?
 if [ $rc -eq 139 ] && bc -b probe after-rtwrite >"$out/after-rtwrite" 2>&1; then
     pass "a node writing the zero buffer crashes (SIGSEGV), the server goes on"
 else
@@ -200,12 +201,31 @@ fi
 if grep -qE 'Segmentation|Assertion|terminate called' "$out/jackd.log"; then flunk "server log" "$out/jackd.log"; fi
 stop_server || flunk "server did not exit on SIGTERM"
 
-# 6. nothing left behind
+# 7. nothing left behind
 left=$(ls /dev/shm | grep -E '^jack_sem\.|^jack_alive\.|^jack-[0-9]+-[0-9]+$' | tr '\n' ' ')
 [ -z "$left" ] && pass "nothing left in /dev/shm" || flunk "left in /dev/shm: $left"
 [ ! -e "$XDG_RUNTIME_DIR/jackbus/jbbus" ] && pass "socket removed at exit" || flunk "socket left behind"
 
-# 7. a server without the socket: JackBus clients fail at once, the rest works
+# 8. the server dies under a running node (SIGKILL, as a crash) and stops (SIGTERM):
+# a SHUTDOWN event comes, the process stops, the close returns
+for sig in KILL TERM; do
+    if start_server; then
+        timeout 30 "$out/bus_node" shutdown >"$out/node-shutdown-$sig" 2>&1 & np=$!
+        i=0; while [ $i -lt 100 ] && ! grep -q '^ready' "$out/node-shutdown-$sig"; do sleep 0.1; i=$((i + 1)); done
+        sleep 0.5
+        kill -$sig "$server_pid"; wait "$server_pid" 2>/dev/null
+        if wait $np && grep -q '^PASS' "$out/node-shutdown-$sig"; then
+            pass "server SIG$sig under a running node: $(grep -E '^PASS' "$out/node-shutdown-$sig" | cut -d' ' -f2-)"
+        else
+            flunk "server SIG$sig under a running node" "$out/node-shutdown-$sig"
+        fi
+        rm -f /dev/shm/jack_jbbus_* /dev/shm/jack-[0-9]* /dev/shm/jack_sem.* /dev/shm/jack_alive.* "$XDG_RUNTIME_DIR/jackbus/jbbus"
+    else
+        flunk "server start (shutdown case)" "$out/jackd.log"
+    fi
+done
+
+# 9. a server without the socket: JackBus clients fail at once, the rest works
 if start_server JACK_NO_BUS_SOCKET=1; then
     if bc -b probe nosock >"$out/nosock" 2>&1; then flunk "JackBus open must fail without the socket" "$out/nosock"; else pass "no socket: jackbus_client_open fails cleanly"; fi
     bc probe nosock-p9 >"$out/nosock-p9" 2>&1 && pass "no socket: protocol 9 unaffected" || flunk "no socket: protocol 9" "$out/nosock-p9"
