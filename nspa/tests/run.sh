@@ -72,6 +72,11 @@ skip_system() {  # skip_system <name> <server> <lib>
     if [ -n "$san" ] && { [ "$2" = system ] || [ "$3" = system ]; }; then
         echo "SKIP $1 (sanitizer run)"; return 0
     fi
+    # JACKBUS_TRANSPORT=1: this libjack's clients open through the JackBus socket,
+    # which the system's jackd doesn't have
+    if [ "${JACKBUS_TRANSPORT:-0}" = 1 ] && [ "$2" = system ]; then
+        echo "SKIP $1 (system server: no JackBus socket)"; return 0
+    fi
     return 1
 }
 
@@ -504,6 +509,16 @@ elif command -v strace >/dev/null 2>&1; then
     "$here/rt_syscalls.sh" fork || fail=1
 else
     echo "SKIP rt-syscalls: strace not installed"
+fi
+
+# the JackBus socket: fd-passing clients beside protocol-9 ones (fd framing, mixed chains,
+# no /dev/shm, protocol errors, refnum spoofing, a server without the socket)
+NSPA_SANITIZER="$san" NSPA_TEST_CFLAGS="$tcf" "$here/bus.sh" || fail=1
+# real programs (jack-example-tools, fluidsynth) over it; uninstrumented binaries
+if [ -n "$san" ]; then
+    echo "SKIP bus-apps (sanitizer run)"
+else
+    "$here/bus-apps.sh" || fail=1
 fi
 
 if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then
