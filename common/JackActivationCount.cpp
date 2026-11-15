@@ -23,6 +23,19 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackClientControl.h"
 #include "JackError.h"
 
+/*
+ ThreadSanitizer builds: a client that decrements a successor's counter without
+ being the one that signals it still orders its cycle before the successor's
+ (another client, or the server, signals later): a release here, paired with
+ the acquire after a Wait() returns (JackLinuxFutex.cpp). No-op otherwise.
+*/
+#if defined(__SANITIZE_THREAD__) && defined(__linux__)
+namespace Jack { void JackTsanCycleRelease(); }
+#define JACK_TSAN_CYCLE_RELEASE() Jack::JackTsanCycleRelease()
+#else
+#define JACK_TSAN_CYCLE_RELEASE()
+#endif
+
 namespace Jack
 {
 
@@ -32,7 +45,9 @@ bool JackActivationCount::Signal(JackSynchro* synchro, JackClientControl* contro
         // Transfer activation to next clients
         jack_log("JackActivationCount::Signal value = 0 ref = %ld", control->fRefNum);
         return synchro->Signal();
-    } else if (DEC_ATOMIC(&fValue) == 1) {
+    }
+    JACK_TSAN_CYCLE_RELEASE();
+    if (DEC_ATOMIC(&fValue) == 1) {
         return synchro->Signal();
     } else {
         return true;

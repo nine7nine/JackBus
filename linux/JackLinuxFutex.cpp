@@ -60,6 +60,14 @@ static char gJackTsanCycleOrder;
 namespace Jack
 {
 
+#if defined(__SANITIZE_THREAD__)
+// JackActivationCount: a counter decremented without a Signal()
+void JackTsanCycleRelease()
+{
+    JACK_TSAN_RELEASE(NULL);
+}
+#endif
+
 JackLinuxFutex::JackLinuxFutex() : JackSynchro(), fSharedMem(-1), fFutex(NULL), fPrivate(false)
 {
     const char* promiscuous = getenv("JACK_PROMISCUOUS_SERVER");
