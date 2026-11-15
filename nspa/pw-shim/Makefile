@@ -1,15 +1,17 @@
 # jackbus-pw spike: a libpipewire-0.3.so.0 on JackBus.
 #
 #   make              the shim, in $(OUT)/lib
-#   make test-apps    test/pw-probe and test/jbpw-check, plus PipeWire's
-#                     audio-dsp-filter example if PW_EXAMPLE names its source.
+#   make test-apps    test/pw-probe, test/pw-twofilter and test/jbpw-check,
+#                     plus PipeWire's audio-dsp-filter, audio-src and
+#                     audio-capture examples if PW_EXAMPLES names their
+#                     directory (src/examples of a PipeWire tree).
 #                     The PipeWire apps link the REAL libpipewire-0.3, as a
 #                     distro build would; jackbus-pw swaps it at run time.
 
 JACK_TREE  ?= $(abspath ../..)
 JACK_BUILD ?= $(JACK_TREE)/build
 OUT        ?= $(JACK_BUILD)/pw-shim
-PW_EXAMPLE ?=
+PW_EXAMPLES ?=
 
 PW_CFLAGS     := $(shell pkg-config --cflags libpipewire-0.3)
 PW_LIBS       := $(shell pkg-config --libs libpipewire-0.3)
@@ -19,7 +21,7 @@ CFLAGS   ?= -O2 -g
 CFLAGS   += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
 CPPFLAGS += $(PW_CFLAGS) -I$(JACK_TREE)/common
 
-SRCS = pw.c loop.c core.c filter.c
+SRCS = pw.c loop.c core.c filter.c app.c stream.c
 SHIM = $(OUT)/lib/libpipewire-0.3.so.0
 
 all: $(SHIM)
@@ -31,7 +33,8 @@ $(SHIM): $(SRCS) shim.h Makefile
 		-Wl,-soname,libpipewire-0.3.so.0 -Wl,--no-undefined -Wl,-z,defs \
 		-o $@ $(SRCS) -L$(JACK_BUILD)/common -ljack -ldl -lpthread -lm
 
-TEST_APPS = $(OUT)/pw-probe $(OUT)/jbpw-check $(if $(PW_EXAMPLE),$(OUT)/audio-dsp-filter)
+TEST_APPS = $(OUT)/pw-probe $(OUT)/pw-twofilter $(OUT)/jbpw-check \
+	$(if $(PW_EXAMPLES),$(OUT)/audio-dsp-filter $(OUT)/audio-src $(OUT)/audio-capture)
 
 test-apps: $(TEST_APPS)
 
@@ -40,7 +43,11 @@ $(OUT)/pw-probe: test/pw-probe.c
 	@mkdir -p $(@D)
 	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
 
-$(OUT)/audio-dsp-filter: $(PW_EXAMPLE)
+$(OUT)/pw-twofilter: test/pw-twofilter.c
+	@mkdir -p $(@D)
+	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
+
+$(OUT)/audio-dsp-filter $(OUT)/audio-src $(OUT)/audio-capture: $(OUT)/%: $(PW_EXAMPLES)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
 

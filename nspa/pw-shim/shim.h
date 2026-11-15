@@ -22,8 +22,11 @@
 
 #include <pipewire/pipewire.h>
 #include <pipewire/filter.h>
+#include <pipewire/stream.h>
+#include <spa/node/io.h>
 
 #include <jack/jack.h>
+#include <jack/jackbus.h>
 
 #define SHIM_EXPORT __attribute__((visibility("default")))
 
@@ -58,5 +61,26 @@ struct pw_core {
 	uint32_t pending_id[16];
 	uint32_t n_pending;
 };
+
+/* A pw_filter or pw_stream as the application's JACK client runs it */
+struct shim_member {
+	void (*process)(struct shim_member *m, const jackbus_cycle_t *cycle);	/* realtime */
+	void (*shutdown)(struct shim_member *m);	/* the server went away */
+	jack_nframes_t (*latency)(struct shim_member *m);	/* its process latency */
+};
+
+/* the application's JACK client (app.c): one JackBus node per process */
+jackbus_node_t *shim_app_ref(const char *name);
+void shim_app_unref(void);
+const char *shim_app_client_name(void);		/* the name asked for */
+void shim_app_attach(struct shim_member *m);	/* it runs from the next cycle */
+void shim_app_detach(struct shim_member *m);	/* returns once no cycle runs it */
+void shim_app_update_latency(void);
+void shim_app_retire(void *old);		/* free once no cycle can read it */
+/* spa_io_position (filter and stream) from the cycle record, realtime thread */
+void shim_fill_position(struct spa_io_position *pos, const jackbus_cycle_t *cycle, jack_client_t *client);
+/* the JACK port name for a port of node node_name: "<node>/<port>", or the
+ * port alone when the node has the client's name */
+void shim_app_port_name(const char *node_name, const char *port, char *buf, size_t size);
 
 #endif

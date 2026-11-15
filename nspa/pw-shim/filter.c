@@ -1,13 +1,16 @@
 /*
- * jackbus-pw: pw_filter as a JACK client.
+ * jackbus-pw: pw_filter on the application's JackBus node.
  *
- * One pw_filter is one JACK client; each "32 bit float mono audio" DSP
- * port is one JACK audio port. The application's process callback runs in
- * the JACK process thread with the server's rate and period: whatever the
- * application asked for (node.latency, node.rate, PIPEWIRE_QUANTUM, ...)
- * is logged and not obeyed, as WineASIO does with a Windows app's
- * requested buffer size. The application learns the real figures the
- * PipeWire way, from spa_io_position (clock.rate, clock.duration).
+ * Every pw_filter of the process is a group of ports on one JACK client (the
+ * application's node, app.c); each "32 bit float mono audio" DSP port is one
+ * JACK audio port, named after the port, or "<node.name>/<port>" when the
+ * filter's node.name isn't the client's. The node runs each connected
+ * filter's process callback in the JACK realtime thread, at the server's rate
+ * and period: whatever the application asked for (node.latency, node.rate,
+ * PIPEWIRE_QUANTUM, ...) is logged and not obeyed, as WineASIO does with a
+ * Windows app's requested buffer size. The application learns the real
+ * figures the PipeWire way, from spa_io_position, filled from the node's
+ * cycle record: the 64-bit frame position and the cycle's times as they are.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -18,7 +21,6 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
-#include <dlfcn.h>
 
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/latency-utils.h>
@@ -41,10 +43,11 @@ struct filter_port {
 	enum pw_direction direction;
 	uint32_t flags;
 	struct pw_properties *props;
-	jack_port_t *jport;
+	jackbus_port_t *bport;
 	bool is_audio;
+	uint32_t number;		/* input_N / output_N when it has no name */
 
-	/* per cycle, JACK process thread only */
+	/* per cycle, realtime thread only */
 	float *buf;
 	bool used;
 
@@ -55,7 +58,14 @@ struct filter_port {
 	struct spa_chunk chunk;
 };
 
+/* the ports a cycle sees: published like the node's port table */
+struct port_array {
+	size_t count;
+	struct filter_port *ports[];
+};
+
 struct pw_filter {
+	struct shim_member member;	/* first: the application's client runs it */
 	struct pw_core *core;
 	struct pw_context *own_context;
 	struct pw_core *own_core;
@@ -68,27 +78,23 @@ struct pw_filter {
 	enum pw_filter_flags flags;
 	uint32_t node_id;
 
-	pthread_mutex_t ports_lock;	/* main thread writes; process trylocks */
+	pthread_mutex_t ports_lock;	/* non-realtime threads */
 	struct spa_list ports;
 	uint32_t n_in, n_out;
+	_Atomic(struct port_array *) rt_ports;
 
+	jackbus_node_t *node;		/* the application's, while connected */
 	jack_client_t *client;
 	jack_nframes_t rate;
 	struct spa_source *notify;
 	atomic_uint pending;
 	atomic_bool streaming;		/* the app has seen STREAMING */
 	atomic_bool active;
-	bool warned_non_rt;
 
-	/* JACK process thread only */
+	/* realtime thread only */
 	bool in_process;
 	jack_nframes_t nframes;
 	struct spa_io_position position;
-	uint64_t pos64;
-	uint32_t last_frames;
-	bool have_frames;
-	atomic_bool freewheel;
-	atomic_uint xruns;
 
 	struct spa_process_latency_info proc_latency;
 };
@@ -135,106 +141,41 @@ static inline struct filter_port *port_from_user_data(void *data)
 	return SPA_PTROFF(data, -(ptrdiff_t)PORT_DATA_OFFSET, struct filter_port);
 }
 
-/* ------------------------------------------------- the JACK process side */
-
-static int64_t monotonic_minus_raw_ns(void)
+/* under ports_lock: publish the registered ports to the realtime thread */
+static void publish_ports(struct pw_filter *f)
 {
-	struct timespec m, r;
-	clock_gettime(CLOCK_MONOTONIC, &m);
-	clock_gettime(CLOCK_MONOTONIC_RAW, &r);
-	return SPA_TIMESPEC_TO_NSEC(&m) - SPA_TIMESPEC_TO_NSEC(&r);
-}
-
-static void fill_position(struct pw_filter *f, jack_nframes_t nframes)
-{
-	struct spa_io_position *pos = &f->position;
-	struct spa_io_clock *clk = &pos->clock;
-	struct spa_io_segment *seg = &pos->segments[0];
-	jack_nframes_t frames;
-	jack_time_t usecs, next_usecs;
-	float period_usecs;
-	jack_position_t tp;
-	jack_transport_state_t ts;
-	int64_t off;
-
-	if (jack_get_cycle_times(f->client, &frames, &usecs, &next_usecs, &period_usecs) != 0) {
-		frames = jack_last_frame_time(f->client);
-		usecs = jack_get_time();
-		period_usecs = nframes * 1e6f / f->rate;
-		next_usecs = usecs + (jack_time_t)period_usecs;
-	}
-	/* JACK frame time is 32 bit; PipeWire's position is 64 bit */
-	if (!f->have_frames) {
-		f->pos64 = frames;
-		f->have_frames = true;
-	} else {
-		f->pos64 += (uint32_t)(frames - f->last_frames);
-	}
-	f->last_frames = frames;
-
-	/* JACK's time base is CLOCK_MONOTONIC_RAW in us; PipeWire's is
-	 * CLOCK_MONOTONIC in ns (both clock reads are vDSO, no syscall) */
-	off = monotonic_minus_raw_ns();
-
-	clk->flags = atomic_load_explicit(&f->freewheel, memory_order_relaxed) ?
-		SPA_IO_CLOCK_FLAG_FREEWHEEL : 0;
-	clk->nsec = usecs * SPA_NSEC_PER_USEC + off;
-	clk->next_nsec = next_usecs * SPA_NSEC_PER_USEC + off;
-	clk->rate = SPA_FRACTION(1, f->rate);
-	clk->position = f->pos64;
-	clk->duration = nframes;
-	clk->delay = 0;
-	clk->rate_diff = period_usecs > 0.0f ?
-		(nframes * 1e6 / f->rate) / period_usecs : 1.0;
-	clk->target_rate = clk->rate;
-	clk->target_duration = nframes;
-	clk->cycle++;
-	clk->xrun = atomic_load_explicit(&f->xruns, memory_order_relaxed);
-
-	ts = jack_transport_query(f->client, &tp);
-	pos->offset = 0;
-	pos->state = ts == JackTransportRolling ? SPA_IO_POSITION_STATE_RUNNING :
-		ts == JackTransportStarting ? SPA_IO_POSITION_STATE_STARTING :
-		SPA_IO_POSITION_STATE_STOPPED;
-	pos->n_segments = 1;
-	seg->flags = 0;
-	seg->start = f->pos64;
-	seg->duration = 0;
-	seg->rate = ts == JackTransportRolling ? 1.0 : 0.0;
-	seg->position = tp.frame;
-	spa_zero(seg->bar);
-	if (tp.valid & JackPositionBBT) {
-		seg->bar.flags = SPA_IO_SEGMENT_BAR_FLAG_VALID;
-		seg->bar.signature_num = tp.beats_per_bar;
-		seg->bar.signature_denom = tp.beat_type;
-		seg->bar.bpm = tp.beats_per_minute;
-		seg->bar.beat = (tp.bar - 1) * tp.beats_per_bar + (tp.beat - 1) +
-			(tp.ticks_per_beat > 0 ? tp.tick / tp.ticks_per_beat : 0);
-		seg->bar.bar_start_tick = tp.bar_start_tick;
-		seg->bar.ticks_per_beat = tp.ticks_per_beat;
-	}
-}
-
-static int on_jack_process(jack_nframes_t nframes, void *arg)
-{
-	struct pw_filter *f = arg;
+	size_t n = 0;
 	struct filter_port *p;
-	bool run;
+	spa_list_for_each(p, &f->ports, link)
+		if (p->bport)
+			n++;
+	struct port_array *a = calloc(1, sizeof(*a) + n * sizeof(a->ports[0]));
+	if (a == NULL)
+		return;
+	spa_list_for_each(p, &f->ports, link)
+		if (p->bport)
+			a->ports[a->count++] = p;
+	shim_app_retire(atomic_exchange(&f->rt_ports, a));
+}
 
-	/* a port being added or removed this instant: one silent cycle */
-	if (pthread_mutex_trylock(&f->ports_lock) != 0)
-		return 0;
+/* ------------------------------------------------ the realtime side */
 
-	f->nframes = nframes;
-	spa_list_for_each(p, &f->ports, link) {
-		p->buf = p->jport ? jack_port_get_buffer(p->jport, nframes) : NULL;
+/* called by the application's node, in the JACK realtime thread */
+static void filter_process(struct shim_member *m, const jackbus_cycle_t *c)
+{
+	struct pw_filter *f = SPA_CONTAINER_OF(m, struct pw_filter, member);
+	struct port_array *a = atomic_load_explicit(&f->rt_ports, memory_order_acquire);
+
+	f->nframes = c->nframes;
+	for (size_t i = 0; a && i < a->count; i++) {
+		struct filter_port *p = a->ports[i];
+		p->buf = jackbus_port_audio(p->bport);
 		p->used = false;
 	}
 
-	run = atomic_load_explicit(&f->streaming, memory_order_acquire) &&
-		atomic_load_explicit(&f->active, memory_order_relaxed);
-	if (run) {
-		fill_position(f, nframes);
+	if (atomic_load_explicit(&f->streaming, memory_order_acquire) &&
+	    atomic_load_explicit(&f->active, memory_order_relaxed)) {
+		shim_fill_position(&f->position, c, f->client);
 		f->in_process = true;
 		/* as in PipeWire, only the first listener with process gets it */
 		spa_hook_list_call_once(&f->listeners, struct pw_filter_events, process, 0,
@@ -244,69 +185,30 @@ static int on_jack_process(jack_nframes_t nframes, void *arg)
 
 	/* an output the app didn't ask for this cycle is silent, as in PipeWire
 	 * (a JACK output buffer still holds the previous cycle) */
-	spa_list_for_each(p, &f->ports, link) {
+	for (size_t i = 0; a && i < a->count; i++) {
+		struct filter_port *p = a->ports[i];
 		if (p->direction == PW_DIRECTION_OUTPUT && p->buf && !p->used)
-			memset(p->buf, 0, nframes * sizeof(float));
+			memset(p->buf, 0, c->nframes * sizeof(float));
 		p->buf = NULL;
 	}
-	pthread_mutex_unlock(&f->ports_lock);
-	return 0;
 }
 
-static jack_nframes_t proc_latency_frames(struct pw_filter *f)
+/* the event thread of the application's node: the server went away */
+static void filter_shutdown(struct shim_member *m)
 {
-	struct spa_process_latency_info *l = &f->proc_latency;
-	jack_nframes_t q = jack_get_buffer_size(f->client);
-	return (jack_nframes_t)(l->quantum * q) + l->rate +
-		(jack_nframes_t)(l->ns * (int64_t)f->rate / SPA_NSEC_PER_SEC);
-}
-
-/* the app's ProcessLatency becomes part of the JACK latency ranges */
-static void on_jack_latency(jack_latency_callback_mode_t mode, void *arg)
-{
-	struct pw_filter *f = arg;
-	struct filter_port *p;
-	jack_latency_range_t range, max = { 0, 0 };
-	enum pw_direction from = mode == JackCaptureLatency ? PW_DIRECTION_INPUT : PW_DIRECTION_OUTPUT;
-	jack_nframes_t extra = proc_latency_frames(f);
-
-	pthread_mutex_lock(&f->ports_lock);
-	spa_list_for_each(p, &f->ports, link) {
-		if (p->direction != from || !p->jport)
-			continue;
-		jack_port_get_latency_range(p->jport, mode, &range);
-		max.min = SPA_MAX(max.min, range.min);
-		max.max = SPA_MAX(max.max, range.max);
-	}
-	max.min += extra;
-	max.max += extra;
-	spa_list_for_each(p, &f->ports, link) {
-		if (p->direction == from || !p->jport)
-			continue;
-		jack_port_set_latency_range(p->jport, mode, &max);
-	}
-	pthread_mutex_unlock(&f->ports_lock);
-}
-
-static int on_jack_xrun(void *arg)
-{
-	struct pw_filter *f = arg;
-	atomic_fetch_add_explicit(&f->xruns, 1, memory_order_relaxed);
-	return 0;
-}
-
-static void on_jack_freewheel(int starting, void *arg)
-{
-	struct pw_filter *f = arg;
-	atomic_store_explicit(&f->freewheel, starting != 0, memory_order_relaxed);
-}
-
-static void on_jack_shutdown(jack_status_t code, const char *reason, void *arg)
-{
-	struct pw_filter *f = arg;
+	struct pw_filter *f = SPA_CONTAINER_OF(m, struct pw_filter, member);
 	atomic_store(&f->streaming, false);
 	atomic_fetch_or(&f->pending, NOTIFY_SHUTDOWN);
 	pw_loop_signal_event(f->core->context->main_loop, f->notify);
+}
+
+static jack_nframes_t filter_latency(struct shim_member *m)
+{
+	struct pw_filter *f = SPA_CONTAINER_OF(m, struct pw_filter, member);
+	struct spa_process_latency_info *l = &f->proc_latency;
+	jack_nframes_t q = f->client ? jack_get_buffer_size(f->client) : 0;
+	return (jack_nframes_t)(l->quantum * q) + l->rate +
+		(jack_nframes_t)(l->ns * (int64_t)f->rate / SPA_NSEC_PER_SEC);
 }
 
 /* ------------------------------------------------ main-loop notifications */
@@ -380,6 +282,9 @@ SHIM_EXPORT struct pw_filter *pw_filter_new(struct pw_core *core, const char *na
 		pw_properties_free(props);
 		return NULL;
 	}
+	f->member.process = filter_process;
+	f->member.shutdown = filter_shutdown;
+	f->member.latency = filter_latency;
 	f->core = core;
 	f->name = strdup(name ? name : "pw-filter");
 	f->props = props ? props : pw_properties_new(NULL, NULL);
@@ -438,28 +343,30 @@ SHIM_EXPORT const char *pw_filter_get_name(struct pw_filter *f) { return f->name
 SHIM_EXPORT struct pw_core *pw_filter_get_core(struct pw_filter *f) { return f->core; }
 SHIM_EXPORT uint32_t pw_filter_get_node_id(struct pw_filter *f) { return f->node_id; }
 
-static int register_jack_port(struct pw_filter *f, struct filter_port *p)
+/* under ports_lock, connected */
+static int register_port(struct pw_filter *f, struct filter_port *p)
 {
-	const char *name = pw_properties_get(p->props, PW_KEY_PORT_NAME);
+	const char *pname = pw_properties_get(p->props, PW_KEY_PORT_NAME);
 	bool out = p->direction == PW_DIRECTION_OUTPUT;
-	char buf[256];
+	char base[256], name[300];
 
-	if (name == NULL) {
-		snprintf(buf, sizeof(buf), "%s_%u", out ? "output" : "input",
-				out ? f->n_out : f->n_in);
-		name = buf;
+	if (pname == NULL) {
+		snprintf(base, sizeof(base), "%s_%u", out ? "output" : "input", p->number);
+		pname = base;
 	}
-	p->jport = jack_port_register(f->client, name, JACK_DEFAULT_AUDIO_TYPE,
-			out ? JackPortIsOutput : JackPortIsInput, 0);
-	for (int i = 2; p->jport == NULL && i < 100; i++) {
-		char unique[300];
+	/* the client is the application: a filter named otherwise prefixes its ports */
+	shim_app_port_name(pw_properties_get(f->props, PW_KEY_NODE_NAME), pname, name, sizeof(name));
+
+	unsigned long flags = out ? JackPortIsOutput : JackPortIsInput;
+	p->bport = jackbus_port_add(f->node, name, JACKBUS_AUDIO, flags);
+	for (int i = 2; p->bport == NULL && i < 100; i++) {
+		char unique[310];
 		snprintf(unique, sizeof(unique), "%s-%d", name, i);
-		p->jport = jack_port_register(f->client, unique, JACK_DEFAULT_AUDIO_TYPE,
-				out ? JackPortIsOutput : JackPortIsInput, 0);
+		p->bport = jackbus_port_add(f->node, unique, JACKBUS_AUDIO, flags);
 	}
-	if (p->jport == NULL)
+	if (p->bport == NULL)
 		return -EIO;
-	shim_log("%s: port %s", f->name, jack_port_name(p->jport));
+	shim_log("%s: port %s", f->name, jack_port_name(jackbus_port_jack(p->bport)));
 	return 0;
 }
 
@@ -475,7 +382,7 @@ SHIM_EXPORT void *pw_filter_add_port(struct pw_filter *f, enum pw_direction dire
 		props = pw_properties_new(NULL, NULL);
 	dsp = pw_properties_get(props, PW_KEY_FORMAT_DSP);
 	if (dsp == NULL || !spa_streq(dsp, "32 bit float mono audio")) {
-		/* MIDI/UMP and video DSP ports: not in this spike */
+		/* MIDI/UMP and video DSP ports: not yet */
 		shim_warn("%s: port format \"%s\" is not supported", f->name, dsp ? dsp : "(none)");
 		pw_properties_free(props);
 		errno = ENOTSUP;
@@ -497,28 +404,19 @@ SHIM_EXPORT void *pw_filter_add_port(struct pw_filter *f, enum pw_direction dire
 	p->pwbuf.buffer = &p->sbuf;
 
 	pthread_mutex_lock(&f->ports_lock);
-	if (f->client && register_jack_port(f, p) < 0) {
+	p->number = (direction == PW_DIRECTION_OUTPUT) ? f->n_out++ : f->n_in++;
+	if (f->node && register_port(f, p) < 0) {
 		pthread_mutex_unlock(&f->ports_lock);
 		pw_properties_free(props);
 		free(p);
 		errno = EIO;
 		return NULL;
 	}
-	if (direction == PW_DIRECTION_OUTPUT)
-		f->n_out++;
-	else
-		f->n_in++;
 	spa_list_append(&f->ports, &p->link);
+	if (f->node)
+		publish_ports(f);
 	pthread_mutex_unlock(&f->ports_lock);
 	return port_user_data(p);
-}
-
-static void free_port(struct pw_filter *f, struct filter_port *p)
-{
-	if (p->jport && f->client)
-		jack_port_unregister(f->client, p->jport);
-	pw_properties_free(p->props);
-	free(p);
 }
 
 SHIM_EXPORT int pw_filter_remove_port(void *port_data)
@@ -528,8 +426,13 @@ SHIM_EXPORT int pw_filter_remove_port(void *port_data)
 
 	pthread_mutex_lock(&f->ports_lock);
 	spa_list_remove(&p->link);
+	if (f->node)
+		publish_ports(f);	/* from here no cycle sees the port */
 	pthread_mutex_unlock(&f->ports_lock);
-	free_port(f, p);
+	if (p->bport)
+		jackbus_port_remove(p->bport);
+	pw_properties_free(p->props);
+	free(p);
 	return 0;
 }
 
@@ -568,65 +471,32 @@ static void log_forced_settings(struct pw_filter *f)
 			f->flags & PW_FILTER_FLAG_RT_PROCESS ? "" : " (process still runs in the JACK thread)");
 }
 
-/*
- * The JackBus socket when the server has one (its fds: no /dev/shm names, no
- * shm registry), else protocol 9. JACKBUS_PW_TRANSPORT=p9 forces protocol 9,
- * =bus forbids the fallback. jackbus_client_open is looked up at run time, so
- * the shim also runs with a libjack that doesn't have it.
- */
-typedef jack_client_t *(*bus_open_t)(const char *, jack_options_t, jack_status_t *, unsigned int, ...);
-
-static jack_client_t *shim_jack_open(const char *name, jack_status_t *status)
+/* the application's client: JACKBUS_PW_CLIENT_NAME, else the first filter's node.name */
+static const char *client_name_for(struct pw_filter *f)
 {
-	const char *mode = getenv("JACKBUS_PW_TRANSPORT");
-	jack_client_t *c = NULL;
-
-	if (mode == NULL || strcmp(mode, "p9") != 0) {
-		bus_open_t bus_open = (bus_open_t)dlsym(RTLD_DEFAULT, "jackbus_client_open");
-		if (bus_open)
-			c = bus_open(name, JackNoStartServer, status, 0);
-		if (c) {
-			shim_log("%s: opened over the JackBus socket", name);
-			return c;
-		}
-		if (mode && strcmp(mode, "bus") == 0) {
-			shim_warn("%s: no JackBus socket%s", name, bus_open ? "" : " in this libjack");
-			return NULL;
-		}
-	}
-	c = jack_client_open(name, JackNoStartServer, status);
-	if (c)
-		shim_log("%s: opened over protocol 9", name);
-	return c;
-}
-
-static const char *jack_client_name(struct pw_filter *f)
-{
-	const char *n;
-	if ((n = getenv("JACKBUS_PW_CLIENT_NAME")) != NULL && n[0])
+	const char *n = pw_properties_get(f->props, PW_KEY_NODE_NAME);
+	if (n && n[0])
 		return n;
-	if ((n = pw_properties_get(f->props, PW_KEY_NODE_NAME)) != NULL && n[0])
-		return n;
-	return f->name;
+	n = pw_get_prgname();
+	return n ? n : f->name;
 }
 
 SHIM_EXPORT int pw_filter_connect(struct pw_filter *f, enum pw_filter_flags flags,
 		const struct spa_pod **params, uint32_t n_params)
 {
-	jack_status_t status;
 	struct filter_port *p;
 
-	if (f->client != NULL)
+	if (f->node != NULL)
 		return -EBUSY;
 	f->flags = flags;
 	parse_node_params(f, params, n_params);
 	set_state(f, PW_FILTER_STATE_CONNECTING, 0, NULL);
 
-	f->client = shim_jack_open(jack_client_name(f), &status);
-	if (f->client == NULL) {
-		set_state(f, PW_FILTER_STATE_ERROR, -EIO, "can't connect to the JACK server");
+	if ((f->node = shim_app_ref(client_name_for(f))) == NULL) {
+		set_state(f, PW_FILTER_STATE_ERROR, -EIO, "can't connect to JackBus");
 		return -EIO;
 	}
+	f->client = jackbus_node_client(f->node);
 	f->rate = jack_get_sample_rate(f->client);
 	/* valid before the first cycle, for apps that read it at io_changed */
 	f->position.clock.rate = SPA_FRACTION(1, f->rate);
@@ -636,36 +506,24 @@ SHIM_EXPORT int pw_filter_connect(struct pw_filter *f, enum pw_filter_flags flag
 	snprintf(f->position.clock.name, sizeof(f->position.clock.name), "jackbus");
 	if ((flags & PW_FILTER_FLAG_DRIVER) || (flags & PW_FILTER_FLAG_TRIGGER))
 		shim_log("%s: driver/trigger flags ignored: JackBus drives the graph", f->name);
-	if (!(flags & PW_FILTER_FLAG_RT_PROCESS) && !f->warned_non_rt) {
+	if (!(flags & PW_FILTER_FLAG_RT_PROCESS))
 		shim_log("%s: no RT_PROCESS flag: process still runs in the JACK thread", f->name);
-		f->warned_non_rt = true;
-	}
 
 	pthread_mutex_lock(&f->ports_lock);
 	spa_list_for_each(p, &f->ports, link) {
-		if (register_jack_port(f, p) < 0) {
+		if (register_port(f, p) < 0) {
 			pthread_mutex_unlock(&f->ports_lock);
-			jack_client_close(f->client);
-			f->client = NULL;
+			pw_filter_disconnect(f);
 			set_state(f, PW_FILTER_STATE_ERROR, -EIO, "can't register a JACK port");
 			return -EIO;
 		}
 	}
+	publish_ports(f);
 	pthread_mutex_unlock(&f->ports_lock);
 
-	jack_set_process_callback(f->client, on_jack_process, f);
-	jack_set_latency_callback(f->client, on_jack_latency, f);
-	jack_set_xrun_callback(f->client, on_jack_xrun, f);
-	jack_set_freewheel_callback(f->client, on_jack_freewheel, f);
-	jack_on_info_shutdown(f->client, on_jack_shutdown, f);
-
 	log_forced_settings(f);
-	if (jack_activate(f->client) != 0) {
-		jack_client_close(f->client);
-		f->client = NULL;
-		set_state(f, PW_FILTER_STATE_ERROR, -EIO, "can't activate the JACK client");
-		return -EIO;
-	}
+	shim_app_attach(&f->member);
+	shim_app_update_latency();
 	atomic_fetch_or(&f->pending, NOTIFY_START);
 	pw_loop_signal_event(f->core->context->main_loop, f->notify);
 	return 0;
@@ -675,16 +533,23 @@ SHIM_EXPORT int pw_filter_disconnect(struct pw_filter *f)
 {
 	struct filter_port *p;
 
-	if (f->client == NULL)
+	if (f->node == NULL)
 		return 0;
 	atomic_store(&f->streaming, false);
-	jack_deactivate(f->client);
+	shim_app_detach(&f->member);		/* from here no cycle runs the filter */
 	pthread_mutex_lock(&f->ports_lock);
-	spa_list_for_each(p, &f->ports, link)
-		p->jport = NULL;	/* closing the client unregisters them */
+	shim_app_retire(atomic_exchange(&f->rt_ports, NULL));
+	spa_list_for_each(p, &f->ports, link) {
+		if (p->bport) {
+			jackbus_port_remove(p->bport);
+			p->bport = NULL;
+		}
+	}
 	pthread_mutex_unlock(&f->ports_lock);
-	jack_client_close(f->client);
+	f->node = NULL;
 	f->client = NULL;
+	shim_app_update_latency();
+	shim_app_unref();
 	set_state(f, PW_FILTER_STATE_UNCONNECTED, 0, NULL);
 	return 0;
 }
@@ -699,7 +564,8 @@ SHIM_EXPORT void pw_filter_destroy(struct pw_filter *f)
 	spa_hook_list_call(&f->listeners, struct pw_filter_events, destroy, 0);
 	spa_list_for_each_safe(p, t, &f->ports, link) {
 		spa_list_remove(&p->link);
-		free_port(f, p);
+		pw_properties_free(p->props);
+		free(p);
 	}
 	pw_loop_destroy_source(f->core->context->main_loop, f->notify);
 	spa_hook_list_clean(&f->listeners);
@@ -744,8 +610,8 @@ SHIM_EXPORT int pw_filter_update_params(struct pw_filter *f, void *port_data,
 {
 	if (port_data == NULL) {
 		parse_node_params(f, params, n_params);
-		if (f->client)
-			jack_recompute_total_latencies(f->client);
+		if (f->node)
+			shim_app_update_latency();
 	}
 	return 0;
 }
@@ -777,7 +643,7 @@ SHIM_EXPORT uint64_t pw_filter_get_nsec(struct pw_filter *f)
 
 SHIM_EXPORT struct pw_loop *pw_filter_get_data_loop(struct pw_filter *f)
 {
-	/* not emulated in the spike: invoke on it runs on the main loop */
+	/* not emulated yet: invoke on it runs on the main loop */
 	shim_log("%s: pw_filter_get_data_loop returns the main loop", f->name);
 	return f->core->context->main_loop;
 }
@@ -818,7 +684,6 @@ SHIM_EXPORT void *pw_filter_get_dsp_buffer(void *port_data, uint32_t n_samples)
 
 SHIM_EXPORT int pw_filter_flush(struct pw_filter *f, bool drain)
 {
-	(void)drain;
 	if (drain)
 		spa_hook_list_call(&f->listeners, struct pw_filter_events, drained, 0);
 	return 0;
