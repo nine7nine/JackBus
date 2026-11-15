@@ -337,17 +337,18 @@ pre.code .s { color: var(--amber); }
     <li><a href="#s9">MIDI through -X seq</a></li>
     <li><a href="#s10">libjack: the client side</a></li>
     <li><a href="#s11">jackdbus, PipeWire and the card</a></li>
-    <li><a href="#s12">When a client dies</a></li>
-    <li><a href="#s13">Late clients: catch up, report, count</a></li>
-    <li><a href="#s14">Slow notification clients</a></li>
-    <li><a href="#s15">Failure modes fixed</a></li>
-    <li><a href="#s16">Performance, measured in the engine</a></li>
-    <li><a href="#s17">Compatibility envelope</a></li>
-    <li><a href="#s18">Validation harness</a></li>
-    <li><a href="#s19">Evaluated and rejected</a></li>
-    <li><a href="#s20">Open items</a></li>
-    <li><a href="#s21">Packaging and deployment</a></li>
-    <li><a href="#s22">Source map</a></li>
+    <li><a href="#s12">Sound card bridges</a></li>
+    <li><a href="#s13">When a client dies</a></li>
+    <li><a href="#s14">Late clients: catch up, report, count</a></li>
+    <li><a href="#s15">Slow notification clients</a></li>
+    <li><a href="#s16">Failure modes fixed</a></li>
+    <li><a href="#s17">Performance, measured in the engine</a></li>
+    <li><a href="#s18">Compatibility envelope</a></li>
+    <li><a href="#s19">Validation harness</a></li>
+    <li><a href="#s20">Evaluated and rejected</a></li>
+    <li><a href="#s21">Open items</a></li>
+    <li><a href="#s22">Packaging and deployment</a></li>
+    <li><a href="#s23">Source map</a></li>
   </ol>
 </nav>
 <main class="content">
@@ -366,21 +367,30 @@ pre.code .s { color: var(--amber); }
     layout, the futex protocol, the request encoding and the time base are exactly 1.9.22's, so an application
     carrying a stock libjack (64- or 32-bit) works against this server, and this libjack works against a stock
     server. The one addition is optional &mdash; a small side file in which each client's realtime thread holds a
-    robust mutex, so the server learns the moment it ends (§12) &mdash; and either side does without it when the
+    robust mutex, so the server learns the moment it ends (§13) &mdash; and either side does without it when the
     other lacks it. Everything here happens behind those interfaces &mdash; on the RT driver thread, in the engine's
     per-cycle work, in the server's control threads, in libjack's own locking &mdash; and every change was measured
     on the engine itself, not on a microbenchmark.
   </p>
+  <p class="lede" style="margin-top:12px">
+    It also does what stock JACK never did: <b>sound card bridges</b> (§12) join cards that run on their own clocks to
+    the graph, each resampled in the master's own cycle, with the delay each card needs measured on the card instead of
+    a fixed margin; the master's own card can be unplugged and plugged back without a client noticing (§11); and
+    jackdbus grew the calls a session manager and a settings page need. PatchBox is its patchbay, settings page and
+    session manager.
+  </p>
   <ul class="stats">
     <li><b>1.9.22</b><span>base tag · Arch jack2 1.9.22-2</span></li>
-    <li><b>98</b><span>commits · 19 cherry-picked from develop</span></li>
+    <li><b>150</b><span>commits · 19 cherry-picked from develop</span></li>
     <li><b>0</b><span>API · ABI · protocol changes</span></li>
     <li><b>0</b><span>xruns when a 1 GB client is killed · was 346–402 / 6</span></li>
     <li><b>0.4 ms</b><span>others' wait behind a slow client · was 2.9 s</span></li>
     <li><b>2 833</b><span>server instr./cycle · was 9 553 (2 clients)</span></li>
     <li><b>0</b><span>write() calls on the RT driver thread · was 1 945</span></li>
     <li><b>182 µs</b><span>connect round trip · was <i style="text-transform:none;font-style:normal">1 221 µs</i></span></li>
-    <li><b>70</b><span>isolated suite checks · + hw:PCH harness</span></li>
+    <li><b>97</b><span>isolated suite checks · + hardware harness</span></li>
+    <li><b>8.1 ms</b><span>a USB card bridged, capture · 32 × 3, 256-frame master</span></li>
+    <li><b>0</b><span>frames a USB bridge drops · was 23 % of playback</span></li>
     <li><b>6</b><span>validated builds · regular · LTO · lib32 · ASan · TSan · package</span></li>
     <li><b>Linux-NSPA 7.3</b><span>PREEMPT_RT · i7-1065G7 · HDA ALC274</span></li>
   </ul>
@@ -393,14 +403,16 @@ pre.code .s { color: var(--amber); }
       <tr><td style="border-left:3px solid #8b8ff5">Per-cycle engine work</td><td>three loops over all 256 client slots, whatever the client count</td><td>loops stop at the highest refnum in use; successor scan skips 16 empty slots per test</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Graph edits</td><td>each edit copies a whole 19&nbsp;MB connection manager</td><td>only the rows that changed</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Memory residency</td><td><code>mlockall</code> never called (dead code)</td><td>server locks all memory; clients prefault when mlock is refused</td></tr>
-      <tr><td style="border-left:3px solid #8b8ff5">ALSA driver</td><td>poll timeout in the wrong unit; full driver restart on the RT thread per xrun; stale capture on connect</td><td>correct timeout; lightweight recovery; fresh capture in the connecting cycle; optional PM QoS hold</td></tr>
+      <tr><td style="border-left:3px solid #8b8ff5">ALSA driver</td><td>poll timeout in the wrong unit; full driver restart on the RT thread per xrun; stale capture on connect</td><td>correct timeout; lightweight recovery; fresh capture in the connecting cycle; optional PM QoS hold; a wake timer for late period interrupts (§8)</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5"><code>-X seq</code></td><td>asserts abort the server past 63–127 port events; 2 ioctls every idle cycle</td><td>bounded drop-and-count; ioctl only when an event needs the queue time; real ALSA port names</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">libjack internals</td><td>unserialized requests; activate races init; port-list and callback races; pthread keys</td><td>channel lock; init handshake; snapshots; <code>__thread</code> with TLS descriptors</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">jackdbus</td><td>ignores SIGTERM; unsafe crash handler; patchbay and reservation races</td><td>clean SIGTERM exit; safe trace; locked patchbay; bounded reservation slots and log; calls for session managers and monitors</td></tr>
+      <tr><td style="border-left:3px solid #8b8ff5">Other sound cards</td><td>a slave driver (the card clocked by the master's) or a resampling client with a fixed margin</td><td>sound card bridges in the master's cycle, each card's margin measured, added and removed live, unplugged and back with ports and connections kept (§12)</td></tr>
+      <tr><td style="border-left:3px solid #8b8ff5">The master's card unplugged</td><td>the server stops; every client is told it shut down</td><td>under jackdbus the dummy stands in, then the card again (§11)</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Dying clients</td><td>noticed when the sockets close, after the kernel has torn down the process's memory; every cycle waits until then; ports announced gone twice</td><td>robust-mutex slot + <code>futex_waitv</code>: noticed when the realtime thread ends; <code>/proc</code> when the graph waits; out of the graph in one step</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Late clients · xruns</td><td>one xrun per unfinished client; stale delay value</td><td>one xrun per failing cycle naming the culprit; per-client late cycles over D-Bus; catch-up kept</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Notifications</td><td>a slow client holds the request thread up to 2&nbsp;s per notification; one that stops reading blocks it for good</td><td>the slow client lags alone: per-client queue, 500&nbsp;ms latency budget, never blocks on a socket</td></tr>
-      <tr style="background:rgba(251,191,36,0.05)"><td style="border-left:3px solid #fbbf24">Shared memory · futexes · requests · time base</td><td>protocol 9</td><td>protocol 9 &mdash; byte-identical layout, untouched; one optional side file added (§12)</td></tr>
+      <tr style="background:rgba(251,191,36,0.05)"><td style="border-left:3px solid #fbbf24">Shared memory · futexes · requests · time base</td><td>protocol 9</td><td>protocol 9 &mdash; byte-identical layout, untouched; one optional side file added (§13)</td></tr>
       <tr style="background:rgba(251,191,36,0.05)"><td style="border-left:3px solid #fbbf24">Client API / ABI</td><td><code>libjack.so.0</code></td><td>the same <code>libjack.so.0</code> symbols and semantics</td></tr>
     </table>
   </div>
@@ -521,7 +533,7 @@ pre.code .s { color: var(--amber); }
       <text x="190" y="590" text-anchor="middle" class="t-sub">a stock or fork libjack, 64- or 32-bit,</text>
       <text x="190" y="608" text-anchor="middle" class="t-sub">talks protocol 9 to the same server;</text>
       <text x="190" y="626" text-anchor="middle" class="t-sub">a fork libjack's RT thread also</text>
-      <text x="190" y="644" text-anchor="middle" class="t-sub">holds its alive slot (§12)</text>
+      <text x="190" y="644" text-anchor="middle" class="t-sub">holds its alive slot (§13)</text>
 
       <!-- ===== /dev/shm column ===== -->
       <rect x="404" y="20" width="376" height="670" rx="20" fill="rgba(251,191,36,0.03)" stroke="#4a3d1a"/>
@@ -577,7 +589,7 @@ pre.code .s { color: var(--amber); }
         <text x="436" y="549" class="t-sub">metadata · shared by every process</text>
       </g>
       <g>
-        <title>JackBus addition, optional on both sides: one 64-byte slot per client, in which the client's realtime thread holds a process-shared robust mutex for as long as it lives. A libjack that doesn't know the file never opens it; a fork libjack facing a server without it does without (§12)</title>
+        <title>JackBus addition, optional on both sides: one 64-byte slot per client, in which the client's realtime thread holds a process-shared robust mutex for as long as it lives. A libjack that doesn't know the file never opens it; a fork libjack facing a server without it does without (§13)</title>
         <rect x="420" y="570" width="340" height="46" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4" stroke-dasharray="5 3"/>
         <text x="436" y="590" class="t-mono">jack_alive.1000_default · new, optional</text>
         <text x="436" y="607" class="t-sub">one robust mutex per client · its RT thread holds it</text>
@@ -597,13 +609,13 @@ pre.code .s { color: var(--amber); }
         <text x="856" y="104" class="t-sub">params · patchbay · detach · client timings</text>
       </g>
       <g>
-        <title>The request thread: client open/close, activate, connect, port registration; takes the engine lock (never the RT thread). Also removes clients whose process died (§12), and queues notifications for a client that falls behind instead of waiting on it (§14)</title>
+        <title>The request thread: client open/close, activate, connect, port registration; takes the engine lock (never the RT thread). Also removes clients whose process died (§13), and queues notifications for a client that falls behind instead of waiting on it (§15)</title>
         <rect x="840" y="124" width="320" height="50" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
         <text x="856" y="145" class="t-title">Request thread</text>
         <text x="856" y="164" class="t-sub">open · close · activate · connect · ports</text>
       </g>
       <g>
-        <title>The engine: client table, graph switching, CPU load, xrun checks (one per failing cycle, §13). Per-cycle loops stop at the highest refnum in use (server-private)</title>
+        <title>The engine: client table, graph switching, CPU load, xrun checks (one per failing cycle, §14). Per-cycle loops stop at the highest refnum in use (server-private)</title>
         <rect x="840" y="184" width="320" height="120" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.6"/>
         <text x="856" y="206" class="t-title">JackLockedEngine</text>
         <text x="856" y="228" class="t-sub">client table · refnum bound (server heap)</text>
@@ -612,7 +624,7 @@ pre.code .s { color: var(--amber); }
         <text x="856" y="290" class="t-accent">runs on the RT thread, per cycle</text>
       </g>
       <g>
-        <title>JackEngineNotifier: RT notifications go into a bounded lock-free queue; this thread drains it every 20 ms into the notify channel. Its wait is a futex_waitv on its own wake word and every active client's alive slot, so a client's realtime thread ending wakes it at once (§12)</title>
+        <title>JackEngineNotifier: RT notifications go into a bounded lock-free queue; this thread drains it every 20 ms into the notify channel. Its wait is a futex_waitv on its own wake word and every active client's alive slot, so a client's realtime thread ending wakes it at once (§13)</title>
         <rect x="840" y="314" width="320" height="46" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
         <text x="856" y="334" class="t-title">JackEngineNotifier</text>
         <text x="856" y="351" class="t-sub">queue → sockets · futex_waitv on alive slots</text>
@@ -736,7 +748,7 @@ pre.code .s { color: var(--amber); }
       the futex event count), the engine's per-cycle loops stop at the highest live refnum, and libjack serializes and
       snapshots what it used to race on. Since the first edition the server also learns at once when a client's
       realtime thread ends: the dashed violet box is the fork's one addition to <code>/dev/shm</code>, optional on
-      both sides, and the rose line is the kernel waking the notifier through it (§12).
+      both sides, and the rose line is the kernel waking the notifier through it (§13).
     </p>
   </div>
 </section>
@@ -762,15 +774,15 @@ pre.code .s { color: var(--amber); }
           operations are serialized with the request thread (C20); a failed master switch can't wedge it (C19).</li>
         <li><b>Request thread.</b> Polls the request socket and every client socket; client open/close, activate,
           connect, port registration. Takes the engine lock &mdash; never the RT thread. <em>Fork:</em> also
-          removes clients whose process died (§12), and queues notifications for a client that falls behind instead
-          of waiting on it (§14).</li>
+          removes clients whose process died (§13), and queues notifications for a client that falls behind instead
+          of waiting on it (§15).</li>
         <li><b>ALSA driver thread</b>, <code>SCHED_FIFO</code> 89. Waits on the PCM, converts samples, runs the engine's
           per-cycle step and wakes the first clients. <em>Fork:</em> no syscalls besides <code>poll</code> and
           activation futexes; memory locked (R1); per-cycle loops bounded (§5).</li>
         <li><b>Engine notifier</b> and <b>message buffer</b> threads. <em>New in the fork.</em> They drain the RT
           thread's lock-free queues every 20 ms and 50 ms and do the socket writes and log I/O the RT thread used to
           do (§6). The notifier's wait is a <code>futex_waitv</code> on its own wake word and the alive slot of every
-          active client, so a client's realtime thread ending wakes it within microseconds (§12).</li>
+          active client, so a client's realtime thread ending wakes it within microseconds (§13).</li>
         <li><b>alsa_seqmidi port thread</b> (<code>-X seq</code>). Subscribes and unsubscribes sequencer ports as they
           appear and hands them to the RT side through bounded rings (C22).</li>
       </ul>
@@ -790,7 +802,7 @@ pre.code .s { color: var(--amber); }
           <code>jack_activate</code>; sleeps on the client's futex, runs the process callback, signals the clients
           downstream. <em>Fork:</em> <code>jack_activate</code> returns only after this thread's init callbacks ran
           (C10); its stack is prefaulted and the shared segments prefaulted if mlock is refused (R12). It locks its
-          client's alive slot when it starts and holds it for life (§12).</li>
+          client's alive slot when it starts and holds it for life (§13).</li>
         <li><b>Notification thread.</b> Reads the client's notification socket and runs the non-RT callbacks: graph
           order, port registration, client registration, xrun, latency. <em>Fork:</em> the port list it walks is a
           snapshot taken under a lock (C14); transport callback pairs are published atomically (C15).</li>
@@ -930,7 +942,7 @@ pre.code .s { color: var(--amber); }
       <text x="856" y="482" class="t-sub">server reopened them: a hung old client shared</text>
       <text x="856" y="499" class="t-sub">the futex word and took every other wakeup.</text>
       <text x="856" y="524" class="t-ok">now: removed at close, created O_EXCL</text>
-      <text x="856" y="544" class="t-sub">375/750 → 750/750 cycles (§15)</text>
+      <text x="856" y="544" class="t-sub">375/750 → 750/750 cycles (§16)</text>
     </svg>
     <p class="caption">
       <b>Why the layout is frozen.</b> The server and every libjack compute addresses in these segments independently:
@@ -944,7 +956,7 @@ pre.code .s { color: var(--amber); }
       notifier and message threads, the dirty-row bookkeeping and the PM QoS file descriptor are all in the server's
       private heap. The only shared-memory behaviour that changed is <i>who writes when</i>: fewer writes per cycle
       (bounded resets), smaller copies per graph edit. The one new shared object, the alive-slot file, is separate
-      from all of these and optional on both sides (§12).
+      from all of these and optional on both sides (§13).
     </p>
   </div>
 
@@ -1141,7 +1153,7 @@ pre.code .s { color: var(--amber); }
       <b>Async vs sync.</b> In the default asynchronous mode the driver writes the <i>previous</i> cycle's output, wakes
       the graph and goes straight back to <code>poll()</code>; a late client costs that client's output, not the
       driver's schedule. With <code>-S</code> (sync) the driver waits for the graph's end node with a timeout and writes
-      the <i>current</i> output &mdash; one period less latency, but a stuck client stalls everyone (measured in §20).
+      the <i>current</i> output &mdash; one period less latency, but a stuck client stalls everyone (measured in §21).
       The engine decides at each cycle start whether the previous graph finished
       (<code>IsFinishedGraph</code>); if it didn't within the client timeout, it switches state anyway and reports an
       xrun.
@@ -1470,7 +1482,7 @@ pre.code .s { color: var(--amber); }
       publishes it with a release store of the cell's sequence; head and tail positions sit on separate 64-byte lines.
       A full queue is not an error path that blocks &mdash; the item is dropped and counted, and the count is reported
       when the server stops (the notifier's 20 ms wait has since become a <code>futex_waitv</code> that also
-      watches the clients' alive slots, §12). Notifications are asynchronous by contract (graph order, xrun callbacks), so up to 20 ms of
+      watches the clients' alive slots, §13). Notifications are asynchronous by contract (graph order, xrun callbacks), so up to 20 ms of
       added delivery delay is invisible; ordering and the threads that run the callbacks are unchanged.
     </p>
     <p class="caption">
@@ -1767,6 +1779,74 @@ pre.code .s { color: var(--amber); }
       <tr><td>Hardware input monitoring walk (P6)</td><td class="num">every cycle</td><td class="num"><span class="better">only when enabled</span></td><td><code>1UL &lt;&lt; chn</code> for ≥ 32 channels</td></tr>
     </table>
   </div>
+
+  <h3 style="margin-top:34px">Late period interrupts: the wake timer</h3>
+  <p>
+    On Intel HDA at small buffer sizes it is the period <i>notification</i>, not the audio, that comes late. The
+    driver's interrupt handler drops an interrupt as "too early" when the one before was handled late, or defers it to
+    a worker that loops on <code>msleep(1)</code>; meanwhile the DMA position is right all along. A server that waits
+    for the interrupt alone wakes late, and the cycle overruns.
+  </p>
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" role="img" aria-label="The wake timer: waking when the card's position says a period is due">
+<rect x="20" y="20" width="1160" height="390" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">THREE PERIODS ON INTEL HDA · 128 FRAMES (2.67 MS) · THE POSITION IS RIGHT, THE INTERRUPT IS NOT</text>
+<line x1="150" y1="64" x2="150" y2="352" stroke="#3d4683" stroke-dasharray="2 5"/>
+<text x="156" y="76" class="t-tiny">PERIOD 1</text>
+<line x1="430" y1="64" x2="430" y2="352" stroke="#3d4683" stroke-dasharray="2 5"/>
+<text x="436" y="76" class="t-tiny">PERIOD 2</text>
+<line x1="710" y1="64" x2="710" y2="352" stroke="#3d4683" stroke-dasharray="2 5"/>
+<text x="716" y="76" class="t-tiny">PERIOD 3</text>
+<line x1="990" y1="64" x2="990" y2="352" stroke="#3d4683" stroke-dasharray="2 5"/>
+<text x="40" y="114" class="t-tiny">DMA POSITION</text>
+<text x="40" y="174" class="t-tiny">PERIOD INTERRUPT</text>
+<text x="40" y="252" class="t-tiny">1.9.22</text>
+<text x="40" y="334" class="t-tiny">JACKBUS</text>
+<path d="M 150 126 L 990 94" stroke="#4ade80" stroke-width="2.4" fill="none"/>
+<circle cx="430" cy="115.3" r="5" fill="#4ade80" stroke="#0f1a14"/>
+<circle cx="710" cy="104.7" r="5" fill="#4ade80" stroke="#0f1a14"/>
+<circle cx="990" cy="94.0" r="5" fill="#4ade80" stroke="#0f1a14"/>
+<text x="162" y="104" class="t-ok">due on time, every period: the position and its timestamp say when</text>
+<rect x="427" y="156" width="6" height="28" rx="2" fill="#4ade80"/><text x="440" y="174" class="t-sub">on time</text>
+<rect x="860" y="156" width="6" height="28" rx="2" fill="#fbbf24"/><text x="714" y="200" class="t-bad">late: a worker, msleep(1)</text>
+<path d="M 710 170 L 856 170" stroke="#fbbf24" stroke-dasharray="3 4"/>
+<text x="1000" y="174" class="t-bad">dropped</text>
+<rect x="987" y="156" width="6" height="28" rx="2" fill="none" stroke="#fb7185" stroke-dasharray="2 2"/>
+<rect x="430" y="232" width="110" height="32" rx="8" fill="rgba(74,222,128,0.12)" stroke="#4ade80"/>
+<text x="440" y="252" class="t-chip">cycle</text>
+<rect x="860" y="232" width="120" height="32" rx="8" fill="rgba(251,113,133,0.16)" stroke="#fb7185"/>
+<text x="870" y="252" class="t-chip">late: xrun</text>
+<text x="1000" y="252" class="t-bad">no wake: xrun</text>
+<rect x="430" y="314" width="150" height="32" rx="8" fill="rgba(74,222,128,0.12)" stroke="#4ade80"/>
+<text x="440" y="334" class="t-chip">interrupt: cycle</text>
+<rect x="724" y="314" width="150" height="32" rx="8" fill="rgba(74,222,128,0.12)" stroke="#4ade80"/>
+<text x="734" y="334" class="t-chip">timer → hwsync: cycle</text>
+<rect x="1004" y="314" width="150" height="32" rx="8" fill="rgba(74,222,128,0.12)" stroke="#4ade80"/>
+<text x="1014" y="334" class="t-chip">timer → hwsync: cycle</text>
+<text x="40" y="374" class="t-sub">The margin: an eighth of a period (50–500 µs), or a number given. The interrupt still wakes it when it comes first.</text>
+<text x="40" y="394" class="t-sub">Adaptive (the default): the interrupt alone until notifications are seen late three times, then the timer for the session.</text>
+</svg>
+    <p class="caption">
+      <b>How it decides.</b> Before each wait the driver works out when the period is due, from the position and
+      timestamp the card's last update left in the status page: no system call. It waits for the interrupt until then
+      plus the margin, and after that asks the card for its position itself (<code>hwsync</code>). Adaptive mode only
+      watches at first: a wait that began before its period was due and whose wake, or xrun, came more than half a
+      period later counts as late; three of them turn the timer on, and the log says so once. A cycle that ran long
+      doesn't count (its period was already due when it began to wait). A buffer-size change sends it back to
+      watching. Batch (USB) cards are left alone: their position only moves when they report, so a timer can learn
+      nothing earlier.
+    </p>
+  </div>
+  <div class="tablebox" style="margin-top:18px">
+    <table>
+      <tr><th>Intel HDA ALC274, 2 periods, 30 s each (wake-timer.sh)</th><th class="num">timer off</th><th class="num">timer on</th></tr>
+      <tr><td>64 frames</td><td class="num"><span class="worse">5 574 xruns</span></td><td class="num">2 773 (166 µs margin)</td></tr>
+      <tr><td>128 frames</td><td class="num"><span class="worse">499 xruns</span></td><td class="num"><span class="better">0</span> (333 µs margin)</td></tr>
+      <tr><td>The underrun probe with a timer fallback, 128 × 2, 20 s</td><td class="num"><span class="worse">249 stops</span></td><td class="num"><span class="better">0</span></td></tr>
+    </table>
+  </div>
+
 </section>
 
 <!-- ============================================================ 9. MIDI -X seq -->
@@ -2146,7 +2226,7 @@ pre.code .s { color: var(--amber); }
       practical consequences surfaced during this work: a JACK start right after PipeWire took the card can find the PCM
       still open for a moment ("device busy", a retry starts it; stock 1.9.22 behaves the same), and anything muted on
       the card while JACK was stopped gets un-muted by WirePlumber, which the hardware test harness now guards against
-      (§18).
+      (§19).
     </p>
     <p class="caption">
       <b>Engine parameters through D-Bus.</b> Everything settable on <code>jackd</code>'s command line is an engine or
@@ -2158,8 +2238,8 @@ pre.code .s { color: var(--amber); }
       <b>For session managers and monitors.</b> Four calls were added for tools around the server, all through
       libjackserver's control API (<code>common/JackControlNspa.h</code>), none in libjack. A session manager that is
       about to stop an application asks first, by client name or by the pid it started, and the application's clients
-      leave the graph before the signal (§12). A monitor reads, per client, the cycles it ran late and its longest
-      cycle (§13). An older jackdbus answers <code>UnknownMethod</code>, and a tool carries on as before.
+      leave the graph before the signal (§13). A monitor reads, per client, the cycles it ran late and its longest
+      cycle (§14). An older jackdbus answers <code>UnknownMethod</code>, and a tool carries on as before.
     </p>
   </div>
 
@@ -2173,8 +2253,8 @@ pre.code .s { color: var(--amber); }
       <tr><td>Control operations (C20)</td><td>buffer size / freewheel / switch master unserialized between D-Bus and request threads</td><td><span class="better">control mutex (never taken on the RT thread)</span></td></tr>
       <tr><td>Device reservation with ≥ 3 cards (C18)</td><td>slot bookkeeping out of bounds</td><td><span class="better">free-slot search with bounds</span></td></tr>
       <tr><td>Log file (R13)</td><td>opened and stat'ed per line from ~5 threads, unlocked; grows forever (274 MB seen)</td><td><span class="better">serialized writes · past <code>log-max-size</code> (4 MiB) moved to <code>jackdbus.log.1</code> · <code>log-level</code> off / errors / server (default) / all</span></td></tr>
-      <tr><td>Stopping an application from a session manager</td><td>killed in the graph: the cycle it is due in waits for it; with a stock libjack, or killed mid-callback, the graph stalls until it is found</td><td><span class="better"><code>DetachClient</code> / <code>DetachProcess</code>: out of the graph first, 0 xruns with any libjack (§12)</span></td></tr>
-      <tr><td>Which client runs late, and how close each runs to its deadline</td><td>only the xrun log line</td><td><span class="better"><code>GetClientTimings</code> / <code>ResetClientTimings</code> (§13)</span></td></tr>
+      <tr><td>Stopping an application from a session manager</td><td>killed in the graph: the cycle it is due in waits for it; with a stock libjack, or killed mid-callback, the graph stalls until it is found</td><td><span class="better"><code>DetachClient</code> / <code>DetachProcess</code>: out of the graph first, 0 xruns with any libjack (§13)</span></td></tr>
+      <tr><td>Which client runs late, and how close each runs to its deadline</td><td>only the xrun log line</td><td><span class="better"><code>GetClientTimings</code> / <code>ResetClientTimings</code> (§14)</span></td></tr>
       <tr><td>PM QoS</td><td>external helper only</td><td><span class="better">engine parameter <code>cpu-dma-latency</code>; effective value 8000 → 0 µs while running</span></td></tr>
       <tr><td>A sound card plugged in or removed</td><td>the ALSA device list is read once, at start: a USB interface plugged in later is not offered until jackdbus restarts</td><td><span class="better"><code>/dev/snd</code> watched from the main loop; about a second after a change (once the card's nodes are usable) the list is read again and <code>Configure.ConstraintsChanged</code> sent · no new thread, nothing on the RT path</span></td></tr>
     </table>
@@ -2188,11 +2268,530 @@ pre.code .s { color: var(--amber); }
 <span class="c"># jackdbus' own engine parameters (jack_control eps …), saved in conf.xml</span>
 <span class="k">log-level</span>     off | errors | <span class="s">server</span> | all
 <span class="k">log-max-size</span>  MiB, default <span class="s">4</span></pre>
+
+  <h3 style="margin-top:34px">The master's own card unplugged</h3>
+  <p>
+    In 1.9.22 an unplugged card makes the ALSA driver fail, the server stops processing, and every client is told it
+    shut down: Ardour and the rest drop. Under jackdbus, JackBus keeps the graph running on the dummy driver and goes
+    back to the card when it returns.
+  </p>
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" role="img" aria-label="The master's card unplugged: the dummy driver stands in, then the card again">
+<rect x="20" y="20" width="1160" height="340" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">THE MASTER'S CARD UNPLUGGED AND PLUGGED BACK · UNDER JACKDBUS · CLIENTS KEEP RUNNING</text>
+<rect x="40.0" y="62" width="196.8" height="50" rx="10" fill="#4ade80" fill-opacity="0.12" stroke="#4ade80"/>
+<text x="52.0" y="84" class="t-chip">ALSA master</text><text x="52.0" y="101" class="t-chipsub">hw:U44 · 256 frames</text>
+<path class="flow ctrl" d="M 241.8 87 H 257.8"/>
+<path d="M 257.8 81 L 265.8 87 L 257.8 93 Z" fill="#8b8ff5"/>
+<rect x="270.8" y="62" width="196.8" height="50" rx="10" fill="#fb7185" fill-opacity="0.12" stroke="#fb7185"/>
+<text x="282.8" y="84" class="t-chip">unplugged</text><text x="282.8" y="101" class="t-chipsub">POLLNVAL / ENODEV</text>
+<path class="flow ctrl" d="M 472.6 87 H 488.6"/>
+<path d="M 488.6 81 L 496.6 87 L 488.6 93 Z" fill="#8b8ff5"/>
+<rect x="501.6" y="62" width="196.8" height="50" rx="10" fill="#fbbf24" fill-opacity="0.12" stroke="#fbbf24"/>
+<text x="513.6" y="84" class="t-chip">the dummy stands in</text><text x="513.6" y="101" class="t-chipsub">same rate, buffer, port counts</text>
+<path class="flow ctrl" d="M 703.4 87 H 719.4"/>
+<path d="M 719.4 81 L 727.4 87 L 719.4 93 Z" fill="#8b8ff5"/>
+<rect x="732.4" y="62" width="196.8" height="50" rx="10" fill="#8b8ff5" fill-opacity="0.12" stroke="#8b8ff5"/>
+<text x="744.4" y="84" class="t-chip">the card is back</text><text x="744.4" y="101" class="t-chipsub">checked once a second</text>
+<path class="flow ctrl" d="M 934.2 87 H 950.2"/>
+<path d="M 950.2 81 L 958.2 87 L 950.2 93 Z" fill="#8b8ff5"/>
+<rect x="963.2" y="62" width="196.8" height="50" rx="10" fill="#4ade80" fill-opacity="0.12" stroke="#4ade80"/>
+<text x="975.2" y="84" class="t-chip">ALSA master again</text><text x="975.2" y="101" class="t-chipsub">connections restored</text>
+<text x="40" y="150" class="t-tiny">THE CLIENTS' CYCLES</text>
+<rect x="40" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="60" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="80" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="100" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="120" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="140" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="160" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="180" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="200" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="220" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="240" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="260" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="280" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="300" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="320" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="340" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="360" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="380" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="400" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="420" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="440" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="460" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="480" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="500" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="520" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="540" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="560" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="580" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="600" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="620" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="640" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="660" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="680" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="700" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="720" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="740" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="760" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="780" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="800" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="820" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="840" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="860" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="880" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="900" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="920" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="940" y="160" width="14" height="22" rx="3" fill="rgba(251,191,36,0.25)" stroke="#fbbf24" stroke-opacity="0.6"/>
+<rect x="960" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="980" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="1000" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="1020" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="1040" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="1060" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="1080" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="1100" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="1120" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<rect x="1140" y="160" width="14" height="22" rx="3" fill="rgba(74,222,128,0.30)" stroke="#4ade80" stroke-opacity="0.6"/>
+<text x="300" y="204" class="t-sub">every cycle runs: silence in, silence out while the dummy stands in · no shutdown, no client reconnects</text>
+<text x="40" y="240" class="t-chip">the driver thread</text><text x="200" y="240" class="t-sub">a lost device: it calls back (jackctl_server_set_backend_lost_callback) instead of telling clients the server stopped</text>
+<text x="40" y="262" class="t-chip">jackdbus, next tick</text><text x="200" y="262" class="t-sub">SwitchMaster to the dummy at the same sample rate, buffer size and number of ports; its own settings left as saved</text>
+<text x="40" y="284" class="t-chip">connections</text><text x="200" y="284" class="t-sub">kept by port name; those the dummy lacks (the card's MIDI ports) wait for a master that has them</text>
+<text x="40" y="306" class="t-chip">the card back</text><text x="200" y="306" class="t-sub">present in /proc/asound, its nodes usable, its PCM closed (PipeWire probes new cards): switch back</text>
+<text x="40" y="328" class="t-chip">if that fails</text><text x="200" y="328" class="t-sub">the dummy again, and again a second later: 30 tries, then it stays on the dummy and says so</text>
+</svg>
+    <p class="caption">
+      <b>Measured</b> (unplug-survive.sh, an isolated jackdbus on a ZOOM U-44 at 256 frames, a client writing zeros to
+      <code>system:playback_1</code> and reading <code>system:capture_1</code>, unplugged by hand): the dummy took over
+      and the client ran on at 188 cycles a second with both connections, with no shutdown; once replugged, the server
+      was back on the U-44 with the connections restored and the client still running; jackdbus's file descriptors
+      27 before and 27 after. jackd without jackdbus, and other driver failures, behave as in 1.9.22.
+    </p>
+  </div>
+
+  <h3 style="margin-top:34px">Device reservations, and the bridges</h3>
+  <p>
+    A JACK server holds each card it uses through the session bus's device reservation
+    (<code>org.freedesktop.ReserveDevice1.Audio&lt;n&gt;</code>), so the desktop's sound server lets go of the card and
+    leaves it alone. In 1.9.22 the table had room for two names (the master's capture and playback cards), wrote slot
+    <i>count</i> even when it was taken, never freed one, and counted down for names it didn't hold. Both jackd's and
+    jackdbus's tables now hold twenty, reuse free slots, are locked (the bridge monitor reserves from its own thread),
+    and count a name asked for twice: a bridge on another device of the master's card shares the master's
+    reservation, and removing it no longer releases the master's. Each sound card bridge (§12) reserves its card the
+    same way, keeps the reservation while the card is unplugged, and moves it if the card comes back under another
+    index; jackdbus lists, adds and removes bridges (<code>bridges</code>, <code>AddBridge</code>,
+    <code>RemoveBridge</code>, <code>GetBridges</code>), and its <code>/dev/snd</code> watch bridges a listed card the
+    moment it is plugged in.
+  </p>
 </section>
 
-<!-- ============================================================ 12. when a client dies -->
+
+<!-- ============================================================ 12. sound card bridges -->
 <section id="s12">
-  <h2><span class="num">12</span>When a client dies</h2>
+  <h2><span class="num">12</span>Sound card bridges</h2>
+  <p class="sub">
+    A second sound card runs on its own crystal, and two crystals never agree: a few parts per million apart, the
+    cards drift by a frame every few seconds. JACK2 offered a slave driver, which needs the second card clocked by the
+    master's (word clock, S/PDIF), or a separate resampling client (<code>audioadapter</code>, <code>zita-a2j</code>)
+    with a fixed margin. A <b>bridge</b> joins the card the way the master's own card is joined: its ports are
+    physical ports, filled and emptied by the master in its own cycle, while a thread of the card's own moves the
+    card's frames through a lock-free FIFO and a resampler keeps the two clocks apart. Bridges come and go while the
+    server runs (<code>jackd --bridge</code>, jackdbus's <code>bridges</code> setting, PatchBox's Devices tab), and
+    the delay each card needs is <b>measured</b>, not guessed.
+  </p>
+
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" role="img" aria-label="A sound card bridge: the master's cycle, the graph side, the FIFOs and the card's own thread">
+<rect x="20" y="20" width="1160" height="680" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">ONE BRIDGE · CAPTURE ALONG THE TOP ROW, PLAYBACK ALONG THE BOTTOM · NEITHER SIDE WAITS ON THE OTHER</text>
+<path class="flow audio" d="M 1040 262 H 1010"/>
+<path class="flow audio" d="M 770 262 H 730"/>
+<path class="flow audio" d="M 650 262 H 610"/>
+<path class="flow audio" d="M 290 262 H 250"/>
+<path class="flow audio" d="M 250 470 H 290"/>
+<path class="flow audio" d="M 610 470 H 650"/>
+<path class="flow audio" d="M 730 470 H 770"/>
+<path class="flow audio" d="M 1010 470 H 1040"/>
+<path class="flow ctrl slow" d="M 770 326 H 610"/>
+<path class="flow ctrl slow" d="M 770 408 H 610"/>
+<path class="flow ctrl" d="M 400 146 V 192"/>
+<path class="flow ctrl" d="M 166 146 V 176 H 270 V 420 H 290"/>
+<rect x="40" y="60" width="720" height="104" rx="14" fill="rgba(251,191,36,0.04)" stroke="#8a6a1c"/>
+<text x="60" y="86" class="t-band">MASTER DRIVER THREAD · RT</text>
+<rect x="56" y="100" width="220" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="68" y="119" class="t-chip">Write</text>
+<text x="68" y="135" class="t-chipsub">the bridges' playback (last cycle's)</text>
+<rect x="290" y="100" width="220" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="302" y="119" class="t-chip">graph starts</text>
+<text x="302" y="135" class="t-chipsub">the bridges' capture, then readers</text>
+<rect x="524" y="100" width="222" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="536" y="119" class="t-chip">cycle start t</text>
+<text x="536" y="135" class="t-chipsub">frame timer → the raw clock</text>
+<text x="790" y="104" class="t-ok">a card never holds up a cycle</text>
+<text x="790" y="126" class="t-sub">bridges come and go: a published list,</text>
+<text x="790" y="144" class="t-sub">the old one freed two cycles later</text>
+<rect x="40" y="192" width="210" height="140" rx="14" fill="rgba(91,95,199,0.06)" stroke="#5b5fc7"/>
+<text x="60" y="218" class="t-band">U44 · CAPTURE</text>
+<text x="56" y="246" class="t-mono">U44:capture_1…4</text>
+<text x="56" y="270" class="t-sub">→ the clients reading</text>
+<text x="56" y="306" class="t-sub">physical · terminal</text>
+<rect x="290" y="192" width="320" height="140" rx="14" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="310" y="218" class="t-band">CAPTURE · GRAPH SIDE</text>
+<text x="306" y="244" class="t-sub">p(t): where the card is now (its clock)</text>
+<text x="306" y="266" class="t-sub">delay = p(t) − the resampler's read point</text>
+<text x="306" y="288" class="t-sub">ratio: both clocks × (1 + correction)</text>
+<text x="306" y="316" class="t-ok">n frames into the ports</text>
+<rect x="40" y="400" width="210" height="140" rx="14" fill="rgba(91,95,199,0.06)" stroke="#5b5fc7"/>
+<text x="60" y="426" class="t-band">U44 · PLAYBACK</text>
+<text x="56" y="454" class="t-mono">U44:playback_1…4</text>
+<text x="56" y="478" class="t-sub">← the clients writing</text>
+<text x="56" y="514" class="t-sub">latency = the delay</text>
+<rect x="290" y="400" width="320" height="140" rx="14" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="310" y="426" class="t-band">PLAYBACK · GRAPH SIDE</text>
+<text x="306" y="452" class="t-sub">the cycle's frames placed ahead of p(t)</text>
+<text x="306" y="474" class="t-sub">by what the card side needs, measured</text>
+<text x="306" y="496" class="t-sub">the same loop, the inverse ratio</text>
+<text x="306" y="524" class="t-ok">card frames into the FIFO</text>
+<rect x="650" y="226" width="80" height="72" rx="8" fill="rgba(45,212,191,0.08)" stroke="#2dd4bf"/>
+<rect x="660" y="235" width="60" height="10" rx="3" fill="rgba(45,212,191,0.18)"/>
+<rect x="660" y="250" width="60" height="10" rx="3" fill="rgba(45,212,191,0.28)"/>
+<rect x="660" y="265" width="60" height="10" rx="3" fill="rgba(45,212,191,0.18)"/>
+<rect x="660" y="280" width="60" height="10" rx="3" fill="rgba(45,212,191,0.28)"/>
+<text x="672" y="218" class="t-tiny">FIFO</text>
+<rect x="650" y="434" width="80" height="72" rx="8" fill="rgba(45,212,191,0.08)" stroke="#2dd4bf"/>
+<rect x="660" y="443" width="60" height="10" rx="3" fill="rgba(45,212,191,0.18)"/>
+<rect x="660" y="458" width="60" height="10" rx="3" fill="rgba(45,212,191,0.28)"/>
+<rect x="660" y="473" width="60" height="10" rx="3" fill="rgba(45,212,191,0.18)"/>
+<rect x="660" y="488" width="60" height="10" rx="3" fill="rgba(45,212,191,0.28)"/>
+<text x="672" y="426" class="t-tiny">FIFO</text>
+<text x="624" y="356" class="t-tiny">POSITIONS AND</text>
+<text x="624" y="372" class="t-tiny">TIMESTAMPS → THE</text>
+<text x="624" y="388" class="t-tiny">CLOCK MODELS</text>
+<rect x="770" y="192" width="240" height="348" rx="14" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="790" y="218" class="t-band">CARD THREAD</text>
+<text x="790" y="236" class="t-tiny">SCHED_FIFO · ITS OWN</text>
+<rect x="784" y="246" width="212" height="42" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="796" y="265" class="t-chip">wait: interrupt or timer</text>
+<text x="796" y="281" class="t-chipsub">auto: a timer on HDA-like cards</text>
+<rect x="784" y="294" width="212" height="42" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="796" y="313" class="t-chip">read capture</text>
+<text x="796" y="329" class="t-chipsub">position + timestamp → clock</text>
+<rect x="784" y="342" width="212" height="42" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="796" y="361" class="t-chip">measure its worst case</text>
+<text x="796" y="377" class="t-chipsub">lateness peak · playback lead</text>
+<rect x="784" y="390" width="212" height="42" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="796" y="409" class="t-chip">fill playback, keep it full</text>
+<text x="796" y="425" class="t-chipsub">silence only where unplaced</text>
+<rect x="784" y="438" width="212" height="42" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="796" y="457" class="t-chip">xrun: restart the streams</text>
+<text x="796" y="473" class="t-chipsub">a new epoch, placed again</text>
+<rect x="784" y="486" width="212" height="42" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="796" y="505" class="t-chip">ENODEV: the card is gone</text>
+<text x="796" y="521" class="t-chipsub">ports stay · reopened when back</text>
+<rect x="1040" y="192" width="120" height="348" rx="14" fill="rgba(74,222,128,0.07)" stroke="#4ade80"/>
+<text x="1060" y="218" class="t-band">ALSA</text>
+<text x="1056" y="246" class="t-mono">hw:U44</text>
+<text x="1056" y="290" class="t-sub">the card's</text>
+<text x="1056" y="308" class="t-sub">DMA buffer</text>
+<text x="1056" y="326" class="t-sub">or USB</text>
+<text x="1056" y="344" class="t-sub">transfers</text>
+<text x="1056" y="362" class="t-sub"></text>
+<text x="1056" y="380" class="t-sub">stamped on</text>
+<text x="1056" y="398" class="t-sub">the raw clock</text>
+<rect x="40" y="580" width="1120" height="100" rx="14" fill="rgba(255,255,255,0.02)" stroke="#3d4683"/>
+<text x="60" y="606" class="t-band">BRIDGE MONITOR · 4 HZ · NOT RT</text>
+<text x="60" y="632" class="t-sub">The ports' latencies follow the delay as placed · the card gone, back or failed: said once · reopened once a second, every 5 s after ten tries</text>
+<text x="60" y="656" class="t-sub">Device reservation Audio&lt;n&gt;: held while unplugged, moved if the card returns under another index · xruns, underruns, missed frames: at most once a minute</text>
+</svg>
+    <p class="caption">
+      <b>Two threads, no waiting.</b> The master runs every bridge from its own thread, at two points of the cycle that
+      match its own ports: playback right after its own Write, from the previous cycle's port buffers (as
+      <code>system:playback</code> in asynchronous mode), and capture once the graph has started, which fills the
+      bridge's ports and signals the clients that read them. Neither ever waits on the card: if the card side is late,
+      the graph side fades out and places its delay again; if the graph side is late, the card side plays silence for
+      positions nothing was placed for. The card has a thread of its own, at the server's priority minus one, that
+      wakes on the card's interrupts (with a timer behind them, §8) and moves frames between ALSA and the FIFOs.
+    </p>
+    <p class="caption">
+      <b>One time base.</b> The cards stamp their positions on <code>CLOCK_MONOTONIC_RAW</code>; the master's cycle
+      start comes from its frame timer, and is put on the same clock by an offset measured each cycle. Each direction
+      keeps a clock model of its card: a second-order DLL over (position, time), whose bandwidth narrows as 0.5/t from
+      1&nbsp;Hz to a 0.01&nbsp;Hz floor, with an outlier gate and a relock when its mean error drifts past three
+      standard deviations. The graph side reads the model at the cycle start, so it knows where the card is
+      <i>now</i>, between the card's own updates.
+    </p>
+    <p class="caption">
+      <b>One integrator.</b> The resampling ratio is the ratio of the two measured clocks (feed-forward) times a small
+      correction from the delay error, proportional only: the clock model is the only thing that integrates, so the
+      loop has nothing to wind up. It acquires wide (1&nbsp;Hz for 4&nbsp;s), then locks narrow (0.05&nbsp;Hz). A delay
+      error beyond half a master cycle is not drift but a break (a master xrun, a card restart): the delay is placed
+      again at once, by moving the read point, with a 5&nbsp;ms fade.
+    </p>
+  </div>
+
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" role="img" aria-label="Capture lateness: a sawtooth the master samples and the card side meets at every peak">
+<rect x="20" y="20" width="1160" height="390" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">CAPTURE · HOW LATE THE CARD'S NEWEST FRAMES ARE · THE MASTER SAMPLES IT, THE CARD SIDE MEETS EVERY PEAK</text>
+<line x1="90" y1="330" x2="1130" y2="330" stroke="#3d4683"/>
+<line x1="90" y1="330" x2="90" y2="72" stroke="#3d4683"/>
+<text x="82" y="66" class="t-tiny" text-anchor="start">LATENESS</text>
+<text x="1090" y="348" class="t-tiny">TIME</text>
+<polyline fill="none" stroke="#f472b6" stroke-width="2" points="90.0,330.0 153.9,206.1 153.9,328.8 217.9,202.2 217.9,329.4 279.2,203.6 279.2,327.1 338.3,209.3 338.3,325.9 400.2,209.6 400.2,326.5 462.4,209.2 462.4,329.3 526.5,204.9 526.5,323.4 603.7,174.5 603.7,328.2 651.8,202.5 651.8,322.4 713.5,203.1 713.5,326.8 777.9,198.3 777.9,329.6 839.2,199.7 839.2,327.7 896.9,208.3 896.9,329.1 959.9,206.3 959.9,323.5 1021.1,207.8 1021.1,325.3 1102.8,168.3 1102.8,327.0"/>
+<path d="M 147.9 197.1 L 159.9 197.1 L 153.9 205.1 Z" fill="#a5a8ff"/>
+<path d="M 211.9 193.2 L 223.9 193.2 L 217.9 201.2 Z" fill="#a5a8ff"/>
+<path d="M 273.2 194.6 L 285.2 194.6 L 279.2 202.6 Z" fill="#a5a8ff"/>
+<path d="M 332.3 200.3 L 344.3 200.3 L 338.3 208.3 Z" fill="#a5a8ff"/>
+<path d="M 394.2 200.6 L 406.2 200.6 L 400.2 208.6 Z" fill="#a5a8ff"/>
+<path d="M 456.4 200.2 L 468.4 200.2 L 462.4 208.2 Z" fill="#a5a8ff"/>
+<path d="M 520.5 195.9 L 532.5 195.9 L 526.5 203.9 Z" fill="#a5a8ff"/>
+<path d="M 597.7 165.5 L 609.7 165.5 L 603.7 173.5 Z" fill="#a5a8ff"/>
+<path d="M 645.8 193.5 L 657.8 193.5 L 651.8 201.5 Z" fill="#a5a8ff"/>
+<path d="M 707.5 194.1 L 719.5 194.1 L 713.5 202.1 Z" fill="#a5a8ff"/>
+<path d="M 771.9 189.3 L 783.9 189.3 L 777.9 197.3 Z" fill="#a5a8ff"/>
+<path d="M 833.2 190.7 L 845.2 190.7 L 839.2 198.7 Z" fill="#a5a8ff"/>
+<path d="M 890.9 199.3 L 902.9 199.3 L 896.9 207.3 Z" fill="#a5a8ff"/>
+<path d="M 953.9 197.3 L 965.9 197.3 L 959.9 205.3 Z" fill="#a5a8ff"/>
+<path d="M 1015.1 198.8 L 1027.1 198.8 L 1021.1 206.8 Z" fill="#a5a8ff"/>
+<path d="M 1096.8 159.3 L 1108.8 159.3 L 1102.8 167.3 Z" fill="#a5a8ff"/>
+<circle cx="140.0" cy="233.1" r="4.5" fill="#fbbf24" stroke="#1a170e"/>
+<circle cx="262.1" cy="238.6" r="4.5" fill="#fbbf24" stroke="#1a170e"/>
+<circle cx="384.3" cy="239.5" r="4.5" fill="#fbbf24" stroke="#1a170e"/>
+<circle cx="506.4" cy="243.9" r="4.5" fill="#fbbf24" stroke="#1a170e"/>
+<circle cx="628.6" cy="263.2" r="4.5" fill="#fbbf24" stroke="#1a170e"/>
+<circle cx="750.7" cy="252.5" r="4.5" fill="#fbbf24" stroke="#1a170e"/>
+<circle cx="872.8" cy="258.0" r="4.5" fill="#fbbf24" stroke="#1a170e"/>
+<circle cx="995.0" cy="257.1" r="4.5" fill="#fbbf24" stroke="#1a170e"/>
+<line x1="90" y1="168.3" x2="1130" y2="168.3" stroke="#a5a8ff" stroke-dasharray="2 4"/>
+<text x="830" y="162.3" class="t-sub" style="fill:#c4c6ff">the worst the card side met (every peak)</text>
+<line x1="90" y1="233.1" x2="1130" y2="233.1" stroke="#fbbf24" stroke-dasharray="2 4" stroke-opacity="0.7"/>
+<line x1="90" y1="96" x2="1130" y2="96" stroke="#fbbf24" stroke-width="2" stroke-dasharray="8 6"/>
+<text x="98" y="88" class="t-accent">placed at the start: lateness learned for 1 s + a 2 ms margin</text>
+<line x1="90" y1="134.3" x2="1130" y2="134.3" stroke="#4ade80" stroke-width="2.4"/>
+<text x="98" y="126.3" class="t-ok">tuned after 20 s locked: the measured worst + 0.75 ms</text>
+<g><rect x="1002" y="96" width="14" height="38.3" rx="7" fill="rgba(74,222,128,0.10)" stroke="#4ade80" stroke-dasharray="3 3"/><circle cx="1009" cy="96" r="6" fill="#4ade80"><animate attributeName="cy" values="96;134.3;134.3" keyTimes="0;0.7;1" dur="6s" repeatCount="indefinite"/></circle></g>
+<text x="992" y="120.2" class="t-sub" text-anchor="end">slides down at 20 ppm, a frame a second: no jump</text>
+<circle cx="104" cy="374" r="4.5" fill="#fbbf24"/><text x="116" y="378" class="t-sub">the master's cycle samples it, at a phase that drifts over minutes: the highest it saw (dotted amber) misses the worst</text>
+<path d="M 98 392 L 110 392 L 104 400 Z" fill="#a5a8ff"/><text x="116" y="400" class="t-sub">the card side, just before each delivery: every peak, whatever the phase · two late ones here (a late wakeup, a USB burst)</text>
+</svg>
+    <p class="caption">
+      <b>Why the card side measures.</b> Capture fails when, at the master's cycle, the frames it needs are not in the
+      FIFO yet. How late the newest frames are is a sawtooth: it grows until the card delivers its next transfer, then
+      drops. The master meets it at one phase per cycle, and that phase drifts with the clocks' difference: at a few
+      ppm, a full sweep takes minutes, and a cycle period that is a multiple of the card's sits on one phase for good.
+      The card side meets every peak: just before it writes a delivery into the FIFO, it reads the card's clock and
+      notes how late the FIFO is. A few seconds of that is the true worst case, whatever the phase.
+    </p>
+    <p class="caption">
+      <b>Measured, then followed.</b> The delay is first placed safe: capture learns the card's lateness for a second
+      (the master's samples and the card side's peaks), playback the card's lead; a 2&nbsp;ms margin goes on top. After
+      20&nbsp;s locked, the target moves to the worst the card side met plus 0.75&nbsp;ms, at 20&nbsp;ppm: a frame a
+      second at 48&nbsp;kHz, a pitch change of 0.03 cents, inaudible; the loop follows a few frames behind, on the safe
+      side. A worse case later eats into the 0.75&nbsp;ms: by a quarter of it or less, the target slides up the same
+      way; by more, it is placed again at once. The ports report where the delay is going, once, not every frame of
+      the slide. Playback is the mirror image: the card side notes, at each fill, how far ahead of the card's position
+      it needed frames.
+    </p>
+  </div>
+
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button> <button class="toggle" type="button" data-replay>Replay</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" role="img" aria-label="The life of a bridge: learning, placing, acquiring, locking, tuning, and what each event does">
+<rect x="20" y="20" width="1160" height="430" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">THE LIFE OF A BRIDGE · STATES (TOP) · ITS DELAY (MIDDLE) · WHAT EACH EVENT DOES (BOTTOM)</text>
+<rect x="100" y="62" width="156" height="44" rx="9" fill="#6b7199" fill-opacity="0.14" stroke="#6b7199"/>
+<text x="110" y="81" class="t-chip">learning</text><text x="110" y="97" class="t-chipsub">1 s: lateness, lead</text>
+<rect x="260" y="62" width="176" height="44" rx="9" fill="#fbbf24" fill-opacity="0.14" stroke="#fbbf24"/>
+<text x="270" y="81" class="t-chip">placing</text><text x="270" y="97" class="t-chipsub">jump · 5 ms fade in</text>
+<rect x="440" y="62" width="156" height="44" rx="9" fill="#8b8ff5" fill-opacity="0.14" stroke="#8b8ff5"/>
+<text x="450" y="81" class="t-chip">acquiring</text><text x="450" y="97" class="t-chipsub">wide loop, 4 s</text>
+<rect x="600" y="62" width="176" height="44" rx="9" fill="#4ade80" fill-opacity="0.14" stroke="#4ade80"/>
+<text x="610" y="81" class="t-chip">locked</text><text x="610" y="97" class="t-chipsub">narrow · measuring</text>
+<rect x="780" y="62" width="176" height="44" rx="9" fill="#4ade80" fill-opacity="0.14" stroke="#4ade80"/>
+<text x="790" y="81" class="t-chip">locked · sliding</text><text x="790" y="97" class="t-chipsub">20 ppm, ~1 min</text>
+<rect x="960" y="62" width="180" height="44" rx="9" fill="#4ade80" fill-opacity="0.14" stroke="#4ade80"/>
+<text x="970" y="81" class="t-chip">locked · tuned</text><text x="970" y="97" class="t-chipsub">worst + 0.75 ms</text>
+<text x="40" y="150" class="t-tiny">DELAY</text>
+<line x1="100" y1="250" x2="1140" y2="250" stroke="#3d4683"/>
+<path d="M 100 250 L 260 250 L 260 150 L 780 150 L 960 196 L 1140 196" fill="none" stroke="#f472b6" stroke-width="2.6"/>
+<path d="M 440 150 C 490 140, 540 162, 600 150" fill="none" stroke="#f472b6" stroke-width="1.2" stroke-opacity="0.6"/>
+<text x="270" y="140" class="t-sub">placed: learned + 2 ms</text>
+<text x="900" y="226" class="t-ok">tuned · U-44 at 64 × 3: 10.6 → 9.3 ms</text>
+<text x="110" y="244" class="t-sub">silence until placed</text>
+<g><circle r="5" fill="#ffffff"><animateMotion dur="9s" repeatCount="indefinite" path="M 100 250 L 260 250 L 260 150 L 780 150 L 960 196 L 1140 196"/></circle></g>
+<rect x="100" y="275" width="170" height="22" rx="6" fill="rgba(139,143,245,0.10)" stroke="#5b5fc7"/>
+<text x="110" y="290" class="t-chip">a card xrun</text><text x="286" y="290" class="t-sub">the card restarts its streams (a new epoch): placed again at once, with what was learned</text>
+<rect x="100" y="301" width="170" height="22" rx="6" fill="rgba(139,143,245,0.10)" stroke="#5b5fc7"/>
+<text x="110" y="316" class="t-chip">an underrun</text><text x="286" y="316" class="t-sub">the frames came later than covered: fade out, place again with more room</text>
+<rect x="100" y="327" width="170" height="22" rx="6" fill="rgba(139,143,245,0.10)" stroke="#5b5fc7"/>
+<text x="110" y="342" class="t-chip">unplugged</text><text x="286" y="342" class="t-sub">lost: ports silent, connections kept · reopened when back, placed again</text>
+<rect x="100" y="353" width="170" height="22" rx="6" fill="rgba(139,143,245,0.10)" stroke="#5b5fc7"/>
+<text x="110" y="368" class="t-chip">master buffer size</text><text x="286" y="368" class="t-sub">placed again, no allocation (sized for 4 096 frames)</text>
+<rect x="100" y="379" width="170" height="22" rx="6" fill="rgba(139,143,245,0.10)" stroke="#5b5fc7"/>
+<text x="110" y="394" class="t-chip">master sample rate</text><text x="286" y="394" class="t-sub">the card reopened at the new rate, the bridge set up afresh; a card that can't: resampled</text>
+<rect x="100" y="405" width="170" height="22" rx="6" fill="rgba(139,143,245,0.10)" stroke="#5b5fc7"/>
+<text x="110" y="420" class="t-chip">removed</text><text x="286" y="420" class="t-sub">taken out of the master's list; freed two cycles later</text>
+</svg>
+    <p class="caption">
+      <b>Learned once.</b> What a card needs (how late its capture comes, how far ahead its playback takes frames) is
+      the card's, not the moment's: a card xrun, a replug or a new master buffer size places the delay again at once,
+      with what was learned and measured. Only a new bridge, or a new sample rate (which sets the bridge up afresh),
+      learns again.
+    </p>
+  </div>
+
+  <div class="figure">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-label="USB cards: playback taken a buffer ahead; capture in chunks larger than a period">
+<rect x="20" y="20" width="575" height="380" rx="18" fill="rgba(255,255,255,0.015)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">USB PLAYBACK · TAKEN A BUFFER AHEAD</text>
+<rect x="605" y="20" width="575" height="380" rx="18" fill="rgba(255,255,255,0.015)" stroke="#3a3f72"/>
+<text x="625" y="46" class="t-band">USB CAPTURE AT 256 FRAMES · CHUNKS</text>
+<text x="40" y="76" class="t-tiny">CARD POSITIONS →</text>
+<rect x="40" y="88" width="120" height="30" rx="6" fill="rgba(74,222,128,0.18)" stroke="#4ade80"/><text x="50" y="108" class="t-chip">played</text>
+<rect x="160" y="88" width="150" height="30" rx="6" fill="rgba(45,212,191,0.16)" stroke="#2dd4bf"/><text x="170" y="108" class="t-chip">in USB transfers</text>
+<rect x="310" y="88" width="150" height="30" rx="6" fill="rgba(139,143,245,0.16)" stroke="#8b8ff5"/><text x="320" y="108" class="t-chip">ALSA buffer</text>
+<rect x="460" y="88" width="110" height="30" rx="6" fill="rgba(244,114,182,0.16)" stroke="#f472b6"/><text x="470" y="108" class="t-chip">placed</text>
+<text x="160" y="136" class="t-sub">snd-usb takes frames into its transfers as soon as they are</text>
+<text x="160" y="152" class="t-sub">written: its position runs a whole buffer ahead of the sound</text>
+<text x="40" y="192" class="t-band" style="fill:#fcd34d">BEFORE · PLACED FOR ONE BUFFER</text>
+<rect x="40" y="204" width="120" height="26" rx="6" fill="rgba(74,222,128,0.18)" stroke="#4ade80"/>
+<rect x="160" y="204" width="150" height="26" rx="6" fill="rgba(45,212,191,0.16)" stroke="#2dd4bf"/>
+<rect x="310" y="204" width="80" height="26" rx="6" fill="rgba(251,113,133,0.25)" stroke="#fb7185"/><text x="318" y="222" class="t-chipsub">silence</text>
+<rect x="390" y="204" width="150" height="26" rx="6" fill="rgba(244,114,182,0.16)" stroke="#f472b6"/><text x="398" y="222" class="t-chipsub">made too late</text>
+<text x="40" y="254" class="t-bad">U-44, 64 × 3: 663 000 frames of 2.9 M played as silence in 60 s (23 %)</text>
+<text x="40" y="294" class="t-band" style="fill:#86efac">NOW · THE LEAD MEASURED FIRST</text>
+<rect x="40" y="306" width="120" height="26" rx="6" fill="rgba(74,222,128,0.18)" stroke="#4ade80"/>
+<rect x="160" y="306" width="150" height="26" rx="6" fill="rgba(45,212,191,0.16)" stroke="#2dd4bf"/>
+<rect x="310" y="306" width="150" height="26" rx="6" fill="rgba(139,143,245,0.16)" stroke="#8b8ff5"/>
+<rect x="460" y="306" width="110" height="26" rx="6" fill="rgba(244,114,182,0.16)" stroke="#f472b6"/>
+<text x="40" y="356" class="t-ok">0 frames missed · start included · the latency it reports is the real one</text>
+<text x="40" y="378" class="t-sub">plain ALSA: played − captured = +256 ± 5 frames at 128 × 2, no drift</text>
+<text x="640" y="72" class="t-tiny">WHAT ARRIVES · 480, 288, 480, 288 … · THE PERIODS (DASHED) ARE 256</text>
+<rect x="640.0" y="82" width="157.8" height="20" rx="4" fill="rgba(244,114,182,0.3)" stroke="#f472b6"/>
+<text x="646.0" y="96" class="t-chipsub">480</text>
+<rect x="800.8" y="82" width="93.5" height="20" rx="4" fill="rgba(244,114,182,0.18)" stroke="#f472b6"/>
+<text x="806.8" y="96" class="t-chipsub">288</text>
+<rect x="897.3" y="82" width="157.8" height="20" rx="4" fill="rgba(244,114,182,0.3)" stroke="#f472b6"/>
+<text x="903.3" y="96" class="t-chipsub">480</text>
+<rect x="1058.1" y="82" width="93.5" height="20" rx="4" fill="rgba(244,114,182,0.18)" stroke="#f472b6"/>
+<text x="1064.1" y="96" class="t-chipsub">288</text>
+<line x1="640.0" y1="78" x2="640.0" y2="106" stroke="#a5a8ff" stroke-dasharray="2 3"/>
+<line x1="725.8" y1="78" x2="725.8" y2="106" stroke="#a5a8ff" stroke-dasharray="2 3"/>
+<line x1="811.5" y1="78" x2="811.5" y2="106" stroke="#a5a8ff" stroke-dasharray="2 3"/>
+<line x1="897.3" y1="78" x2="897.3" y2="106" stroke="#a5a8ff" stroke-dasharray="2 3"/>
+<line x1="983.0" y1="78" x2="983.0" y2="106" stroke="#a5a8ff" stroke-dasharray="2 3"/>
+<line x1="1068.8" y1="78" x2="1068.8" y2="106" stroke="#a5a8ff" stroke-dasharray="2 3"/>
+<line x1="1154.6" y1="78" x2="1154.6" y2="106" stroke="#a5a8ff" stroke-dasharray="2 3"/>
+<text x="640" y="130" class="t-tiny">TWO PERIODS · 512 FRAMES</text>
+<rect x="640" y="140" width="317" height="34" rx="6" fill="rgba(139,143,245,0.08)" stroke="#8b8ff5"/>
+<line x1="799" y1="140" x2="799" y2="174" stroke="#5b5fc7" stroke-dasharray="3 3"/>
+<rect x="642" y="144" width="298" height="26" rx="5" fill="rgba(244,114,182,0.30)" stroke="#f472b6"/><text x="650" y="162" class="t-chip">480</text>
+<rect x="940" y="144" width="30" height="26" rx="4" fill="rgba(251,113,133,0.55)" stroke="#fb7185"/>
+<text x="977" y="162" class="t-bad">+48 = 528 > 512: overrun</text>
+<text x="640" y="220" class="t-tiny">THREE PERIODS · 768 FRAMES</text>
+<rect x="640" y="230" width="476" height="34" rx="6" fill="rgba(139,143,245,0.08)" stroke="#8b8ff5"/>
+<line x1="799" y1="230" x2="799" y2="264" stroke="#5b5fc7" stroke-dasharray="3 3"/>
+<line x1="957" y1="230" x2="957" y2="264" stroke="#5b5fc7" stroke-dasharray="3 3"/>
+<rect x="642" y="234" width="298" height="26" rx="5" fill="rgba(244,114,182,0.30)" stroke="#f472b6"/><text x="650" y="252" class="t-chip">480</text>
+<rect x="940" y="234" width="30" height="26" rx="4" fill="rgba(244,114,182,0.30)" stroke="#f472b6"/>
+<text x="977" y="252" class="t-ok">fits</text>
+<text x="640" y="320" class="t-sub">At a 256-frame period the U-44 delivers 480 and 288 frames every 16 ms:</text>
+<text x="640" y="338" class="t-sub">its transfers don't follow the period. A chunk read a millisecond late</text>
+<text x="640" y="356" class="t-sub">overran two periods, again and again (plain blocking reads squeezed by).</text>
+<text x="640" y="384" class="t-ok">USB cards at 256 frames or more get a third period: 0 card xruns</text>
+</svg>
+    <p class="caption">
+      <b>Found by counting.</b> Both came to light only when the bridge started reporting what it had been quietly
+      absorbing: playback positions it filled with silence, capture underruns, the card's own xruns. They now reach
+      jackdbus's log (the first at once, then at most once a minute) and the bridge's status. The tests that judged
+      playback quality had run on snd-aloop, which takes frames when they are due, as an interrupt-driven card does.
+    </p>
+  </div>
+
+  <div class="figure">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" role="img" aria-label="The capture delay of an extra USB card at a 256-frame master, by approach">
+<rect x="20" y="20" width="1160" height="340" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">AN EXTRA USB CARD'S CAPTURE DELAY · 256-FRAME MASTER, 48 kHz · WHAT EACH APPROACH PUTS IN IT</text>
+<text x="40" y="92" class="t-chip">zita-a2j / j2a</text><text x="40" y="108" class="t-chipsub">the formula's floor: nothing for jitter</text>
+<rect x="290" y="70" width="312" height="34" rx="5" fill="#5b5fc7" fill-opacity="0.22" stroke="#5b5fc7"/>
+<text x="298" y="92" class="t-chipsub">master period</text>
+<rect x="602" y="70" width="78" height="34" rx="5" fill="#2dd4bf" fill-opacity="0.22" stroke="#2dd4bf"/>
+<text x="610" y="92" class="t-chipsub">card period</text>
+<rect x="680" y="70" width="39" height="34" rx="5" fill="#6b7199" fill-opacity="0.22" stroke="#6b7199"/>
+<text x="729" y="92" class="t-mono">352 frames · 7.3 ms</text>
+<text x="40" y="158" class="t-chip">PipeWire follower</text><text x="40" y="174" class="t-chipsub">from its code (+ its resampler's delay)</text>
+<rect x="290" y="136" width="312" height="34" rx="5" fill="#5b5fc7" fill-opacity="0.22" stroke="#5b5fc7"/>
+<text x="298" y="158" class="t-chipsub">quantum</text>
+<rect x="602" y="136" width="312" height="34" rx="5" fill="#2dd4bf" fill-opacity="0.22" stroke="#2dd4bf"/>
+<text x="610" y="158" class="t-chipsub">a period: batch card</text>
+<rect x="915" y="136" width="39" height="34" rx="5" fill="#fbbf24" fill-opacity="0.22" stroke="#fbbf24"/>
+<text x="964" y="158" class="t-mono">544 frames · 11.3 ms</text>
+<text x="40" y="224" class="t-chip">JackBus, placed</text><text x="40" y="240" class="t-chipsub">the first second, safe</text>
+<rect x="290" y="202" width="311" height="34" rx="5" fill="#5b5fc7" fill-opacity="0.22" stroke="#5b5fc7"/>
+<text x="298" y="224" class="t-chipsub">master cycle</text>
+<rect x="601" y="202" width="172" height="34" rx="5" fill="#a5a8ff" fill-opacity="0.22" stroke="#a5a8ff"/>
+<text x="609" y="224" class="t-chipsub">lateness learned</text>
+<rect x="773" y="202" width="21" height="34" rx="5" fill="#6b7199" fill-opacity="0.22" stroke="#6b7199"/>
+<rect x="794" y="202" width="117" height="34" rx="5" fill="#fbbf24" fill-opacity="0.22" stroke="#fbbf24"/>
+<text x="802" y="224" class="t-chipsub">2 ms margin</text>
+<text x="921" y="224" class="t-mono">509 frames · 10.6 ms</text>
+<text x="40" y="290" class="t-chip">JackBus, tuned</text><text x="40" y="306" class="t-chipsub">U-44 at 64 × 3: 9.3 ms</text>
+<rect x="290" y="268" width="311" height="34" rx="5" fill="#5b5fc7" fill-opacity="0.22" stroke="#5b5fc7"/>
+<text x="298" y="290" class="t-chipsub">master cycle</text>
+<rect x="601" y="268" width="168" height="34" rx="5" fill="#a5a8ff" fill-opacity="0.22" stroke="#a5a8ff"/>
+<text x="609" y="290" class="t-chipsub">worst measured</text>
+<rect x="769" y="268" width="21" height="34" rx="5" fill="#6b7199" fill-opacity="0.22" stroke="#6b7199"/>
+<rect x="790" y="268" width="44" height="34" rx="5" fill="#4ade80" fill-opacity="0.22" stroke="#4ade80"/>
+<text x="844" y="290" class="t-mono">446 frames · 9.3 ms</text>
+<text x="40" y="332" class="t-sub">Smaller card periods lower the JackBus figures further: the same U-44 at 32 × 3 settles at 8.1 ms.</text>
+<text x="40" y="350" class="t-sub">Playback (not shown) carries the USB transfers' buffer too, for every approach that doesn't drop frames.</text>
+</svg>
+    <p class="caption">
+      <b>How the others size it.</b> zita-a2j's target is its card period plus JACK's plus the filter: the floor, with
+      nothing set aside for jitter. PipeWire's follower uses its quantum plus a headroom that is fixed: a configured
+      value, a whole period more for batch (USB) cards in timer mode, at least 32 samples for capture; it adapts its
+      DLL's bandwidth from the error's statistics, not the headroom. CoreAudio's aggregate devices trust each driver's
+      declared safety offset. None measures the card at run time; ALSA drivers declare no safety offset, so here the
+      bridge measures it.
+    </p>
+  </div>
+
+  <div class="tablebox" style="margin-top:18px">
+    <table>
+      <tr><th>Measured · U-44 and a USB headset · 256-frame master</th><th>Result</th></tr>
+      <tr><td>Both cards bridged at 64 × 3, a client on each, 120 s</td><td><span class="better">capture 10.6 → 9.3 / 8.9 ms as measured</span> · playback 14.8 / 14.6 ms · 0 missed, 0 underruns, 0 xruns</td></tr>
+      <tr><td>Both at 128 × 2, 120 s</td><td><span class="better">capture 13.3 → 11.9 / 12.0 ms</span> · playback 17.5 / 17.9 ms · 0 missed, 0 underruns, 0 xruns</td></tr>
+      <tr><td>Both at 32 × 3 (in daily use)</td><td><span class="better">8.1 / 9.9 ms in</span> · 10.9 / 12.6 ms out · no card xruns</td></tr>
+      <tr><td>U-44 playback before the lead was measured, 64 × 3, 60 s</td><td><span class="worse">663 000 frames as silence (23 %)</span> → <span class="better">0, start included</span></td></tr>
+      <tr><td>U-44 at 256 × 2</td><td><span class="worse">card xruns without pause</span> → a third period: <span class="better">0</span></td></tr>
+      <tr><td>Each card unplugged and plugged back, 240 s</td><td>gone, back, locked again after one resync · both clients <span class="better">0 xruns</span>, the input level back, connections kept</td></tr>
+      <tr><td>Two cards, a 128-frame master, 33 min, alongside builds and nested tests</td><td><span class="better">0 xruns</span> · each locked once · RSS flat at 169 640 kB · 8 threads</td></tr>
+      <tr><td>Through jackdbus: buffer size 128 / 512 / 256, then 44.1 kHz and back</td><td>relocked in 3.1 s per buffer change, 4.05 s per rate change · both cards reopened at 44 100 Hz · 0 client xruns, no silent second</td></tr>
+      <tr><td>Resampler, quality 1 (the default, about zita's)</td><td>143 dB SNR at 1 kHz, 131 dB at 20 kHz · a 64-channel bridge: 1.9 % DSP at 256 frames</td></tr>
+      <tr><td>Simulation, 10 scenarios (drift, steps, xruns, a card gone, master skips, 44.1 / 16 kHz cards)</td><td>lock in ≤ 1.3 s · steady delay error σ ≤ 0.02 frames · 0 underruns · tuned 1.2–1.9 ms lower</td></tr>
+    </table>
+  </div>
+  <div class="tablebox" style="margin-top:18px">
+    <table>
+      <tr><th>Setting it up</th><th></th></tr>
+      <tr><td><code>jackd --bridge</code> · <code>-B</code></td><td><code>card[/period[/nperiods]][@auto|timer|irq]</code>, repeatable: <code>-B U44 -B Headset/64/3@timer</code></td></tr>
+      <tr><td>jackdbus, engine parameter <code>bridges</code></td><td>the same specs, separated by spaces; kept with the settings; changes apply at once while the server runs; a listed card that is absent is bridged when it is plugged in</td></tr>
+      <tr><td><code>org.jackaudio.JackControl</code></td><td><code>AddBridge(s spec) → s name</code> · <code>RemoveBridge(s bridge)</code> · <code>GetBridges() → a(sssssuuuuudddttt)</code>: per bridge its state, rate, period, channels, delays, drift, xruns, resyncs, underruns</td></tr>
+      <tr><td>libjackserver (<code>JackControlNspa.h</code>)</td><td><code>jackctl_server_add_bridge_spec</code> · <code>jackctl_server_remove_bridge</code> · <code>jackctl_server_get_bridge_status</code></td></tr>
+      <tr><td>PatchBox</td><td>Settings → Devices: a switch per card, its state, period, periods and wake-ups; a card switched off keeps its settings</td></tr>
+      <tr><td>Duplex, capture or playback</td><td>duplex opens whichever the card has (a USB microphone, a USB DAC); another device of a card gets its number in its name (<code>PCH-3</code>)</td></tr>
+      <tr><td>The card's rate</td><td>the master's; a card that can't run at it runs at its own, resampled</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ 13. when a client dies -->
+<section id="s13">
+  <h2><span class="num">13</span>When a client dies</h2>
   <p class="sub">
     A client process can end at any moment &mdash; killed, crashed, closed by a session manager. Until the server takes
     it out of the graph, every cycle waits for it. 1.9.22 learned of a death only from the client's sockets closing,
@@ -2489,7 +3088,7 @@ pre.code .s { color: var(--amber); }
         <circle r="4.5" class="pkt req"><animateMotion dur="1.2s" begin="-0.6s" repeatCount="indefinite"><mpath xlink:href="#p12-proc"/></animateMotion></circle>
         <text x="40" y="320" class="t-ok">exiting or gone: detached at once, removed after the switch · a stock libjack's client killed: 1 xrun per kill</text>
         <text x="40" y="346" class="t-sub">a process whose main thread called pthread_exit() is not "exiting": only every thread of it counts · hidepid /proc: no lookup, the socket path remains</text>
-        <text x="40" y="372" class="t-sub">no timing heuristic: a slow or stuck client that is alive is never touched (hung clients: §20)</text>
+        <text x="40" y="372" class="t-sub">no timing heuristic: a slow or stuck client that is alive is never touched (hung clients: §21)</text>
       </g>
 
       <!-- ================= page 3: the socket ================= -->
@@ -2617,9 +3216,9 @@ pre.code .s { color: var(--amber); }
 </section>
 
 
-<!-- ============================================================ 13. late clients -->
-<section id="s13">
-  <h2><span class="num">13</span>Late clients: catch up, report, count</h2>
+<!-- ============================================================ 14. late clients -->
+<section id="s14">
+  <h2><span class="num">14</span>Late clients: catch up, report, count</h2>
   <p class="sub">
     A client that overruns its period is alive and busy: nothing to remove. The fork keeps how JACK lets a late client
     catch up, reports each failing cycle once and names the client behind it, and counts per client how often, and by
@@ -2783,9 +3382,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 14. slow notification clients -->
-<section id="s14">
-  <h2><span class="num">14</span>Slow notification clients</h2>
+<!-- ============================================================ 15. slow notification clients -->
+<section id="s15">
+  <h2><span class="num">15</span>Slow notification clients</h2>
   <p class="sub">
     Notifications reach each client's notification thread over its own socket, and some of them wait for a reply.
     In 1.9.22 the request thread waited for each of those under the engine lock: one client that answered slowly
@@ -2881,9 +3480,9 @@ pre.code .s { color: var(--amber); }
 </section>
 
 
-<!-- ============================================================ 15. failure modes fixed -->
-<section id="s15">
-  <h2><span class="num">15</span>Failure modes fixed</h2>
+<!-- ============================================================ 16. failure modes fixed -->
+<section id="s16">
+  <h2><span class="num">16</span>Failure modes fixed</h2>
   <p class="sub">
     Four failures that cross process boundaries, each reproduced against stock 1.9.22 before it was fixed. Step through
     them with the arrows.
@@ -3056,9 +3655,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 16. performance and results -->
-<section id="s16">
-  <h2><span class="num">16</span>Performance, measured in the engine</h2>
+<!-- ============================================================ 17. performance and results -->
+<section id="s17">
+  <h2><span class="num">17</span>Performance, measured in the engine</h2>
   <p class="sub">
     Every performance change was measured on the running engine &mdash; real clients, the same server, interleaved
     A/B runs, perf counters per cycle &mdash; and kept only if no configuration got slower. Hot-loop microbenchmarks
@@ -3237,9 +3836,9 @@ pre.code .s { color: var(--amber); }
   </p>
 </section>
 
-<!-- ============================================================ 17. compatibility -->
-<section id="s17">
-  <h2><span class="num">17</span>Compatibility envelope</h2>
+<!-- ============================================================ 18. compatibility -->
+<section id="s18">
+  <h2><span class="num">18</span>Compatibility envelope</h2>
   <p class="sub">
     "Drop-in" is tested, not assumed: every combination of server and libjack that can meet on a desktop runs the same
     stress client, and the cross-process state that isn't covered by protocol 9 (the metadata database) has its own
@@ -3309,9 +3908,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 18. validation -->
-<section id="s18">
-  <h2><span class="num">18</span>Validation harness</h2>
+<!-- ============================================================ 19. validation -->
+<section id="s19">
+  <h2><span class="num">19</span>Validation harness</h2>
   <p class="sub">
     Tests never touch the live audio session. All of a user's JACK servers share one shm registry and its SysV lock,
     whatever their names &mdash; which is how an early test unlinked the live server's segment (C1) &mdash; so every
@@ -3330,12 +3929,12 @@ pre.code .s { color: var(--amber); }
       <text x="200" y="184" text-anchor="middle" class="t-sub">never seen by a test</text>
       <text x="40" y="236" class="t-label">builds tested</text>
       <g class="t-sub">
-        <text x="40" y="258">regular (Arch makepkg flags) · 70 / 70</text>
+        <text x="40" y="258">regular (Arch makepkg flags) · 97 / 97</text>
         <text x="40" y="278">LTO · 60 / 60 (e6288b92)</text>
         <text x="40" y="298">packaged (makepkg, LTO) · jackdbus 14 / 14</text>
         <text x="40" y="318">32-bit libjack (mixed build)</text>
         <text x="40" y="338">ASan + UBSan · 0 reports</text>
-        <text x="40" y="358">TSan · 1 pre-existing report (§20)</text>
+        <text x="40" y="358">TSan · 0 reports (the races fixed)</text>
       </g>
       <text x="40" y="396" class="t-label">A/B in the engine</text>
       <g class="t-sub">
@@ -3352,7 +3951,7 @@ pre.code .s { color: var(--amber); }
       <text x="420" y="84" class="t-sub">tmpfs on /dev/shm · dummy driver</text>
       <g>
         <rect x="420" y="100" width="320" height="400" rx="12" fill="#161a36" stroke="#3d4683"/>
-        <text x="436" y="124" class="t-label">nspa/tests/run.sh · 70 checks</text>
+        <text x="436" y="124" class="t-label">nspa/tests/run.sh · 97 checks</text>
         <g class="t-sub">
           <text x="436" y="150">compat matrix: fork/Arch server × libjack, 64/32</text>
           <text x="436" y="172">two servers; stale client (TERM, KILL)</text>
@@ -3364,8 +3963,8 @@ pre.code .s { color: var(--amber); }
           <text x="436" y="304">nocancel; mixdown (1021 / 64, 32-bit)</text>
           <text x="436" y="326">refnum-bound × 3; metadata × 4</text>
           <text x="436" y="348">jackdbus: SIGTERM, switch-fail, patchbay, crash,</text>
-          <text x="436" y="370">detach, client timings</text>
-          <text x="436" y="392">client-kill × 11 modes; notify-lag × 3; lib32</text>
+          <text x="436" y="370">detach, client timings, hotplug, bridges (12)</text>
+          <text x="436" y="392">client-kill × 11; notify-lag × 3, closed; lib32</text>
         </g>
         <text x="436" y="424" class="t-label">expected to fail on 1.9.22</text>
         <g class="t-sub">
@@ -3416,15 +4015,28 @@ pre.code .s { color: var(--amber); }
       <b>Sanitizers, and what they can't run.</b> Under TSan, libjack's asynchronous cancellation of a client's
       threads (at deactivate and close) aborts the instrumented client &mdash; a TSan limitation, documented in the
       suite &mdash; so TSan runs are gated on reports, not on client results; the jackdbus tests also run against a
-      TSan server with uninstrumented clients, where all pass. The one report left is older than the fork's changes
-      (§20).
+      TSan server with uninstrumented clients, where all pass. The races it reported, one of them older than the
+      fork, are fixed with atomic accesses that leave the shared memory layout and the client API as they were.
     </p>
+  </div>
+
+  <div class="tablebox" style="margin-top:18px">
+    <table>
+      <tr><th>Sound card bridges (nspa/tests/bridge)</th><th>What it checks</th></tr>
+      <tr><td><code>sim_test</code></td><td>whole bridges against simulated cards: drift, drift steps, timestamp and wakeup jitter, card xruns, a card gone 2 s, master skips, 44.1 and 16 kHz cards; lock time, delay error, the audio's SNR, underruns, the tuned targets</td></tr>
+      <tr><td><code>resampler_test</code> · <code>bench_test</code></td><td>the resampler's quality, continuity and accounting; its cost per channel (AVX2, SSE2, AVX-512)</td></tr>
+      <tr><td><code>aloop_test</code></td><td>real time on snd-aloop: a sine through playback and back through capture at a shifted rate, the round trip's SNR; a mid-run reopen; any card with <code>BRIDGE_CAPTURE</code> / <code>BRIDGE_PLAYBACK</code>, silence only</td></tr>
+      <tr><td><code>server-bridge.sh</code> · <code>multi-bridge.sh</code></td><td>cards bridged in an isolated jackd, a client per card: xruns, the ports' latencies, the log; several cards at once</td></tr>
+      <tr><td><code>jackdbus-bridge.sh</code> (in the suite)</td><td>12 checks on snd-aloop through a private bus: the <code>bridges</code> setting, AddBridge / RemoveBridge / GetBridges, buffer size and master rate changes, the setting kept</td></tr>
+      <tr><td><code>jackdbus-cards.sh</code></td><td>real cards through jackdbus: locked after each buffer size and rate change, the clients' signal and connections kept</td></tr>
+      <tr><td><code>with-cards.sh</code></td><td>holds the cards for a test: their reservations taken, every playback control at 0 and muted, muted again if a card is replugged meanwhile, restored afterwards by card id</td></tr>
+    </table>
   </div>
 </section>
 
-<!-- ============================================================ 19. evaluated and rejected -->
-<section id="s19">
-  <h2><span class="num">19</span>Evaluated and rejected</h2>
+<!-- ============================================================ 20. evaluated and rejected -->
+<section id="s20">
+  <h2><span class="num">20</span>Evaluated and rejected</h2>
   <p class="sub">
     Modern kernel and CPU features were examined against JACK's actual hot path, which per cycle is one
     <code>poll()</code> on the PCM and a futex wake per downstream client &mdash; there is little left for an I/O or
@@ -3438,13 +4050,13 @@ pre.code .s { color: var(--amber); }
       <tr><td>AVX2 sample conversion</td><td>stores are strided into the interleaved mmap area, so wider vectors don't help; this card's path is already 0.3 ns/sample</td><td>no gain</td></tr>
       <tr><td>AVX-512 anywhere</td><td>512-bit instructions can change the core's frequency license; not worth it for sub-µs loops on an RT core</td><td>rejected</td></tr>
       <tr><td><code>SCHED_DEADLINE</code></td><td>needs <code>CAP_SYS_NICE</code> (EPERM here despite rtprio 98); the driver alone does little work; per-client budgets are unknowable and an overrun throttles to the next period (a guaranteed xrun); DL preempts IRQ threads; mainline has no hierarchical DL</td><td>rejected</td></tr>
-      <tr><td><code>futex_waitv</code> / futex2 on the RT path</td><td>a cycle waits on one futex: measured wake round trips equal (4.4–5.1 µs median for <code>FUTEX_WAIT</code>, <code>futex_waitv</code>, futex2 <code>futex_wait</code>); futex2 has no PI ops</td><td>no gain there &mdash; but a real use off the RT path: the notifier waits on its own word and every client's alive slot at once (§12)</td></tr>
-      <tr><td>A late client skips its next trigger (CoreAudio-style)</td><td>its late finish has already signalled its successors; the skipped block of its input is lost: MIDI events (stuck notes), recording gaps; JACK's re-trigger is a catch-up</td><td>rejected; counted instead (§13)</td></tr>
-      <tr><td>pidfd or the socket for dead clients</td><td>a pidfd becomes readable at <code>exit_notify()</code>, the sockets close at <code>exit_files()</code>: both after the address space is torn down</td><td>robust futex instead (§12)</td></tr>
+      <tr><td><code>futex_waitv</code> / futex2 on the RT path</td><td>a cycle waits on one futex: measured wake round trips equal (4.4–5.1 µs median for <code>FUTEX_WAIT</code>, <code>futex_waitv</code>, futex2 <code>futex_wait</code>); futex2 has no PI ops</td><td>no gain there &mdash; but a real use off the RT path: the notifier waits on its own word and every client's alive slot at once (§13)</td></tr>
+      <tr><td>A late client skips its next trigger (CoreAudio-style)</td><td>its late finish has already signalled its successors; the skipped block of its input is lost: MIDI events (stuck notes), recording gaps; JACK's re-trigger is a catch-up</td><td>rejected; counted instead (§14)</td></tr>
+      <tr><td>pidfd or the socket for dead clients</td><td>a pidfd becomes readable at <code>exit_notify()</code>, the sockets close at <code>exit_files()</code>: both after the address space is torn down</td><td>robust futex instead (§13)</td></tr>
       <tr><td><code>io_uring</code></td><td>nothing to batch on the RT path; ring submission or SQPOLL adds work; the request socket is low-rate and non-RT</td><td>no gain</td></tr>
       <tr><td><code>eventfd</code> for RT → non-RT</td><td>an eventfd write takes <code>wqh.lock</code>, an <code>rt_mutex</code> on PREEMPT_RT, shared with a SCHED_OTHER reader</td><td>polled lock-free queues instead</td></tr>
       <tr><td><code>pidfd</code> for registry liveness</td><td>the registry stores bare PIDs in shared memory; a pidfd can't validate a PID read later</td><td>needs a layout change</td></tr>
-      <tr><td>memfd segments, huge pages, right-sized segments</td><td>clients open segments by name with <code>shm_open()</code>; THP doesn't exist on PREEMPT_RT</td><td>protocol change → future direction (§20)</td></tr>
+      <tr><td>memfd segments, huge pages, right-sized segments</td><td>clients open segments by name with <code>shm_open()</code>; THP doesn't exist on PREEMPT_RT</td><td>protocol change → future direction (§21)</td></tr>
       <tr><td>3-state activation futex (P7)</td><td>the futex word is shared with every libjack</td><td>protocol</td></tr>
       <tr><td>Deferred cancellation (R9)</td><td>a callback blocked on an application lock at close would hang forever</td><td>rejected; lock scopes instead</td></tr>
       <tr><td>uclamp, rdtsc time base, <code>-march</code> above x86-64 for libjack</td><td>RT already runs at max frequency; the time base is shared (protocol); lib32 and portability</td><td>rejected</td></tr>
@@ -3454,9 +4066,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 20. open items -->
-<section id="s20">
-  <h2><span class="num">20</span>Open items</h2>
+<!-- ============================================================ 21. open items -->
+<section id="s21">
+  <h2><span class="num">21</span>Open items</h2>
   <p class="sub">What was measured and deliberately left alone, what remains untested on hardware, and where larger gains would have to come from.</p>
   <div class="figure">
     <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 330" role="img" aria-label="A hung client, measured">
@@ -3468,7 +4080,7 @@ pre.code .s { color: var(--amber); }
         <text x="40" y="108" class="t-label">async · upstream</text>
         <rect x="300" y="96" width="376" height="16" rx="4" class="bar-new"/><text x="682" y="109" class="t-mono">94</text>
         <text x="40" y="136" class="t-label">async · downstream</text>
-        <rect x="300" y="124" width="3" height="16" rx="1" style="fill:#fb7185"/><text x="310" y="137" class="t-red">0 · plus ~350 xrun callbacks/s to every client (before §13)</text>
+        <rect x="300" y="124" width="3" height="16" rx="1" style="fill:#fb7185"/><text x="310" y="137" class="t-red">0 · plus ~350 xrun callbacks/s to every client (before §14)</text>
         <text x="40" y="164" class="t-label">async · unrelated</text>
         <rect x="300" y="152" width="376" height="16" rx="4" class="bar-new"/><text x="682" y="165" class="t-mono">94</text>
         <text x="40" y="208" class="t-label">sync (-S) · upstream</text>
@@ -3494,15 +4106,16 @@ pre.code .s { color: var(--amber); }
       <h3>Not covered yet</h3>
       <p class="role">Implemented without the hardware to prove it here, or still to be looked into.</p>
       <ul>
-        <li><b>Device removal</b> (C13): a fatal device error reaching clients as a shutdown notification.</li>
+        <li><b>jackd without jackdbus</b>: an unplugged master card still ends the server, as in 1.9.22; under
+          jackdbus the dummy stands in (§11).</li>
         <li><b><code>-X raw</code></b>: non-blocking wake pipes are in (R3); drain and thread priority unchanged; one
           failing raw MIDI port still stops the I/O thread for all (C21, not done).</li>
-        <li><b>"Device busy" right after a PipeWire takeover</b>: a short retry of the PCM open after acquiring the
-          reservation would remove the race; optional, not done.</li>
+        <li><b>"Device busy" right after a PipeWire takeover</b>: a bridge retries its card once a second; the
+          master's own open still has no retry.</li>
         <li><b>FireWire (FFADO)</b>: built like Arch's package, not tested (no FireWire hardware to test with).</li>
-        <li><b>A TSan report older than the fork's changes</b>: <code>JackMessageBuffer::AddMessage</code> against
-          jackdbus's log callback, around the message buffer's lifetime across StartServer/StopServer; the queue
-          itself is clean under TSan. To investigate.</li>
+        <li><b>Sound card bridges</b>: measured against PipeWire's follower on the same cards (only its formula is
+          compared here); a card whose rates exclude the master's runs at its own, resampled (untested on hardware);
+          PatchBox offering a newly plugged card a role.</li>
         <li><b>Xruns when apps start or add tracks.</b> In real use they come from the app's own callback (Ardour
           busy for just over one period during a load), not from the server; in async mode the other clients' audio
           is untouched. Next: measure with <code>GetClientTimings</code> during app start, track adds and plug-in
@@ -3513,6 +4126,8 @@ pre.code .s { color: var(--amber); }
       <h3>Larger directions</h3>
       <p class="role">Where further gains would come from, and what they cost.</p>
       <ul>
+        <li><b>A JackBus API</b> beside libjack's, which stays as it is: control, bridges and session hooks for the
+          applications that want them.</li>
         <li><b>A dual-protocol server.</b> The client-open request already carries a protocol version. New libjack:
           <code>memfd</code> segments passed over the socket, sealed, optionally huge pages, sized to actual use
           instead of a fixed 107&nbsp;MB; old libjack: today's named segments. No recompiling of applications &mdash;
@@ -3530,11 +4145,11 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 21. packaging -->
-<section id="s21">
-  <h2><span class="num">21</span>Packaging and deployment</h2>
+<!-- ============================================================ 22. packaging -->
+<section id="s22">
+  <h2><span class="num">22</span>Packaging and deployment</h2>
   <p class="sub">
-    <code>nspa/pkg/JackBus/PKGBUILD</code> builds one package from the repository's <code>main</code> branch
+    <code>nspa/pkg/jackbus/PKGBUILD</code> builds one package from the repository's <code>main</code> branch
     (or a local clone with <code>NSPA_REPO</code>) that replaces Arch's <code>jack2</code> and <code>jack2-dbus</code>.
   </p>
   <div class="grid2">
@@ -3562,7 +4177,7 @@ pre.code .s { color: var(--amber); }
       <p class="role">jackdbus is a long-lived daemon: replacing files on disk doesn't replace the running process.</p>
       <ol class="timeline">
         <li><b>Keep a way back</b><span><code>sudo pacman -Sw jack2 jack2-dbus</code> puts Arch's packages in the cache.</span></li>
-        <li><b>Install</b><span><code>sudo pacman -U JackBus-*.pkg.tar.zst</code>; pacman offers to replace jack2 and jack2-dbus.</span></li>
+        <li><b>Install</b><span><code>sudo pacman -U jackbus-*.pkg.tar.zst</code>; pacman offers to replace jack2 and jack2-dbus (or jack2dbus-nspa, its former name).</span></li>
         <li><b>End the old daemon</b><span><code>jack_control exit</code>. <code>stop</code> isn't enough: the old daemon keeps 1.9.22's libjackserver mapped and can't load the new drivers (<code>undefined symbol … IsCaptureChannelNeeded</code>).</span></li>
         <li><b>Start</b><span>Your start script or <code>jack_control start</code>; D-Bus launches the new <code>/usr/bin/jackdbus</code>. If PipeWire held the card, a second start clears a "device busy".</span></li>
         <li><b>Check</b><span><code>readlink /proc/$(pgrep -x jackdbus)/exe</code> shows no "(deleted)"; <code>GetXruns</code> / <code>GetLoad</code> / <code>GetClientTimings</code> over D-Bus; <code>~/.log/jack/jackdbus.log</code>.</span></li>
@@ -3571,9 +4186,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 22. source map -->
-<section id="s22">
-  <h2><span class="num">22</span>Source map</h2>
+<!-- ============================================================ 23. source map -->
+<section id="s23">
+  <h2><span class="num">23</span>Source map</h2>
   <p class="sub">Where each change lives, and the commit that carries it on <code>main</code>.</p>
   <div class="tablebox">
     <table>
@@ -3601,7 +4216,12 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>posix/JackSocketNotifyChannel.*</code>, <code>JackSocketServerChannel.*</code>, <code>common/JackRequest.h</code></td><td>lagging clients · one write per notification · <code>SO_PEERCRED</code></td><td><span class="k">4f664324</span> · <span class="k">ed9ba64b</span> · <span class="k">072cfcce</span></td></tr>
       <tr><td><code>common/JackControlNspa.h</code>, <code>JackControlAPI.cpp</code>, <code>dbus/controller_iface_*.c</code></td><td>DetachClient / DetachProcess · GetClientTimings / ResetClientTimings</td><td><span class="k">eb687fe7</span> · <span class="k">e8423282</span></td></tr>
       <tr><td><code>dbus/jackdbus.c</code>, <code>params.c</code>, <code>controller_iface_patchbay.c</code></td><td>bounded log, <code>log-level</code> · patchbay: leftover ports, locked teardown</td><td><span class="k">04ce61f7</span> · <span class="k">040c9756</span></td></tr>
-      <tr><td><code>nspa/</code></td><td>build script, isolation wrapper, 70-check suite, hardware harness, package</td><td>44 commits (tests land with their fixes)</td></tr>
+      <tr><td><code>common/JackBridgeCore.*</code>, <code>JackBridgeStream.*</code>, <code>JackBridgeResampler.*</code></td><td>bridges: FIFO, card clock, delay loop, both directions, measured margins, the resampler</td><td><span class="k">4195bf78</span> · <span class="k">1a3b3b35</span> · <span class="k">c224c92a</span> · <span class="k">16977953</span></td></tr>
+      <tr><td><code>common/JackBridgeAlsa.*</code>, <code>linux/bridge/JackBridgeDriver.*</code></td><td>the card thread (wakeups, recovery, reopen, USB periods) · the bridge driver and its monitor</td><td><span class="k">3c411b5b</span> · <span class="k">abd2bf52</span> · <span class="k">e6694440</span> · <span class="k">045e489e</span></td></tr>
+      <tr><td><code>common/JackBridgeSet.*</code>, <code>JackServer.*</code>, <code>JackAudioDriver.*</code>, <code>JackControlAPI.cpp</code>, <code>Jackdmp.cpp</code></td><td>bridges in the master's cycle · add, remove, status · a new master's rate and buffer size followed · <code>--bridge</code></td><td><span class="k">3c411b5b</span> · <span class="k">d7db0938</span></td></tr>
+      <tr><td><code>dbus/controller*.c</code>, <code>dbus/audio_reserve.c</code></td><td>the <code>bridges</code> setting and calls · reservations counted, 20 slots · the master's card unplugged · device lists that follow the cards</td><td><span class="k">d7db0938</span> · <span class="k">30781a65</span> · <span class="k">5ae2bae0</span> · <span class="k">9f44400e</span></td></tr>
+      <tr><td><code>linux/alsa/alsa_driver.c</code>, <code>JackAlsaDriver.cpp</code></td><td>the wake timer, adaptive by default</td><td><span class="k">74a69867</span> · <span class="k">fd71db62</span></td></tr>
+      <tr><td><code>nspa/</code></td><td>build script, isolation wrapper, 97-check suite, bridge tests, hardware harness, package (<code>jackbus</code>)</td><td>44 commits (tests land with their fixes)</td></tr>
       <tr><td><code>Archlinux/jack2/</code></td><td>Arch's 1.9.22-2 packaging, for reference</td><td><span class="k">6989d6b0</span></td></tr>
       <tr><td><code>README.md</code></td><td>overview, changes and measurements</td><td><span class="k">5aff7602</span></td></tr>
     </table>
@@ -3609,8 +4229,8 @@ pre.code .s { color: var(--amber); }
 </section>
 
 <footer>
-  JackBus · architecture, second edition · JACK2 1.9.22 + 98 commits (main <code>3b031c4e</code>,
-  github.com/nine7nine/JackBus) · protocol 9 · Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274 · updated 13 November 2026
+  JackBus · architecture, third edition · JACK2 1.9.22 + 150 commits (github.com/nine7nine/JackBus) · protocol 9 ·
+  Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274, ZOOM U-44, a USB headset · updated 15 November 2026
 </footer>
 
 </main>

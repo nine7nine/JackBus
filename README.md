@@ -14,6 +14,13 @@ side file in which each client's realtime thread holds a robust mutex, so the
 server knows the moment a client dies. A stock libjack never opens it, and this
 libjack does without it on a stock server.
 
+It also adds what JACK never had: **sound card bridges** that join other cards
+to the graph, each resampled in the master's own cycle with the delay it needs
+measured on the card; a master card that can be unplugged and plugged back under
+`jackdbus` without clients noticing; and the D-Bus calls a settings page and a
+session manager need. [PatchBox](https://github.com/nine7nine/PatchBox) is its
+patchbay, settings page and session manager.
+
 **[Architecture document](https://nine7nine.github.io/JackBus/)**: how the
 server, libjack, shared memory and the activation graph work, every change with
 diagrams, and the measurements behind them (source: [`docs/index.html`](docs/index.html)).
@@ -54,6 +61,13 @@ doesn't hold up under measurement is reverted.
   (period 2 667 µs).
 - **Lightweight xrun recovery.** An xrun restarts only the PCM streams, not the
   whole driver on the RT thread.
+- **A wake timer for late period interrupts.** On Intel HDA at small buffer
+  sizes the period interrupt can come late or be dropped while the card's
+  position is right. The ALSA driver works out when the period is due from the
+  status page (no system call) and, if the interrupt hasn't come by then plus a
+  margin, wakes on the position. `wake-timer` (`-w`): `adaptive` (the default:
+  on once notifications are seen late three times), `on`, `off`, or a margin in
+  µs. HDA at 128×2, 30 s: **499 xruns → 0**. Batch (USB) cards are left alone.
 - **Optional PM QoS.** The `cpu-dma-latency` engine parameter
   (`jackd --cpu-dma-latency`, `jack_control eps cpu-dma-latency 0`) holds a
   request on `/dev/cpu_dma_latency` while the server runs. Idle xruns over 20 s
@@ -147,6 +161,34 @@ doesn't hold up under measurement is reverted.
 - **Metadata:** builds against Berkeley DB 5.3, like Arch's `jack2`, so the
   shared metadata database stays readable by every client's libjack.
 
+### Sound card bridges
+
+Two sound cards run on two crystals that never agree. Stock JACK offers a slave
+driver, which needs the cards clocked together, or a resampling client
+(`zita-a2j`, `audioadapter`) with a fixed margin. A **bridge** joins another
+card the way the master's own is joined: its ports are physical ports (`U44:capture_1`),
+filled and emptied by the master in its own cycle, while a thread of the card's
+own moves its frames through a lock-free FIFO and a resampler follows the two
+clocks. Neither side ever waits on the other.
+
+- **The delay is measured, not guessed.** The card side notes its worst case
+  (how late capture comes, how far ahead playback takes frames); after 20 s
+  locked the delay slides to that worst case plus 0.75 ms, at 20 ppm (inaudible),
+  and the ports report it. A ZOOM U-44 bridged at 64×3 to a 256-frame master:
+  capture **10.6 → 9.3 ms**, 8.1 ms at 32×3.
+- **USB cards handled as they are.** snd-usb takes playback frames a whole
+  buffer ahead, and delivers capture in chunks that don't follow the period; the
+  bridge measures the first and gives cards at ≥256 frames a third period for the
+  second. U-44 playback: **23 % of frames played as silence → 0**.
+- **Unplugged and back.** The ports stay, connections are kept, the card is
+  reopened when it returns (under a new index too) and placed again; its device
+  reservation is held meanwhile. A new master buffer size or sample rate is
+  followed.
+- **Set up anywhere.** `jackd --bridge U44 -B Headset/64/3@timer`
+  (`card[/period[/nperiods]][@auto|timer|irq]`), jackdbus's `bridges` engine
+  parameter (applied live, kept in conf.xml; a listed card is bridged when it is
+  plugged in), the D-Bus calls below, or PatchBox's Devices tab.
+
 ### jackdbus for session managers and monitors
 
 ```text
@@ -154,6 +196,9 @@ org.jackaudio.JackPatchbay.DetachClient(s client_name)  → u detached
 org.jackaudio.JackPatchbay.DetachProcess(x process_id)  → u detached
 org.jackaudio.JackControl.GetClientTimings()          → a(suu)
 org.jackaudio.JackControl.ResetClientTimings()
+org.jackaudio.JackControl.AddBridge(s spec)           → s name
+org.jackaudio.JackControl.RemoveBridge(s bridge)
+org.jackaudio.JackControl.GetBridges()                → a(sssssuuuuudddttt)
 org.jackaudio.Configure.ConstraintsChanged(as container)  (signal)
 ```
 
@@ -176,8 +221,15 @@ org.jackaudio.Configure.ConstraintsChanged(as container)  (signal)
   `ConstraintsChanged` with `["drivers", "alsa"]`, so a settings page refreshes
   its list. That covers whether a card is fully set up (its control node and
   permissions), and a burst of changes gives one refresh. It runs in jackdbus's
-  main loop: no new thread, nothing near the server's real-time thread. A server
-  that keeps running when its own card is unplugged is designed, not done yet.
+  main loop: no new thread, nothing near the server's real-time thread.
+- **The master's card unplugged.** In 1.9.22 the server stops and every client
+  is told it shut down. Under jackdbus the dummy driver stands in at the same
+  rate, buffer size and port counts, clients keep running, and the card takes
+  over again when it is back, with its connections. jackd on its own behaves as
+  before.
+- **Device reservations** hold twenty cards (two in 1.9.22), are counted and
+  locked: a bridge on another device of the master's card shares its
+  reservation, and removing the bridge no longer releases the master's.
 
 Older jackdbus versions answer `UnknownMethod`, and a tool carries on as before
 (the signal simply never comes).
@@ -208,9 +260,13 @@ Older jackdbus versions answer `UnknownMethod`, and a tool carries on as before
 
 - **Isolated test suite** (`nspa/tests`). It runs inside a private
   user/mount/IPC/network namespace with its own `/dev/shm`, so tests never touch
-  a running server. 70 checks, including fork↔stock interoperability in both
+  a running server. 97 checks, including fork↔stock interoperability in both
   directions with 32-bit libjack, clients killed and stalled in every way the
-  tests can produce, and the jackdbus calls.
+  tests can produce, the jackdbus calls, and bridges on snd-aloop.
+- **Bridge tests** (`nspa/tests/bridge`): whole bridges against simulated cards
+  (drift, jitter, xruns, a card gone), the resampler, real time on snd-aloop,
+  and any real cards through jackd or jackdbus, with every playback control
+  muted.
 - **ASan/UBSan and TSan builds** of the server and clients.
 - **Hardware tests** (`nspa/tests/hw`) on a real ALSA device, against both the
   fork and the stock server. They cover load, capture freshness, `-X seq`
@@ -227,12 +283,12 @@ nspa/tests/hw/run-hw.sh [hw:PCH]                 # real hardware, outputs muted
 
 ## Building and installing
 
-Arch Linux: `nspa/pkg/JackBus` contains a PKGBUILD that replaces `jack2`
+Arch Linux: `nspa/pkg/jackbus` contains a PKGBUILD that replaces `jack2`
 and `jack2-dbus` (it provides `jack2=1.9.22`, so `lib32-jack2` stays
 installable):
 
 ```sh
-cd nspa/pkg/JackBus
+cd nspa/pkg/jackbus
 makepkg -si                 # or NSPA_REPO=/path/to/clone makepkg -si
 jack_control exit           # end the old jackdbus; D-Bus starts the new one
 ```
