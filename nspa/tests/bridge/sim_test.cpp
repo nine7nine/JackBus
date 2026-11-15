@@ -37,20 +37,23 @@ struct Scenario
     double wake;        // s, I/O thread wakeup lateness (uniform 0..wake)
     double xrun_at;     // s, the card loses `xrun_frames` here (0: never)
     int xrun_frames;
+    double pause_at;    // s, the card side stops here for pause_len s, then restarts (unplug, replug)
+    double pause_len;
     double seconds;
     int channels;
 };
 
 static const Scenario kScenarios[] = {
-    // name                 master  card    n    upd   ppm    step  at   jitter  wake    xrun  frames secs ch
-    { "hda-like +50ppm",    48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 120, 2 },
-    { "u44-like -120ppm",   48000, 48000, 128,  64, -120.0,  0.0,  0, 30e-6, 100e-6,   0,   0, 120, 4 },
-    { "headset-like +300",  48000, 48000, 256,  48,  300.0,  0.0,  0, 150e-6, 300e-6,  0,   0, 120, 2 },
-    { "small period 64",    48000, 48000,  64,  48,   80.0,  0.0,  0, 50e-6, 100e-6,   0,   0, 120, 2 },
-    { "drift step +30",     48000, 48000, 256, 256,   50.0, 30.0, 60, 20e-6,  50e-6,   0,   0, 120, 2 },
-    { "card xrun",          48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,  40, 512, 120, 2 },
-    { "44.1k card",         48000, 44100, 256, 220,   40.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 120, 2 },
-    { "16k mic",            48000, 16000, 256,  16,  200.0,  0.0,  0, 150e-6, 300e-6,  0,   0, 120, 1 },
+    // name                 master  card    n    upd   ppm    step  at   jitter  wake    xrun  frames pause len secs ch
+    { "hda-like +50ppm",    48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 0, 0, 120, 2 },
+    { "u44-like -120ppm",   48000, 48000, 128,  64, -120.0,  0.0,  0, 30e-6, 100e-6,   0,   0, 0, 0, 120, 4 },
+    { "headset-like +300",  48000, 48000, 256,  48,  300.0,  0.0,  0, 150e-6, 300e-6,  0,   0, 0, 0, 120, 2 },
+    { "small period 64",    48000, 48000,  64,  48,   80.0,  0.0,  0, 50e-6, 100e-6,   0,   0, 0, 0, 120, 2 },
+    { "drift step +30",     48000, 48000, 256, 256,   50.0, 30.0, 60, 20e-6,  50e-6,   0,   0, 0, 0, 120, 2 },
+    { "card xrun",          48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,  40, 512, 0, 0, 120, 2 },
+    { "44.1k card",         48000, 44100, 256, 220,   40.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 0, 0, 120, 2 },
+    { "card gone 2 s",      48000, 48000, 256, 256,   50.0,  0.0,  0, 20e-6,  50e-6,   0,   0, 40, 2.0, 120, 2 },
+    { "16k mic",            48000, 16000, 256,  16,  200.0,  0.0,  0, 150e-6, 300e-6,  0,   0, 0, 0, 120, 1 },
 };
 
 static double urand(unsigned* s)
@@ -69,7 +72,7 @@ struct Result
     double snr_play_db;     // playback path audio
     double wander_cap;      // frames, the spread of the capture path's phase
     double wander_play;
-    long long underruns, resyncs;
+    long long underruns, resyncs, lost;
 };
 
 // Least squares fits of a sin + b cos over short windows (0.1 s): the SNR per window shows the
@@ -159,7 +162,7 @@ static Result Run(const Scenario& sc, bool verbose)
     double t_origin = 0.0123;               // the card started a little after the master
     double p_origin = 0.0;
     double rate = sc.card_rate * (1.0 + ppm * 1e-6);
-    bool stepped = false, xrun_done = false;
+    bool stepped = false, xrun_done = false, paused = false;
     auto t_of = [&](double p) { return t_origin + (p - p_origin) / rate; };
 
     unsigned seed = 12345;
@@ -187,6 +190,21 @@ static Result Run(const Scenario& sc, bool verbose)
         // card position updates (kernel) and I/O wakeups happen before the next master cycle
         while (next_update_t < next_cycle) {
             const double t_upd = next_update_t;
+            if (sc.pause_len > 0 && t_upd >= sc.pause_at && t_upd < sc.pause_at + sc.pause_len) {
+                // the card side is gone: nothing read, nothing written, no positions
+                upd_pos += sc.update;
+                next_update_t = t_of(double(upd_pos + sc.update));
+                paused = true;
+                continue;
+            }
+            if (paused) {
+                // back: a new card start, at the position it is at now
+                paused = false;
+                cap_read = upd_pos;
+                ccap.Start(cap_read);
+                cplay.Start();
+                play_written = upd_pos;
+            }
             upd_pos += sc.update;
             const double stamp = t_upd + urand(&seed) * sc.jitter;
             const double woke = stamp + urand(&seed) * sc.wake;
@@ -301,6 +319,7 @@ static Result Run(const Scenario& sc, bool verbose)
     FitWindows(play_t, play_x, f_sig, sc.card_rate, &r.snr_play_db, &r.wander_play);
     r.underruns = cap.Stats().fUnderruns + play.Stats().fUnderruns;
     r.resyncs = cap.Stats().fResyncs + play.Stats().fResyncs;
+    r.lost = cap.Stats().fLost + play.Stats().fLost;
     return r;
 }
 
@@ -325,7 +344,14 @@ int main(int argc, char** argv)
                r.underruns, r.resyncs);
         // steady scenarios: tight; transients (a drift step, a card xrun): no underrun, the
         // delay stays well inside the margin, and only the card's own restarts resync
-        const bool xrun = sc.xrun_at > 0;
+        const bool xrun = sc.xrun_at > 0 || sc.pause_len > 0;
+        if (sc.pause_len > 0) {
+            printf("  lost %lld (one per direction expected)\n", r.lost);
+            if (r.lost != 2 || r.resyncs > 8) {
+                printf("  ^ FAIL (lost/resync churn)\n");
+                fail = 1;
+            }
+        }
         const bool transient = xrun || sc.ppm_step != 0.0;
         const bool bad = r.lock_s < 0 || r.lock_s > 5.0 || (!xrun && r.underruns > 0)
             || (!transient && r.err_sigma > 0.1) || r.err_max > 8.0 || (!xrun && r.resyncs > 0);

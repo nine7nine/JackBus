@@ -220,6 +220,7 @@ struct JackBridgeStats
     int64_t fBadClock;      // cycles the card's clock model was not believable
     int64_t fUnderruns;     // cycles the card side could not feed (capture) or take (playback)
     int64_t fResyncs;
+    int64_t fLost;          // times the card side stopped
     int fState;
 };
 

@@ -64,7 +64,7 @@ bool JackBridgeAnchor::Get(uint32_t* epoch, int64_t* index, int64_t* pos) const
 //---------------------
 
 JackBridgeDirection::JackBridgeDirection()
-    : fHaveLast(false), fEpoch(0), fState(kBridgeIdle), fStateCycles(0), fTarget(0.0),
+    : fHaveLast(false), fEpoch(0), fState(kBridgeIdle), fStateCycles(0), fFadeIn(0), fTarget(0.0),
       fRatio(1.0), fBase(0)
 {
     memset(&fStats, 0, sizeof(fStats));
@@ -126,6 +126,40 @@ double JackBridgeDirection::CardPeriod(const JackBridgeClockState& cs)
     }
     fStats.fBadClock++;
     return nominal;
+}
+
+static const int kFade = 240;   // 5 ms at 48 kHz: no click where audio starts or stops
+
+bool JackBridgeDirection::Stale(const JackBridgeClockState& cs, int64_t t_ns) const
+{
+    // the card side feeds the clock at every update of the card's position: a clock that has
+    // not moved for 8 card periods (100 ms at least) means the card side stopped
+    double limit = 8.0 * fParams.fCardPeriod * 1e9 / fParams.fCardRate;
+    if (limit < 100e6) {
+        limit = 100e6;
+    }
+    return double(t_ns - cs.fTimeRef) > limit;
+}
+
+void JackBridgeDirection::Placed()
+{
+    fFadeIn = kFade;
+}
+
+void JackBridgeDirection::FadeIn(float* const* buf, int channels, int offset, int n)
+{
+    if (fFadeIn <= 0) {
+        return;
+    }
+    const int k = (n < fFadeIn) ? n : fFadeIn;
+    const int done = kFade - fFadeIn;
+    for (int c = 0; c < channels; c++) {
+        float* b = buf[c] + offset;
+        for (int i = 0; i < k; i++) {
+            b[i] *= float(done + i) / float(kFade);
+        }
+    }
+    fFadeIn -= k;
 }
 
 void JackBridgeDirection::Schedule()
@@ -242,6 +276,7 @@ bool JackBridgeCapture::Place(const JackBridgeClockState& cs, double p, uint32_t
     fControl.SetBandwidth(fParams.fAcquireBandwidth);
     fState = kBridgeAcquire;
     fStateCycles = 0;
+    Placed();
     return true;
 }
 
@@ -265,6 +300,22 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
         Silence(out, fParams.fChannels, n);
         return;     // the card side is between epochs: next cycle
     }
+    if (Stale(cs, t_ns)) {
+        // the card side stopped (unplugged, or stopped): quiet, no placing every cycle; back
+        // to placing when its clock moves again
+        if (fState != kBridgeLost && fState != kBridgeIdle) {
+            fStats.fLost++;
+        }
+        fState = kBridgeLost;
+        fStats.fState = fState;
+        fPendingLate = 0.0;     // it went away: that was not lateness
+        Silence(out, fParams.fChannels, n);
+        return;
+    }
+    if (fState == kBridgeLost) {
+        fState = kBridgeStarting;
+    }
+
     const double p = cs.Predict(t_ns);
     // how late the card side's frames are: the card's position now, minus the newest frame in
     fLateNow = p - double(pos + (fFifo.Written() - index));
@@ -298,10 +349,25 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
         fState = kBridgeStarting;
     }
     if (epoch != fEpoch) {
-        // the card restarted (an xrun): place again, with what was learned
+        // the card restarted (an xrun, a replug): place again, with what was learned
         fStats.fResyncs++;
         fEpoch = epoch;
         fState = kBridgeStarting;
+        fPendingLate = 0.0;
+    }
+    if (fState == kBridgeStarting && fPendingLate > 0.0) {
+        // After an underrun: wait for the card to show it is running (a card period more in),
+        // then its frames really came that late, and the delay covers it. If it went away
+        // instead, the lost state (or its restart, a new epoch) drops this.
+        if (fFifo.Written() < fPendingWritten + fParams.fCardPeriod) {
+            Silence(out, fParams.fChannels, n);
+            return;
+        }
+        if (fPendingLate > fLate) {
+            fLate = fPendingLate;
+            SetTarget(n);
+        }
+        fPendingLate = 0.0;
     }
 
     if (fState == kBridgeStarting && !Place(cs, p, epoch, index, pos)) {
@@ -315,20 +381,28 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
     const double ratio = (master_ns_per_frame / CardPeriod(cs)) * (1.0 + corr);
 
     if (Feed(fResampler.NeededFor(n, ratio), epoch, index, pos) < 0 || fResampler.Pull(out, n, ratio) != n) {
-        // The card side's frames came later than the delay covers: cover this lateness too
-        // (a quarter more), up to the limit, and place again
-        Silence(out, fParams.fChannels, n);
+        // The card side's frames came later than the delay covers: make what can be made from
+        // the frames in and fade it out (no click), then silence; cover this lateness too (a
+        // quarter more), up to the limit, and place again
+        int made = fResampler.PullAvailable(out, n, ratio);
+        if (made < 0) {
+            made = 0;
+        }
+        for (int c = 0; c < fParams.fChannels; c++) {
+            for (int i = 0; i < made; i++) {
+                out[c][i] *= float(made - i) / float(made + 1);
+            }
+            memset(out[c] + made, 0, (n - made) * sizeof(float));
+        }
         fStats.fUnderruns++;
         fStats.fResyncs++;
-        const double late = (fLateNow > fLate ? fLateNow : fLate) * 1.25;
-        if (late > fLate) {
-            fLate = late;
-        }
-        SetTarget(n);
+        fPendingLate = (fLateNow > fLate ? fLateNow : fLate) * 1.25;
+        fPendingWritten = fFifo.Written();
         fState = kBridgeStarting;
         return;
     }
 
+    FadeIn(out, fParams.fChannels, 0, n);
     fRatio = ratio;
     fStats.fDelay = delay;
     fStats.fError = error;
@@ -357,6 +431,18 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
     if (!cs.fValid) {
         return;
     }
+    if (Stale(cs, t_ns)) {
+        // the card side stopped: this cycle's frames go nowhere, no placing every cycle
+        if (fState != kBridgeLost && fState != kBridgeIdle) {
+            fStats.fLost++;
+        }
+        fState = kBridgeLost;
+        fStats.fState = fState;
+        return;
+    }
+    if (fState == kBridgeLost) {
+        fState = kBridgeStarting;
+    }
     if (fState == kBridgeIdle || cs.fEpoch != fEpoch) {
         if (fState != kBridgeIdle) {
             fStats.fResyncs++;
@@ -381,6 +467,7 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
         fAnchor.Set(fEpoch, fFifo.Written(), fBase);    // FIFO frame Written() plays at fBase
         fState = kBridgeAcquire;
         fStateCycles = 0;
+        Placed();
     }
 
     // the card position that will play this cycle's first frame (master position Pushed()),
@@ -412,6 +499,7 @@ void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, 
         done += k;
         int made;
         while ((made = fResampler.PullAvailable(chunk, kChunk, ratio)) > 0) {
+            FadeIn(chunk, fParams.fChannels, 0, made);
             if (fFifo.Write(chunk, made) < made) {
                 overflow = true;
             }

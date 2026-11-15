@@ -31,7 +31,8 @@ enum JackBridgeState {
     kBridgeLearning,       // measuring how late the card side's frames come (capture)
     kBridgeStarting,       // about to place the delay (pointer jump)
     kBridgeAcquire,        // wide loop, just placed
-    kBridgeLocked          // narrow loop
+    kBridgeLocked,         // narrow loop
+    kBridgeLost            // the card side stopped (unplugged, stopped): quiet until it moves again
 };
 
 struct JackBridgeParams
@@ -121,6 +122,12 @@ class JackBridgeDirection
         uint32_t fEpoch;
         int fState;
         int64_t fStateCycles;      // cycles in the current state
+        int fFadeIn;               // frames of fade-in left (after each placement)
+
+        // the card's clock has not moved for a while: the card side stopped
+        bool Stale(const JackBridgeClockState& cs, int64_t t_ns) const;
+        void Placed();             // a placement: fade in from here
+        void FadeIn(float* const* buf, int channels, int offset, int n);
         double fTarget;            // card frames
         double fRatio;             // last target ratio
         int64_t fBase;             // card position of the resampler's input 0 (capture)
@@ -150,6 +157,9 @@ class JackBridgeCapture : public JackBridgeDirection
         double fLateMin = 0.0;     // while learning: the least and most lateness seen
         double fLateMax = 0.0;
         double fLateNow = 0.0;     // this cycle's lateness
+        double fPendingLate = 0.0; // an underrun's lateness, applied once the card has shown it
+                                   // kept running (not if it went away or restarted)
+        int64_t fPendingWritten = 0;   // the FIFO's frames written at that underrun
         int64_t fLearnCycles = 0;
 };
 
