@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
+#include <dlfcn.h>
 
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/latency-utils.h>
@@ -567,6 +568,38 @@ static void log_forced_settings(struct pw_filter *f)
 			f->flags & PW_FILTER_FLAG_RT_PROCESS ? "" : " (process still runs in the JACK thread)");
 }
 
+/*
+ * The JackBus socket when the server has one (its fds: no /dev/shm names, no
+ * shm registry), else protocol 9. JACKBUS_PW_TRANSPORT=p9 forces protocol 9,
+ * =bus forbids the fallback. jackbus_client_open is looked up at run time, so
+ * the shim also runs with a libjack that doesn't have it.
+ */
+typedef jack_client_t *(*bus_open_t)(const char *, jack_options_t, jack_status_t *, unsigned int, ...);
+
+static jack_client_t *shim_jack_open(const char *name, jack_status_t *status)
+{
+	const char *mode = getenv("JACKBUS_PW_TRANSPORT");
+	jack_client_t *c = NULL;
+
+	if (mode == NULL || strcmp(mode, "p9") != 0) {
+		bus_open_t bus_open = (bus_open_t)dlsym(RTLD_DEFAULT, "jackbus_client_open");
+		if (bus_open)
+			c = bus_open(name, JackNoStartServer, status, 0);
+		if (c) {
+			shim_log("%s: opened over the JackBus socket", name);
+			return c;
+		}
+		if (mode && strcmp(mode, "bus") == 0) {
+			shim_warn("%s: no JackBus socket%s", name, bus_open ? "" : " in this libjack");
+			return NULL;
+		}
+	}
+	c = jack_client_open(name, JackNoStartServer, status);
+	if (c)
+		shim_log("%s: opened over protocol 9", name);
+	return c;
+}
+
 static const char *jack_client_name(struct pw_filter *f)
 {
 	const char *n;
@@ -589,7 +622,7 @@ SHIM_EXPORT int pw_filter_connect(struct pw_filter *f, enum pw_filter_flags flag
 	parse_node_params(f, params, n_params);
 	set_state(f, PW_FILTER_STATE_CONNECTING, 0, NULL);
 
-	f->client = jack_client_open(jack_client_name(f), JackNoStartServer, &status);
+	f->client = shim_jack_open(jack_client_name(f), &status);
 	if (f->client == NULL) {
 		set_state(f, PW_FILTER_STATE_ERROR, -EIO, "can't connect to the JACK server");
 		return -EIO;

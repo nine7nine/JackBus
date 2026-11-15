@@ -32,7 +32,7 @@ fail=0
 server_pid=
 
 start_server() {  # rate period
-    "$JACK_BUILD/jackd" -n jbpw -R -P 70 -d dummy -r "$1" -p "$2" >"$logs/jackd-$1-$2.log" 2>&1 &
+    "$JACK_BUILD/jackd" -v -n jbpw -R -P 70 -d dummy -r "$1" -p "$2" >"$logs/jackd-$1-$2.log" 2>&1 &
     server_pid=$!
     i=0
     while [ $i -lt 50 ]; do
@@ -75,7 +75,7 @@ run_config() {  # rate period
     threads=$(cat /proc/$app/task/*/comm 2>/dev/null | tr '\n' ',' | sed 's/,$//')
     kill -INT "$app"
     wait "$app"; app_rc=$?
-    grep -E 'asked for|forced to|process latency' "$logs/example-$rate.log" | sed 's/^/  /'
+    grep -E 'asked for|forced to|process latency|opened over' "$logs/example-$rate.log" | sed 's/^/  /'
     echo "  example maps: $maps"
     echo "  example threads: $threads"
     sed 's/^/  /' "$logs/check-$rate.log"
@@ -92,6 +92,15 @@ run_config() {  # rate period
     sed 's/^/  /' "$logs/probe-$rate.log"
     echo "$res pw-probe at $rate/$period"
 
+    # with a libjack that has it, the shim's clients open over the JackBus socket
+    if nm -D "$JACK_BUILD/common/libjack.so" 2>/dev/null | grep -q ' T jackbus_client_open'; then
+        opens=$(grep -c 'BusClientOpen ref' "$logs/jackd-$rate-$period.log")
+        if [ "$opens" -ge 2 ] && grep -q 'opened over the JackBus socket' "$logs/example-$rate.log"; then
+            echo "PASS JackBus socket: the PipeWire apps' clients opened over it ($opens opens)"
+        else
+            echo "FAIL JackBus socket: $opens opens"; fail=1
+        fi
+    fi
     stop_pid "$server_pid" || { echo "FAIL: server did not exit on SIGTERM"; fail=1; }
 }
 
