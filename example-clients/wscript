@@ -1,0 +1,20 @@
+#! /usr/bin/python3
+# encoding: utf-8
+
+# Example clients of the JackBus API (jack/jackbus.h). The JACK examples
+# themselves live in jack-example-tools.
+
+example_programs = {
+    'jackbus_simple': ['jackbus_simple.c'],
+    }
+
+
+def build(bld):
+    for name, sources in list(example_programs.items()):
+        prog = bld(features='c cprogram')
+        prog.includes = ['..', '../linux', '../posix', '../common/jack', '../common']
+        prog.source = sources
+        prog.use = 'clientlib'
+        prog.uselib = 'M'
+        prog.lib = ['m']
+        prog.target = name

@@ -875,6 +875,8 @@ def build(bld):
     if bld.env['IS_LINUX'] or bld.env['IS_FREEBSD']:
         bld.recurse('man')
         bld.recurse('systemd')
+    if bld.env['IS_LINUX']:
+        bld.recurse('example-clients')
     if not bld.env['IS_WINDOWS'] and bld.env['BUILD_TESTS']:
         bld.recurse('tests')
     if bld.env['BUILD_JACKDBUS']:
