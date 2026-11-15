@@ -55,6 +55,8 @@ class JackClientSocket : public detail::JackClientRequestInterface
         JackClientSocket(int socket);
 
         int Connect(const char* dir, const char* name, int which);
+        // JackBus socket: connect to a full path (JackBusSocketPath)
+        int ConnectPath(const char* path);
         int Close();
         int Read(void* data, int len);
         int Write(void* data, int len);
@@ -95,6 +97,9 @@ class JackServerSocket
         {}
 
         int Bind(const char* dir, const char* name, int which);
+        // JackBus socket: bind a full path; only a stale socket of this user
+        // there is replaced (anything else at that path: an error)
+        int BindPath(const char* path);
         JackClientSocket* Accept();
         int Close();
         int GetFd()
@@ -102,6 +107,16 @@ class JackServerSocket
             return fSocket;
         }
 };
+
+/*!
+\brief The JackBus socket's path: $XDG_RUNTIME_DIR/jackbus/<server>.
+
+ The directory is the user's own, mode 0700 (created if create is true). Returns
+ 0 and the path in res, or -1: no XDG_RUNTIME_DIR, a directory that is not the
+ user's or is open to others, or a path too long. Without it, the JackBus socket
+ simply doesn't exist; the protocol-9 socket is not affected.
+*/
+int JackBusSocketPath(const char* server_name, char* res, int size, bool create);
 
 } // end of namespace
 

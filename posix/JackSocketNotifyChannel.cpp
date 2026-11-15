@@ -26,6 +26,11 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <errno.h>
 #include <poll.h>
 #include <string.h>
+#include <unistd.h>
+#ifdef __linux__
+#include "JackLinuxFutex.h"
+#include "JackFdPassing.h"
+#endif
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #ifdef __linux__
@@ -58,9 +63,11 @@ static const char* NotificationName(int notify)
 
 JackSocketNotifyChannel::JackSocketNotifyChannel()
     : fSendBuffer(0), fLagging(false), fPendingReplies(0), fBacklog(new std::deque<JackClientNotification>()),
-      fDelivered(0), fDropped(0), fLagSince(0), fReported(false), fLastSlowReport(0), fClosed(false)
+      fDelivered(0), fDropped(0), fLagSince(0), fReported(false), fLastSlowReport(0), fClosed(false),
+      fBus(false)
 {
     memset(fName, 0, sizeof(fName));
+    memset(fServerName, 0, sizeof(fServerName));
 }
 
 JackSocketNotifyChannel::~JackSocketNotifyChannel()
@@ -85,6 +92,24 @@ int JackSocketNotifyChannel::Open(const char* name)
     strncpy(fName, name, sizeof(fName) - 1);
     socklen_t len = sizeof(fSendBuffer);
     if (getsockopt(fNotifySocket.GetFd(), SOL_SOCKET, SO_SNDBUF, &fSendBuffer, &len) < 0) {
+        fSendBuffer = 0;
+    }
+    return 0;
+}
+
+int JackSocketNotifyChannel::OpenFd(int fd, const char* name, const char* server_name)
+{
+    jack_log("JackSocketNotifyChannel::OpenFd name = %s fd = %d", name, fd);
+    if (fd < 0) {
+        return -1;
+    }
+    fNotifySocket = JackClientSocket(fd);
+    fNotifySocket.SetReadTimeOut(SOCKET_TIME_OUT);
+    strncpy(fName, name, sizeof(fName) - 1);
+    strncpy(fServerName, server_name, sizeof(fServerName) - 1);
+    fBus = true;
+    socklen_t len = sizeof(fSendBuffer);
+    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &fSendBuffer, &len) < 0) {
         fSendBuffer = 0;
     }
     return 0;
@@ -160,7 +185,24 @@ bool JackSocketNotifyChannel::WaitReadable(long usec)
 
 int JackSocketNotifyChannel::Send(JackClientNotification& event)
 {
-    return event.Write(&fNotifySocket);
+    int res = event.Write(&fNotifySocket);
+#ifdef __linux__
+    if (res == 0 && fBus && event.fNotify == kAddClient) {
+        /*
+         A JackBus client gets the new peer's futex file with the notification. It is
+         opened by name now, as a libjack opens it on receipt: for a notification sent
+         late (lagging client) whose client is gone by then, there is no file, no fd,
+         and the client's connect fails, as a libjack's would.
+         */
+        JackLinuxFutex futex;
+        int fd = futex.OpenNamedFd(event.fName, fServerName);
+        res = JackSendFds(fNotifySocket.GetFd(), &fd, (fd >= 0) ? 1 : 0);
+        if (fd >= 0) {
+            close(fd);
+        }
+    }
+#endif
+    return res;
 }
 
 // Replies owed for notifications that were not answered in time: read and drop the

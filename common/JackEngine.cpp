@@ -45,6 +45,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackChannel.h"
 #include "JackError.h"
 #include "JackAtomic.h"
+#include "JackRequest.h"
 
 extern const char* JACK_METADATA_HARDWARE;
 extern const char* JACK_METADATA_PRETTY_NAME;
@@ -986,7 +987,7 @@ int JackEngine::GetClientRefNum(const char* name)
 }
 
 // Used for external clients
-int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, int* ref, int* shared_engine, int* shared_client, int* shared_graph_manager)
+int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, int* ref, int* shared_engine, int* shared_client, int* shared_graph_manager, int notify_fd)
 {
     char real_name[JACK_CLIENT_NAME_SIZE + 1];
 
@@ -1009,6 +1010,9 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
     int refnum = AllocateRefnum();
     if (refnum < 0) {
         jack_error("No more refnum available");
+        if (notify_fd >= 0) {
+            close(notify_fd);
+        }
         return -1;
     }
 
@@ -1024,10 +1028,14 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
 
     if (!fSynchroTable[refnum].Allocate(real_name, fEngineControl->fServerName, 0)) {
         jack_error("Cannot allocate synchro");
+        if (notify_fd >= 0) {
+            close(notify_fd);   // the client did not take it yet
+        }
         goto error;
     }
 
-    if (client->Open(real_name, pid, refnum, uuid, shared_client) < 0) {
+    // From here the client owns notify_fd (its channel closes it)
+    if (client->Open(real_name, pid, refnum, uuid, shared_client, notify_fd, fEngineControl->fServerName) < 0) {
         jack_error("Cannot open client");
         goto error;
     }
@@ -1061,6 +1069,36 @@ error:
     client->Close();
     delete client;
     return -1;
+}
+
+int JackEngine::ClientBusFds(int refnum, int* fds)
+{
+#ifdef __linux__
+    if (refnum < 0 || refnum >= CLIENT_NUM || !fClientTable[refnum]) {
+        return -1;
+    }
+    JackClientControl* control = fClientTable[refnum]->GetClientControl();
+    fds[kBusFdEngine] = jack_shm_open_fd(fEngineControl->GetShmIndex());
+    fds[kBusFdGraph] = jack_shm_open_fd(fGraphManager->GetShmIndex());
+    fds[kBusFdClient] = control ? jack_shm_open_fd(control->GetShmIndex()) : -1;
+    fds[kBusFdFutex] = fSynchroTable[refnum].DupFd();
+    fds[kBusFdAlive] = fAliveTable.OpenFd();
+    for (int i = 0; i < kBusOpenFds; i++) {
+        if (fds[i] < 0) {
+            jack_error("JackEngine::ClientBusFds: cannot open fd %d for client %d (%s)", i, refnum, strerror(errno));
+            for (int k = 0; k < kBusOpenFds; k++) {
+                if (fds[k] >= 0) {
+                    close(fds[k]);
+                }
+                fds[k] = -1;
+            }
+            return -1;
+        }
+    }
+    return kBusOpenFds;
+#else
+    return -1;
+#endif
 }
 
 // Used for server driver clients

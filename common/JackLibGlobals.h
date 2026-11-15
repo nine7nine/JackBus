@@ -35,6 +35,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <signal.h>
 
 #ifdef WIN32
@@ -132,6 +133,28 @@ struct JackLibGlobals
             // tests: behave as a libjack without slots
             if (getenv("JACK_NO_ALIVE_SLOT") == NULL) {
                 fAliveTable.Connect(server_name);
+            }
+        }
+        if (!fAliveTable.IsMapped() || strcmp(fAliveServer, server_name) != 0) {
+            return NULL;
+        }
+        return &fAliveTable;
+    }
+
+    // The same for a JackBus socket client, from the fd it received (owned from
+    // here on): mapped once per process, like the named one
+    JackAliveTable* AliveTableFd(const char* server_name, int fd)
+    {
+        if (!fAliveTried) {
+            fAliveTried = true;
+            strncpy(fAliveServer, server_name, JACK_SERVER_NAME_SIZE);
+            fAliveServer[JACK_SERVER_NAME_SIZE] = 0;
+            fAliveTable.ConnectFd(fd);
+        } else if (fd >= 0) {
+            if (!fAliveTable.IsMapped() && strcmp(fAliveServer, server_name) == 0) {
+                fAliveTable.ConnectFd(fd);
+            } else {
+                close(fd);
             }
         }
         if (!fAliveTable.IsMapped() || strcmp(fAliveServer, server_name) != 0) {

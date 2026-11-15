@@ -55,7 +55,14 @@ class JackRequestDecoder
         JackRequestDecoder(JackServer* server, JackClientHandlerInterface* handler);
         virtual ~JackRequestDecoder();
 
-        int HandleRequest(detail::JackChannelTransactionInterface* socket, int type);
+        /*
+         owner: -1 for the protocol-9 socket (nothing checked, as always). For a
+         JackBus socket client, its refnum: a request on behalf of another client is
+         refused (answered with -1, so the stream stays in step), and one that can't
+         be answered (no result, or the server's own kNotification) returns -2: the
+         caller drops the client.
+         */
+        int HandleRequest(detail::JackChannelTransactionInterface* socket, int type, int owner = -1);
 };
 
 } // end of namespace

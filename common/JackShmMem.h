@@ -27,6 +27,11 @@
 #include <new>  // GCC 4.0
 #include <errno.h>
 #include <stdlib.h>
+#ifdef __linux__
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "JackShmMem_os.h"
 
@@ -100,6 +105,41 @@ class SERVER_EXPORT JackShmMem : public JackShmMemAble
 		void operator delete(void* p);
 
 };
+
+#ifdef __linux__
+/*
+ JackBus socket clients: map a segment received as an fd instead of opening it
+ by name through the registry (no registry, no SysV lock, no /dev/shm needed).
+ index is the server's registry index, kept only so that clients of the
+ protocol-9 socket in the same process see the segment as attached. Takes
+ ownership of fd. Returns 1 if mapped, 0 if this pointer already had that
+ segment (another client of the process), -1 on error.
+ */
+static inline int JackShmMapFd(jack_shm_info_t* info, int fd, int index)
+{
+    if (fd < 0) {
+        return -1;
+    }
+    if (info->index >= 0) {
+        close(fd);
+        return (info->index == index) ? 0 : -1;
+    }
+    struct stat st;
+    if (fstat(fd, &st) < 0 || st.st_size <= 0 || (uint64_t)st.st_size > UINT32_MAX) {
+        close(fd);
+        return -1;
+    }
+    void* ptr = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (ptr == MAP_FAILED) {
+        return -1;
+    }
+    info->index = index;
+    info->size = (uint32_t)st.st_size;
+    info->ptr.attached_at = ptr;
+    return 1;
+}
+#endif
 
 /*!
 \brief Pointer on shared memory segment in the client side.
@@ -178,6 +218,18 @@ class JackShmReadWritePtr
         {
             Init(index, server_name);
         }
+#ifdef __linux__
+        // JackBus: the segment from an fd (see JackShmMapFd). false on error.
+        bool SetShmFd(int fd, int index)
+        {
+            int res = JackShmMapFd(&fInfo, fd, index);
+            if (res > 0) {
+                GetShmAddress()->LockMemory();
+                fInitDone = true;
+            }
+            return res >= 0;
+        }
+#endif
 
         int GetShmIndex()
         {
@@ -276,6 +328,18 @@ class JackShmReadWritePtr1
         {
             Init(index, server_name);
         }
+#ifdef __linux__
+        // JackBus: the segment from an fd (see JackShmMapFd). false on error.
+        bool SetShmFd(int fd, int index)
+        {
+            int res = JackShmMapFd(&fInfo, fd, index);
+            if (res > 0) {
+                GetShmAddress()->LockMemory();
+                fInitDone = true;
+            }
+            return res >= 0;
+        }
+#endif
 
         int GetShmIndex()
         {

@@ -729,6 +729,24 @@ jack_attach_lib_shm_read (jack_shm_info_t* si)
 }
 
 #ifdef USE_POSIX_SHM
+int
+jack_shm_open_fd (jack_shm_registry_index_t index)
+{
+	if (jack_shm_registry == NULL || index < 0 || index >= MAX_SHM_ID
+	    || jack_shm_registry[index].allocator != GetPID()) {
+		return -1;
+	}
+	return shm_open (jack_shm_registry[index].id, O_RDWR | O_CLOEXEC, 0);
+}
+#else
+int
+jack_shm_open_fd (jack_shm_registry_index_t index)
+{
+	return -1;
+}
+#endif
+
+#ifdef USE_POSIX_SHM
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  * POSIX interface-dependent functions

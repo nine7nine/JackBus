@@ -48,6 +48,9 @@ class JackExternalClient : public JackClientInterface
         virtual ~JackExternalClient();
 
         int Open(const char* name, int pid, int refnum, jack_uuid_t uuid, int* shared_client);
+        // A JackBus socket client: its notification socket is notify_fd (owned from now on)
+        int Open(const char* name, int pid, int refnum, jack_uuid_t uuid, int* shared_client,
+                 int notify_fd, const char* server_name);
         int Close();
 
         int ClientNotify(int refnum, const char* name, int notify, int sync, const char* message, int value1, int value2);

@@ -27,7 +27,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <syscall.h>
+#include <unistd.h>
 #include <linux/futex.h>
 
 #if !defined(SYS_futex) && defined(SYS_futex_time64)
@@ -262,6 +264,56 @@ bool JackLinuxFutex::Connect(const char* name, const char* server_name)
 
     fFutex = futex;
     return true;
+}
+
+bool JackLinuxFutex::ConnectFd(int fd)
+{
+    if (fFutex) {
+        // another client of this process connected it already (shared table):
+        // as Connect() by name, true whether or not an fd came
+        if (fd >= 0) {
+            close(fd);
+        }
+        return true;
+    }
+    if (fd < 0) {
+        return false;
+    }
+
+    struct stat st;
+    if (fstat(fd, &st) < 0 || st.st_size < (off_t)sizeof(FutexData)) {
+        jack_error("ConnectFd: not a futex file (fd %d)", fd);
+        close(fd);
+        return false;
+    }
+
+    FutexData* futex = (FutexData*)mmap(NULL, sizeof(FutexData), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_LOCKED, fd, 0);
+    if (futex == NULL || futex == MAP_FAILED) {
+        jack_error("ConnectFd: can't map futex fd %d err = %s", fd, strerror(errno));
+        close(fd);
+        return false;
+    }
+
+    snprintf(fName, sizeof(fName), "(fd %d)", fd);
+    fSharedMem = fd;
+    fFutex = futex;
+    return true;
+}
+
+int JackLinuxFutex::DupFd() const
+{
+    return (fSharedMem >= 0) ? fcntl(fSharedMem, F_DUPFD_CLOEXEC, 0) : -1;
+}
+
+int JackLinuxFutex::OpenNamedFd(const char* name, const char* server_name)
+{
+    char path[SYNC_MAX_NAME_SIZE];
+    BuildName(name, server_name, path, sizeof(path));
+    int fd = shm_open(path, O_RDWR | O_CLOEXEC, 0);
+    if (fd < 0) {
+        jack_log("JackLinuxFutex::OpenNamedFd %s: %s", path, strerror(errno));
+    }
+    return fd;
 }
 
 bool JackLinuxFutex::ConnectInput(const char* name, const char* server_name)

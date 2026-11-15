@@ -35,6 +35,20 @@ namespace Jack
 #define CheckWriteRefNum(error, socket) { if (res.Write(socket) < 0) { jack_error("%s write error ref = %d", error, req.fRefNum); } }
 #define CheckWrite(error, socket)       { if (res.Write(socket) < 0) { jack_error("%s write error", error); } }
 
+// A JackBus socket client acts for itself only (see HandleRequest)
+#define CheckOwner(req, socket) \
+    if (owner >= 0 && req.fRefNum != owner) { \
+        jack_error("JackBus socket: request %d on behalf of client %d refused (sent by client %d)", type_aux, req.fRefNum, owner); \
+        res.fResult = -1; \
+        CheckWrite("JackRequest refused", socket); \
+        break; \
+    }
+#define CheckOwnerOrDrop(req) \
+    if (owner >= 0 && req.fRefNum != owner) { \
+        jack_error("JackBus socket: request %d on behalf of client %d refused (sent by client %d)", type_aux, req.fRefNum, owner); \
+        return -2; \
+    }
+
 JackRequestDecoder::JackRequestDecoder(JackServer* server, JackClientHandlerInterface* handler)
     :fServer(server), fHandler(handler)
 {}
@@ -42,7 +56,7 @@ JackRequestDecoder::JackRequestDecoder(JackServer* server, JackClientHandlerInte
 JackRequestDecoder::~JackRequestDecoder()
 {}
 
-int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* socket, int type_aux)
+int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* socket, int type_aux, int owner)
 {
     JackRequest::RequestType type = (JackRequest::RequestType)type_aux;
 
@@ -80,6 +94,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackClientCloseRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->ClientExternalClose(req.fRefNum);
             CheckWriteRefNum("JackRequest::ClientClose", socket);
             fHandler->ClientRemove(socket, req.fRefNum);
@@ -92,6 +107,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackResult res;
             jack_log("JackRequest::ActivateClient");
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->ClientActivate(req.fRefNum, req.fIsRealTime, fServer->IsRunning());
             CheckWriteRefNum("JackRequest::ActivateClient", socket);
             break;
@@ -102,6 +118,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackDeactivateRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->ClientDeactivate(req.fRefNum, fServer->IsRunning());
             CheckWriteRefNum("JackRequest::DeactivateClient", socket);
             break;
@@ -112,6 +129,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackPortRegisterRequest req;
             JackPortRegisterResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->PortRegister(req.fRefNum, req.fName, req.fPortType, req.fFlags, req.fBufferSize, &res.fPortIndex);
             CheckWriteRefNum("JackRequest::RegisterPort", socket);
             break;
@@ -122,6 +140,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackPortUnRegisterRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->PortUnRegister(req.fRefNum, req.fPortIndex);
             CheckWriteRefNum("JackRequest::UnRegisterPort", socket);
             break;
@@ -132,6 +151,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackPortConnectNameRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->PortConnect(req.fRefNum, req.fSrc, req.fDst);
             CheckWriteRefNum("JackRequest::ConnectNamePorts", socket);
             break;
@@ -142,6 +162,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackPortDisconnectNameRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->PortDisconnect(req.fRefNum, req.fSrc, req.fDst);
             CheckWriteRefNum("JackRequest::DisconnectNamePorts", socket);
             break;
@@ -152,6 +173,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackPortConnectRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->PortConnect(req.fRefNum, req.fSrc, req.fDst);
             CheckWriteRefNum("JackRequest::ConnectPorts", socket);
             break;
@@ -162,6 +184,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackPortDisconnectRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->PortDisconnect(req.fRefNum, req.fSrc, req.fDst);
             CheckWriteRefNum("JackRequest::DisconnectPorts", socket);
             break;
@@ -172,6 +195,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackPortRenameRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->PortRename(req.fRefNum, req.fPort, req.fName);
             CheckWriteRefNum("JackRequest::PortRename", socket);
             break;
@@ -212,6 +236,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackReleaseTimebaseRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->ReleaseTimebase(req.fRefNum);
             CheckWriteRefNum("JackRequest::ReleaseTimebase", socket);
             break;
@@ -222,6 +247,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackSetTimebaseCallbackRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->SetTimebaseCallback(req.fRefNum, req.fConditionnal);
             CheckWriteRefNum("JackRequest::SetTimebaseCallback", socket);
             break;
@@ -271,6 +297,10 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             jack_log("JackRequest::Notification");
             JackClientNotificationRequest req;
             CheckRead(req, socket);
+            if (owner >= 0) {
+                jack_error("JackBus socket: a client sent the server's own notification request");
+                return -2;
+            }
             if (req.fNotify == kQUIT) {
                 jack_log("JackRequest::Notification kQUIT");
                 throw JackQuitException();
@@ -284,6 +314,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             jack_log("JackRequest::SessionNotify");
             JackSessionNotifyRequest req;
             CheckRead(req, socket);
+            CheckOwnerOrDrop(req);
             fServer->GetEngine()->SessionNotify(req.fRefNum, req.fDst, req.fEventType, req.fPath, socket, NULL);
             break;
         }
@@ -293,6 +324,7 @@ int JackRequestDecoder::HandleRequest(detail::JackChannelTransactionInterface* s
             JackSessionReplyRequest req;
             JackResult res;
             CheckRead(req, socket);
+            CheckOwner(req, socket);
             res.fResult = fServer->GetEngine()->SessionReply(req.fRefNum);
             CheckWrite("JackRequest::SessionReply", socket);
             break;

@@ -20,6 +20,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
 #include "JackDebugClient.h"
 #include "JackLibClient.h"
+#ifdef __linux__
+#include "JackBusLibClient.h"
+#endif
 #include "JackChannel.h"
 #include "JackLibGlobals.h"
 #include "JackGlobals.h"
@@ -29,6 +32,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackServerLaunch.h"
 #include "JackMetadata.h"
 #include <assert.h>
+#include <string.h>
+#include <stdlib.h>
 
 using namespace Jack;
 
@@ -46,6 +51,10 @@ extern "C"
             jack_status_t *status, ...);
     LIB_EXPORT int jack_client_close (jack_client_t *client);
     LIB_EXPORT int jack_get_client_pid (const char *name);
+    LIB_EXPORT jack_client_t * jackbus_client_open (const char *client_name,
+            jack_options_t options,
+            jack_status_t *status,
+            unsigned int flags, ...);
 
 #ifdef __cplusplus
 }
@@ -53,7 +62,7 @@ extern "C"
 
 static jack_client_t * jack_client_open_aux (const char *client_name,
             jack_options_t options,
-            jack_status_t *status, va_list ap);
+            jack_status_t *status, va_list ap, bool bus);
 
 JackLibGlobals* JackLibGlobals::fGlobals = NULL;
 int JackLibGlobals::fClientCount = 0;
@@ -111,7 +120,7 @@ jack_client_t* jack_client_new_aux(const char* client_name, jack_options_t optio
     }
 }
 
-static jack_client_t* jack_client_open_aux(const char* client_name, jack_options_t options, jack_status_t* status, va_list ap)
+static jack_client_t* jack_client_open_aux(const char* client_name, jack_options_t options, jack_status_t* status, va_list ap, bool bus)
 {
     jack_varargs_t va;		/* variable arguments */
     jack_status_t my_status;
@@ -140,12 +149,19 @@ static jack_client_t* jack_client_open_aux(const char* client_name, jack_options
 
     JackLibGlobals::Init(); // jack library initialisation
 
-    if (try_start_server(&va, options, status)) {
+    // A JackBus socket client's check is its connection to that socket (no server
+    // is started for it: the probe and the start go through the protocol-9 socket)
+    if (!bus && try_start_server(&va, options, status)) {
         jack_error("jack server is not running or cannot be started");
         JackLibGlobals::Destroy(); // jack library destruction
         return 0;
     }
 
+#ifdef __linux__
+    if (bus) {
+        client = new JackBusLibClient(GetSynchroTable());   // the JackBus socket
+    } else
+#endif
     if (JACK_DEBUG) {
         client = new JackDebugClient(new JackLibClient(GetSynchroTable())); // Debug mode
     } else {
@@ -173,7 +189,9 @@ LIB_EXPORT jack_client_t* jack_client_open(const char* ext_client_name, jack_opt
         JackGlobals::fOpenMutex->Lock();
         va_list ap;
         va_start(ap, status);
-        jack_client_t* res = jack_client_open_aux(ext_client_name, options, status, ap);
+        // Tests and trials: JACKBUS_TRANSPORT=1 opens through the JackBus socket
+        const char* bus = getenv("JACKBUS_TRANSPORT");
+        jack_client_t* res = jack_client_open_aux(ext_client_name, options, status, ap, bus && strcmp(bus, "1") == 0);
         va_end(ap);
         JackGlobals::fOpenMutex->Unlock();
         return res;
@@ -184,6 +202,41 @@ LIB_EXPORT jack_client_t* jack_client_open(const char* ext_client_name, jack_opt
         jack_error("Unknown error...");
         return NULL;
     }
+}
+
+LIB_EXPORT jack_client_t* jackbus_client_open(const char* ext_client_name, jack_options_t options, jack_status_t* status, unsigned int flags, ...)
+{
+    JackGlobals::CheckContext("jackbus_client_open");
+
+    jack_status_t my_status;
+    if (status == NULL) {
+        status = &my_status;
+    }
+#ifdef __linux__
+    if (flags != 0) {
+        *status = (jack_status_t)(JackFailure | JackInvalidOption);
+        return NULL;
+    }
+    try {
+        assert(JackGlobals::fOpenMutex);
+        JackGlobals::fOpenMutex->Lock();
+        va_list ap;
+        va_start(ap, flags);
+        jack_client_t* res = jack_client_open_aux(ext_client_name, options, status, ap, true);
+        va_end(ap);
+        JackGlobals::fOpenMutex->Unlock();
+        return res;
+    } catch (std::bad_alloc& e) {
+        jack_error("Memory allocation error...");
+        return NULL;
+    } catch (...) {
+        jack_error("Unknown error...");
+        return NULL;
+    }
+#else
+    *status = JackFailure;
+    return NULL;
+#endif
 }
 
 LIB_EXPORT int jack_client_close(jack_client_t* ext_client)

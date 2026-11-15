@@ -35,7 +35,7 @@ namespace Jack
 class JackLibClient : public JackClient
 {
 
-    private:
+    protected:   // JackBusLibClient maps it from an fd
 
         JackShmReadWritePtr1<JackClientControl> fClientControl; /*! Shared client control */
 

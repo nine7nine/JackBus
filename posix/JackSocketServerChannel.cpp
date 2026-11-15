@@ -26,11 +26,17 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include "JackTools.h"
 #include "JackNotification.h"
 #include "JackException.h"
+#include "JackConstants.h"
+#ifdef __linux__
+#include "JackFdPassing.h"
+#endif
 
 #include <assert.h>
 #include <vector>
 #include <sys/socket.h>
 #include <signal.h>
+#include <unistd.h>
+#include <limits.h>
 
 using namespace std;
 
@@ -61,6 +67,18 @@ int JackSocketServerChannel::Open(const char* server_name, JackServer* server)
         return -1;
     }
 
+#ifdef __linux__
+    // The JackBus socket, beside the protocol-9 one: without it (no XDG_RUNTIME_DIR,
+    // or a directory that isn't safe), JackBus socket clients can't connect; nothing
+    // else changes
+    char bus_path[PATH_MAX];
+    if (getenv("JACK_NO_BUS_SOCKET") == NULL
+        && JackBusSocketPath(server_name, bus_path, sizeof(bus_path), true) == 0
+        && fBusListenSocket.BindPath(bus_path) == 0) {
+        jack_log("JackSocketServerChannel::Open: JackBus socket %s", bus_path);
+    }
+#endif
+
     // Prepare for poll
     BuildPoolTable();
     
@@ -72,6 +90,8 @@ int JackSocketServerChannel::Open(const char* server_name, JackServer* server)
 void JackSocketServerChannel::Close()
 {
    fRequestListenSocket.Close();
+   fBusListenSocket.Close();    // removes its path
+   fBusSockets.clear();
 
     // Close remaining client sockets
     std::map<int, std::pair<int, JackClientSocket*> >::iterator it;
@@ -113,6 +133,143 @@ void JackSocketServerChannel::ClientCreate()
     } else {
         jack_error("Client socket cannot be created");
     }
+}
+
+/*
+ A client of the JackBus socket: only this user's processes (the directory is
+ 0700 too); it must send kBusHello first.
+ */
+void JackSocketServerChannel::BusClientCreate()
+{
+    JackClientSocket* socket = fBusListenSocket.Accept();
+    if (!socket) {
+        jack_error("JackBus socket: client socket cannot be created");
+        return;
+    }
+#ifdef __linux__
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    if (getsockopt(socket->GetFd(), SOL_SOCKET, SO_PEERCRED, &cred, &len) < 0 || cred.uid != getuid()) {
+        jack_error("JackBus socket: refused a client of another user");
+        socket->Close();
+        delete socket;
+        return;
+    }
+#endif
+    // A request that stops half-way must not hold the request thread (and every
+    // other client) for good: reads give up after SOCKET_TIME_OUT, and the client
+    // is dropped
+    socket->SetReadTimeOut(SOCKET_TIME_OUT);
+    fSocketTable[socket->GetFd()] = make_pair(-1, socket);
+    fBusSockets[socket->GetFd()] = JackRequest::kBusHello;  // what it must send next
+    fRebuild = true;
+}
+
+/*
+ Requests only JackBus socket clients send. Returns -1 to drop the client (a
+ protocol error: the stream can't be trusted after it).
+ */
+int JackSocketServerChannel::HandleBusRequest(JackClientSocket* socket, int fd, int type)
+{
+    int& state = fBusSockets[fd];
+    switch (type) {
+        case JackRequest::kBusHello: {
+            JackBusHelloRequest req;
+            JackBusHelloResult res;
+            if (state != JackRequest::kBusHello || req.Read(socket) < 0) {
+                return -1;
+            }
+            res.fVersion = JACKBUS_API_VERSION;
+            res.fFeatures = 0;
+            res.fResult = (req.fVersion == JACKBUS_API_VERSION) ? 0 : -1;
+            if (res.Write(socket) < 0) {
+                return -1;
+            }
+            state = (res.fResult == 0) ? JackRequest::kBusClientOpen : JackRequest::kBusHello;
+            return 0;
+        }
+        case JackRequest::kClientCheck: {
+            // the name check before the open, as on the protocol-9 socket, but without
+            // fOpen: the open that follows must be kBusClientOpen (the decoder would
+            // take a protocol-9 kClientOpen after it)
+            JackClientCheckRequest req;
+            JackClientCheckResult res;
+            if (state != JackRequest::kBusClientOpen || req.Read(socket) < 0 || req.fOpen) {
+                return -1;
+            }
+            res.fResult = fServer->GetEngine()->ClientCheck(req.fName, req.fUUID, res.fName, req.fProtocol, req.fOptions, &res.fStatus);
+            return (res.Write(socket) < 0) ? -1 : 0;
+        }
+        case JackRequest::kBusClientOpen:
+            if (state != JackRequest::kBusClientOpen) {
+                return -1;
+            }
+            return BusClientOpen(socket, fd);
+        default:
+            jack_error("JackBus socket: unknown request %d", type);
+            return -1;
+    }
+}
+
+int JackSocketServerChannel::BusClientOpen(JackClientSocket* socket, int fd)
+{
+#ifdef __linux__
+    JackBusClientOpenRequest req;
+    JackBusClientOpenResult res;
+    if (req.Read(socket) < 0) {
+        return -1;
+    }
+    int notify_fd = -1;
+    if (JackRecvFds(fd, &notify_fd, 1) != 1) {
+        jack_error("JackBus socket: open without a notification socket");
+        return -1;
+    }
+
+    // The process is the socket's peer, as the kernel sees it (the pid a sandboxed
+    // client reports is one of its own namespace)
+    struct ucred cred;
+    socklen_t len = sizeof(cred);
+    memset(&cred, 0, sizeof(cred));
+    int pid = req.fPID;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0 && cred.pid > 0) {
+        pid = cred.pid;
+    }
+
+    int refnum = -1;
+    res.fResult = fServer->GetEngine()->ClientExternalOpen(req.fName, pid, req.fUUID, &refnum,
+                    &res.fSharedEngine, &res.fSharedClient, &res.fSharedGraph, notify_fd);
+    int fds[kBusOpenFds];
+    if (res.fResult == 0) {
+        if (fServer->GetEngine()->ClientBusFds(refnum, fds) != kBusOpenFds) {
+            fServer->GetEngine()->ClientExternalClose(refnum);
+            res.fResult = -1;
+        } else {
+            res.fRefNum = refnum;
+            fSocketTable[fd].first = refnum;
+            fRebuild = true;
+            if (cred.pid > 0) {
+                fServer->GetEngine()->ClientSetPeerPid(refnum, cred.pid, cred.uid);
+            }
+            jack_log("JackSocketServerChannel::BusClientOpen ref = %d fd = %d", refnum, fd);
+        }
+    } else {
+        jack_error("Cannot create new client");
+    }
+
+    int err = res.Write(socket);
+    if (res.fResult == 0) {
+        if (err == 0) {
+            err = JackSendFds(fd, fds, kBusOpenFds);
+        }
+        for (int i = 0; i < kBusOpenFds; i++) {
+            close(fds[i]);
+        }
+        fBusSockets[fd] = -1;   // opened: from now on, the requests of protocol 9
+    }
+    return (err < 0) ? -1 : 0;
+#else
+    return -1;
+#endif
 }
 
 int JackSocketServerChannel::GetFd(JackClientSocket* socket_aux)
@@ -170,6 +327,7 @@ void JackSocketServerChannel::ClientRemove(detail::JackChannelTransactionInterfa
 
     jack_log("JackSocketServerChannel::ClientRemove ref = %d fd = %d", refnum, fd);
     fSocketTable.erase(fd);
+    fBusSockets.erase(fd);
     socket->Close();
     delete socket;
     fRebuild = true;
@@ -190,6 +348,7 @@ void JackSocketServerChannel::ClientKill(int fd)
     }
    
     fSocketTable.erase(fd);
+    fBusSockets.erase(fd);
     socket->Close();
     delete socket;
     fRebuild = true;
@@ -224,19 +383,22 @@ void JackSocketServerChannel::BuildPoolTable()
     if (fRebuild) {
         fRebuild = false;
         delete[] fPollTable;
-        fPollTable = new pollfd[fSocketTable.size() + 1];
+        fPollTable = new pollfd[fSocketTable.size() + 2];
 
-        jack_log("JackSocketServerChannel::BuildPoolTable size = %d", fSocketTable.size() + 1);
+        jack_log("JackSocketServerChannel::BuildPoolTable size = %d", fSocketTable.size() + 2);
 
         // First fd is the server request socket
         fPollTable[0].fd = fRequestListenSocket.GetFd();
         fPollTable[0].events = POLLIN | POLLERR;
+        fPollTable[1].fd = fBusListenSocket.GetFd();    // -1 (ignored by poll) without it
+        fPollTable[1].events = POLLIN | POLLERR;
+        fPollTable[1].revents = 0;
 
         // Next fd for clients
         map<int, pair<int, JackClientSocket*> >::iterator it;
         int i;
 
-        for (i = 1, it = fSocketTable.begin(); it != fSocketTable.end(); it++, i++) {
+        for (i = 2, it = fSocketTable.begin(); it != fSocketTable.end(); it++, i++) {
             jack_log("JackSocketServerChannel::BuildPoolTable fSocketTable i = %ld fd = %ld", i, it->first);
             fPollTable[i].fd = it->first;
             fPollTable[i].events = POLLIN | POLLPRI | POLLERR | POLLHUP | POLLNVAL;
@@ -259,13 +421,13 @@ bool JackSocketServerChannel::Execute()
 
         // Global poll
         // While a client lags, look every 50 ms whether it reads again
-        if ((poll(fPollTable, fSocketTable.size() + 1, fLagging ? 50 : 10000) < 0) && (errno != EINTR)) {
+        if ((poll(fPollTable, fSocketTable.size() + 2, fLagging ? 50 : 10000) < 0) && (errno != EINTR)) {
             jack_error("JackSocketServerChannel::Execute : engine poll failed err = %s request thread quits...", strerror(errno));
             return false;
         } else {
 
             // Poll all clients
-            for (unsigned int i = 1; i < fSocketTable.size() + 1; i++) {
+            for (unsigned int i = 2; i < fSocketTable.size() + 2; i++) {
                 int fd = fPollTable[i].fd;
                 if (fPollTable[i].revents & ~POLLIN) {
                     jack_log("JackSocketServerChannel::Execute : poll client error err = %s", strerror(errno));
@@ -278,9 +440,21 @@ bool JackSocketServerChannel::Execute()
                         jack_log("JackSocketServerChannel::Execute : cannot decode header");
                         ClientKill(fd);
                     // Decode request
-                    } else {
+                    } else if (fBusSockets.count(fd) == 0) {
                         // Result is not needed here
                         fDecoder->HandleRequest(socket, header.fType);
+                    } else if (header.fType >= JackRequest::kBusHello || fBusSockets[fd] >= 0) {
+                        // JackBus socket: its own requests (and the name check), which
+                        // must come before any other
+                        if (HandleBusRequest(socket, fd, header.fType) < 0) {
+                            ClientKill(fd);
+                        }
+                    } else if (header.fType == JackRequest::kClientOpen || header.fType == JackRequest::kClientCheck) {
+                        // a JackBus socket client opens once, with kBusClientOpen
+                        jack_error("JackBus socket: request %d refused after the open", header.fType);
+                        ClientKill(fd);
+                    } else if (fDecoder->HandleRequest(socket, header.fType, fSocketTable[fd].first) == -2) {
+                        ClientKill(fd);     // a request it may not send
                     }
                 }
             }
@@ -298,6 +472,10 @@ bool JackSocketServerChannel::Execute()
 
             if (fPollTable[0].revents & POLLIN) {
                 ClientCreate();
+            }
+
+            if (fPollTable[1].revents & POLLIN) {
+                BusClientCreate();
             }
         }
 

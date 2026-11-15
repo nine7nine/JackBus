@@ -42,6 +42,7 @@ class JackSocketServerChannel : public JackRunnableInterface, public JackClientH
     private:
 
         JackServerSocket fRequestListenSocket;  // Socket to create request socket for the client
+        JackServerSocket fBusListenSocket;      // the JackBus socket ($XDG_RUNTIME_DIR/jackbus/<server>), if any
         JackThread fThread;                     // Thread to execute the event loop
         JackRequestDecoder* fDecoder;
         JackServer* fServer;
@@ -51,10 +52,14 @@ class JackSocketServerChannel : public JackRunnableInterface, public JackClientH
         bool fSweepDead;    // the engine took clients whose process died out of the graph
         bool fLagging;      // some client lags: notifications queued for it (JackSocketNotifyChannel)
         std::map<int, std::pair<int, JackClientSocket*> > fSocketTable;
+        std::map<int, int> fBusSockets;         // JackBus socket clients: fd -> kBus* state
 
         void BuildPoolTable();
 
         void ClientCreate();
+        void BusClientCreate();
+        int HandleBusRequest(JackClientSocket* socket, int fd, int type);
+        int BusClientOpen(JackClientSocket* socket, int fd);
         void ClientKill(int fd);
         void KillDeadClients();
   

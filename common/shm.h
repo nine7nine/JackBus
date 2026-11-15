@@ -213,6 +213,10 @@ extern "C"
     int jack_attach_lib_shm (jack_shm_info_t*);
     int jack_attach_shm_read (jack_shm_info_t*);
     int jack_attach_lib_shm_read (jack_shm_info_t*);
+    /* JackBus (server side): open a segment this process allocated, by its
+       registry index, read-write and close-on-exec, to pass its fd to a client
+       of the JackBus socket. -1 on error. */
+    int jack_shm_open_fd (jack_shm_registry_index_t index);
     int jack_resize_shm (jack_shm_info_t*, jack_shmsize_t size);
 
 #ifdef __cplusplus

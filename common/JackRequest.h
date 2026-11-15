@@ -113,7 +113,11 @@ struct JackRequest
         kGetUUIDByClient = 37,
         kClientHasSessionCallback = 38,
         kComputeTotalLatencies = 39,
-        kPropertyChangeNotify = 40
+        kPropertyChangeNotify = 40,
+
+        // JackBus socket only (never accepted on the protocol-9 socket)
+        kBusHello = 100,
+        kBusClientOpen = 101
     };
 
     RequestType fType;
@@ -1800,6 +1804,148 @@ struct JackPropertyChangeNotifyRequest : public JackRequestImpl<sizeof(jack_uuid
         return JackRequestImpl::Write(trans);
     }
 
+};
+
+/*!
+\brief JackBus socket: version and features, both ways. The first request.
+*/
+
+struct JackBusHelloRequest : public JackRequestImpl<sizeof(int) + sizeof(int) + sizeof(uint64_t)>
+{
+    int fVersion;
+    int fReserved;
+    uint64_t fFeatures;
+
+    JackBusHelloRequest(int version = 0, uint64_t features = 0)
+        : JackRequestImpl(kBusHello), fVersion(version), fReserved(0), fFeatures(features)
+    {}
+
+    int Read(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckSize();
+        CheckRes(trans->Read(&fVersion, sizeof(int)));
+        CheckRes(trans->Read(&fReserved, sizeof(int)));
+        return trans->Read(&fFeatures, sizeof(uint64_t));
+    }
+
+    int Write(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(WritePacketInit());
+        CheckRes(WritePacket(&fVersion, sizeof(int)));
+        CheckRes(WritePacket(&fReserved, sizeof(int)));
+        CheckRes(WritePacket(&fFeatures, sizeof(uint64_t)));
+        return JackRequestImpl::Write(trans);
+    }
+};
+
+struct JackBusHelloResult : public JackResult
+{
+    int fVersion;
+    uint64_t fFeatures;
+
+    JackBusHelloResult(): JackResult(), fVersion(0), fFeatures(0)
+    {}
+
+    int Read(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(JackResult::Read(trans));
+        CheckRes(trans->Read(&fVersion, sizeof(int)));
+        return trans->Read(&fFeatures, sizeof(uint64_t));
+    }
+
+    int Write(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(JackResult::Write(trans));
+        CheckRes(trans->Write(&fVersion, sizeof(int)));
+        return trans->Write(&fFeatures, sizeof(uint64_t));
+    }
+};
+
+/*!
+\brief JackBus socket: open a client. The fields of kClientOpen (fPID is
+ informational: the server takes the kernel's peer pid), followed by an fd
+ trailer holding one end of the client's notification socket pair.
+*/
+
+struct JackBusClientOpenRequest : public JackRequestImpl<sizeof(int) + sizeof(jack_uuid_t) + JACK_CLIENT_NAME_SIZE_1>
+{
+    int fPID;
+    jack_uuid_t fUUID;
+    char fName[JACK_CLIENT_NAME_SIZE_1];
+
+    JackBusClientOpenRequest()
+        : JackRequestImpl(kBusClientOpen), fPID(0), fUUID(JACK_UUID_EMPTY_INITIALIZER)
+    {
+        memset(fName, 0, sizeof(fName));
+    }
+
+    JackBusClientOpenRequest(const char* name, int pid, jack_uuid_t uuid)
+        : JackRequestImpl(kBusClientOpen), fPID(pid), fUUID(uuid)
+    {
+        memset(fName, 0, sizeof(fName));
+        snprintf(fName, sizeof(fName), "%s", name);
+    }
+
+    int Read(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckSize();
+        CheckRes(trans->Read(&fPID, sizeof(int)));
+        CheckRes(trans->Read(&fUUID, sizeof(jack_uuid_t)));
+        return trans->Read(&fName, sizeof(fName));
+    }
+
+    int Write(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(WritePacketInit());
+        CheckRes(WritePacket(&fPID, sizeof(int)));
+        CheckRes(WritePacket(&fUUID, sizeof(jack_uuid_t)));
+        CheckRes(WritePacket(&fName, sizeof(fName)));
+        return JackRequestImpl::Write(trans);
+    }
+};
+
+/*!
+\brief JackBus socket: the open's result. If fResult is 0, an fd trailer
+ follows with kBusOpenFds fds, in the kBusFd* order.
+*/
+
+enum {
+    kBusFdEngine = 0,       // engine control segment
+    kBusFdGraph = 1,        // graph segment
+    kBusFdClient = 2,       // this client's control segment
+    kBusFdFutex = 3,        // this client's futex file
+    kBusFdAlive = 4,        // the alive table (JackAliveTable)
+    kBusOpenFds = 5
+};
+
+struct JackBusClientOpenResult : public JackResult
+{
+    int fSharedEngine;
+    int fSharedClient;
+    int fSharedGraph;
+    int fRefNum;
+
+    JackBusClientOpenResult()
+        : JackResult(), fSharedEngine(-1), fSharedClient(-1), fSharedGraph(-1), fRefNum(-1)
+    {}
+
+    int Read(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(JackResult::Read(trans));
+        CheckRes(trans->Read(&fSharedEngine, sizeof(int)));
+        CheckRes(trans->Read(&fSharedClient, sizeof(int)));
+        CheckRes(trans->Read(&fSharedGraph, sizeof(int)));
+        return trans->Read(&fRefNum, sizeof(int));
+    }
+
+    int Write(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(JackResult::Write(trans));
+        CheckRes(trans->Write(&fSharedEngine, sizeof(int)));
+        CheckRes(trans->Write(&fSharedClient, sizeof(int)));
+        CheckRes(trans->Write(&fSharedGraph, sizeof(int)));
+        return trans->Write(&fRefNum, sizeof(int));
+    }
 };
 
 /*!

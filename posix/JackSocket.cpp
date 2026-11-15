@@ -27,6 +27,8 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <pthread.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/stat.h>
+#include <limits.h>
 
 namespace Jack
 {
@@ -150,6 +152,30 @@ int JackClientSocket::Connect(const char* dir, const char* name, int which) // A
     }
 #endif
 
+    return 0;
+}
+
+int JackClientSocket::ConnectPath(const char* path)
+{
+    struct sockaddr_un addr;
+    if (strlen(path) >= sizeof(addr.sun_path)) {
+        jack_error("JackClientSocket::ConnectPath: path too long");
+        return -1;
+    }
+    if ((fSocket = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0) {
+        jack_error("Cannot create socket err = %s", strerror(errno));
+        return -1;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    jack_log("JackClientSocket::ConnectPath : %s", addr.sun_path);
+    if (connect(fSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        jack_log("Cannot connect to %s err = %s", path, strerror(errno));
+        close(fSocket);
+        fSocket = -1;
+        return -1;
+    }
     return 0;
 }
 
@@ -337,6 +363,78 @@ error:
     close(fSocket);
     fSocket = -1;
     return -1;
+}
+
+int JackServerSocket::BindPath(const char* path)
+{
+    struct sockaddr_un addr;
+    struct stat st;
+
+    if (strlen(path) >= sizeof(addr.sun_path) || strlen(path) >= sizeof(fName)) {
+        jack_error("JackServerSocket::BindPath: path too long");
+        return -1;
+    }
+    // a socket left by an earlier server of this user is replaced; anything else is not
+    if (lstat(path, &st) == 0) {
+        if (!S_ISSOCK(st.st_mode) || st.st_uid != getuid()) {
+            jack_error("JackServerSocket::BindPath: %s exists and is not a socket of this user", path);
+            return -1;
+        }
+        unlink(path);
+    }
+    if ((fSocket = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0) {
+        jack_error("Cannot create server socket err = %s", strerror(errno));
+        return -1;
+    }
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+    strncpy(fName, path, sizeof(fName) - 1);
+    fName[sizeof(fName) - 1] = 0;
+    jack_log("JackServerSocket::BindPath : %s", addr.sun_path);
+    if (bind(fSocket, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        jack_error("Cannot bind server to socket %s err = %s", path, strerror(errno));
+        close(fSocket);
+        fSocket = -1;
+        return -1;
+    }
+    if (listen(fSocket, 100) < 0) {
+        jack_error("Cannot enable listen on server socket err = %s", strerror(errno));
+        unlink(path);
+        close(fSocket);
+        fSocket = -1;
+        return -1;
+    }
+    return 0;
+}
+
+int JackBusSocketPath(const char* server_name, char* res, int size, bool create)
+{
+    const char* runtime = getenv("XDG_RUNTIME_DIR");
+    if (!runtime || runtime[0] != '/') {
+        return -1;
+    }
+    char dir[PATH_MAX];
+    if (snprintf(dir, sizeof(dir), "%s/jackbus", runtime) >= (int)sizeof(dir)) {
+        return -1;
+    }
+    if (create && mkdir(dir, 0700) < 0 && errno != EEXIST) {
+        jack_log("JackBusSocketPath: cannot create %s: %s", dir, strerror(errno));
+        return -1;
+    }
+    struct stat st;
+    if (lstat(dir, &st) < 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
+        if (create) {
+            jack_error("JackBus socket: %s must be a directory of this user, mode 0700", dir);
+        }
+        return -1;
+    }
+    char ext_name[SYNC_MAX_NAME_SIZE + 1];
+    JackTools::RewriteName(server_name, ext_name);
+    if (snprintf(res, size, "%s/%s", dir, ext_name) >= size) {
+        return -1;
+    }
+    return 0;
 }
 
 JackClientSocket* JackServerSocket::Accept()

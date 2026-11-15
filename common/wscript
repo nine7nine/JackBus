@@ -91,6 +91,7 @@ def build(bld):
             '../posix/JackPosixProcessSync.cpp',
             '../posix/JackPosixMutex.cpp',
             '../posix/JackSocket.cpp',
+            '../posix/JackFdPassing.cpp',
             '../linux/JackLinuxFutex.cpp',
             '../linux/JackAliveTable.cpp',
             '../linux/JackLinuxTime.c',
@@ -196,6 +197,8 @@ def build(bld):
         clientlib.source += [
             '../posix/JackSocketClientChannel.cpp',
             '../posix/JackPosixServerLaunch.cpp',
+            '../posix/JackBusClientChannel.cpp',
+            'JackBusLibClient.cpp',
             ]
 
     if bld.env['IS_FREEBSD']:

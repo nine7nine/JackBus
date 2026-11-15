@@ -279,7 +279,12 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         // Client management
         int ClientCheck(const char* name, jack_uuid_t uuid, char* name_res, int protocol, int options, int* status);
 
-        int ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, int* ref, int* shared_engine, int* shared_client, int* shared_graph_manager);
+        // notify_fd >= 0: a JackBus socket client, whose notification socket that is
+        // (owned by the engine from the call on, closed on failure)
+        int ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, int* ref, int* shared_engine, int* shared_client, int* shared_graph_manager, int notify_fd = -1);
+        // A JackBus socket client just opened: new fds for what its libjack maps
+        // (kBusFd* order). Returns the count (kBusOpenFds), or -1 (none left open).
+        int ClientBusFds(int refnum, int* fds);
         int ClientInternalOpen(const char* name, int* ref, JackEngineControl** shared_engine, JackGraphManager** shared_manager, JackClientInterface* client, bool wait);
 
         int ClientExternalClose(int refnum);

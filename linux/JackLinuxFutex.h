@@ -74,6 +74,17 @@ class SERVER_EXPORT JackLinuxFutex : public detail::JackSynchro
         bool ConnectInput(const char* name, const char* server_name);
         bool ConnectOutput(const char* name, const char* server_name);
         bool Disconnect();
+
+        // JackBus socket (fd passing instead of names):
+        // client: map a futex file received as an fd (takes ownership of fd);
+        //         true if mapped, or already connected (fd closed then)
+        bool ConnectFd(int fd);
+        // server: a new fd for this allocated futex file, -1 if none
+        int DupFd() const;
+        // server: open another client's futex file by name, as a libjack would
+        // (O_RDWR, close-on-exec), -1 if it is gone
+        int OpenNamedFd(const char* name, const char* server_name);
+
         void Destroy();
         void DestroyKeepMapped();  // unlink the name, leave the mapping (see JackEngine::ClientCloseAux)
 

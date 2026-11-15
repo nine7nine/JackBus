@@ -76,6 +76,8 @@ class JackSocketNotifyChannel
         bool fReported;                          // this episode was reported in the log
         jack_time_t fLastSlowReport;
         bool fClosed;                            // the client closed its end: nothing more is sent
+        bool fBus;                               // a JackBus socket client (OpenFd): fds go with kAddClient
+        char fServerName[JACK_SERVER_NAME_SIZE + 1];
 
         bool HasRoom();
         bool PeerClosed();
@@ -94,6 +96,10 @@ class JackSocketNotifyChannel
         JackSocketNotifyChannel& operator=(const JackSocketNotifyChannel&) = delete;
 
         int Open(const char* name);		// Open the Server/Client connection
+        // JackBus socket client: the notification socket is one end of a socket pair
+        // it passed with its open request (takes ownership of fd). Each kAddClient
+        // then carries the new peer's futex file as an fd.
+        int OpenFd(int fd, const char* name, const char* server_name);
         void Close();					// Close the Server/Client connection
 
         void ClientNotify(int refnum, const char* name, int notify, int sync, const char* message, int value1, int value2, int* result);

@@ -82,8 +82,14 @@ class SERVER_EXPORT JackAliveTable
         // Server: the robust futex word of a slot, NULL if no table
         uint32_t* Word(int refnum) const;
 
+        // Server: a new fd for the file (JackBus socket clients), -1 if none
+        int OpenFd() const;
+
         // Client (libjack): map the server's file, if there is one, or unmap it
         bool Connect(const char* server_name);
+        // Client: the same, from an fd received over the JackBus socket (takes
+        // ownership of fd); true if mapped, or already mapped (fd closed then)
+        bool ConnectFd(int fd);
         void Disconnect();
         // Client: make a slot a process-shared robust mutex, unlocked
         bool InitSlot(int refnum);

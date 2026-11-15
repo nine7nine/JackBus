@@ -72,6 +72,10 @@
 
 #define JACK_PROTOCOL_VERSION 9
 
+/* The JackBus socket ($XDG_RUNTIME_DIR/jackbus/<server>): its own version,
+   negotiated by kBusHello. Protocol 9 above is not affected by it. */
+#define JACKBUS_API_VERSION 1
+
 #define SOCKET_TIME_OUT 2               // in sec
 #define DRIVER_OPEN_TIMEOUT 5           // in sec
 #define FREEWHEEL_DRIVER_TIMEOUT 10     // in sec

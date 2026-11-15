@@ -153,6 +153,39 @@ bool JackAliveTable::Connect(const char* server_name)
     return true;
 }
 
+int JackAliveTable::OpenFd() const
+{
+    if (!fOwner || !fBase) {
+        return -1;
+    }
+    return shm_open(fName, O_RDWR | O_CLOEXEC, 0);
+}
+
+bool JackAliveTable::ConnectFd(int fd)
+{
+    if (fd < 0) {
+        return false;
+    }
+    if (fBase) {
+        close(fd);
+        return true;
+    }
+    struct stat st;
+    void* base = MAP_FAILED;
+    if (fstat(fd, &st) == 0 && st.st_size >= (off_t)kTableSize) {
+        base = mmap(NULL, kTableSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    }
+    close(fd);
+    if (base == MAP_FAILED) {
+        jack_log("JackAliveTable::ConnectFd: cannot map");
+        return false;
+    }
+    snprintf(fName, sizeof(fName), "(fd)");
+    fBase = (char*)base;
+    jack_log("JackAliveTable::ConnectFd");
+    return true;
+}
+
 void JackAliveTable::Disconnect()
 {
     if (fBase && !fOwner) {

@@ -46,9 +46,20 @@ int JackExternalClient::ClientNotify(int refnum, const char* name, int notify, i
 
 int JackExternalClient::Open(const char* name, int pid, int refnum, jack_uuid_t uuid, int* shared_client)
 {
+    return Open(name, pid, refnum, uuid, shared_client, -1, NULL);
+}
+
+int JackExternalClient::Open(const char* name, int pid, int refnum, jack_uuid_t uuid, int* shared_client,
+                             int notify_fd, const char* server_name)
+{
     try {
 
-        if (fChannel.Open(name) < 0) {
+        if (notify_fd >= 0) {
+            if (fChannel.OpenFd(notify_fd, name, server_name) < 0) {
+                jack_error("Cannot use the notification socket of client name = %s\n", name);
+                return -1;
+            }
+        } else if (fChannel.Open(name) < 0) {
             jack_error("Cannot connect to client name = %s\n", name);
             return -1;
         }
