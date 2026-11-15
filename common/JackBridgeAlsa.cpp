@@ -364,18 +364,24 @@ bool JackBridgeAlsa::Start(JackBridgeCapture* capture, JackBridgePlayback* playb
     }
     fRun.store(true, std::memory_order_release);
 
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    struct sched_param sp;
-    memset(&sp, 0, sizeof(sp));
-    sp.sched_priority = fParams.fPriority;
-    pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
-    pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
-    pthread_attr_setschedparam(&attr, &sp);
-    int err = pthread_create(&fThread, &attr, ThreadEntry, this);
-    pthread_attr_destroy(&attr);
-    if (err == EPERM) {
-        fprintf(stderr, "bridge: no realtime scheduling for the card thread, running without it\n");
+    // SCHED_FIFO at fPriority; a server that is not realtime (priority 0) gets a plain thread
+    int err = EPERM;
+    if (fParams.fPriority > 0) {
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        struct sched_param sp;
+        memset(&sp, 0, sizeof(sp));
+        sp.sched_priority = fParams.fPriority;
+        pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+        pthread_attr_setschedpolicy(&attr, SCHED_FIFO);
+        pthread_attr_setschedparam(&attr, &sp);
+        err = pthread_create(&fThread, &attr, ThreadEntry, this);
+        pthread_attr_destroy(&attr);
+        if (err == EPERM || err == EINVAL) {
+            fprintf(stderr, "bridge: no realtime scheduling for the card thread, running without it\n");
+        }
+    }
+    if (err == EPERM || err == EINVAL) {
         err = pthread_create(&fThread, NULL, ThreadEntry, this);
     }
     if (err != 0) {
