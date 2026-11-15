@@ -519,6 +519,8 @@ if [ -n "$san" ]; then
     echo "SKIP bus-apps (sanitizer run)"
 else
     "$here/bus-apps.sh" || fail=1
+    # a real DAW: Ardour headless (hardour), skipped without Ardour 9
+    "$here/bus-ardour.sh" || fail=1
 fi
 
 if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then

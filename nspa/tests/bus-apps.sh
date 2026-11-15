@@ -207,6 +207,37 @@ if command -v fluidsynth >/dev/null; then
     fi
 fi
 
+# the JackBus example clients (example-clients/)
+ex="$JACK_BUILD/example-clients"
+if [ -x "$ex/jackbus_tone" ]; then
+    bg p9 "$ex/jackbus_events" evwatch >"$out/ex-events" 2>&1
+    sleep 0.5
+    bg p9 "$ex/jackbus_tone" -n tone -f 440 >"$out/ex-tone" 2>&1
+    tone_pid=$(last_pid)
+    bg p9 "$ex/jackbus_simple" -n simple2 -t 3 >"$out/ex-simple" 2>&1
+    if wait_ports tone 1 && wait_ports simple2 2 && on_bus "$tone_pid" jackbus_tone; then
+        sleep 0.3
+        lsp -c | grep -A2 '^simple2:out_left' | grep -q 'system:playback' \
+            && pass "jackbus_simple: on the JackBus socket, connected to system:playback" || flunk "jackbus_simple" "$out/ex-simple"
+        # the tone, recorded at its output: a clean 440 Hz, continuous across cycles
+        bus timeout 20 jack_rec -f "$out/tone.wav" -d 3 tone:out >"$out/tone-rec" 2>&1
+        if python3 -I "$here/tools/sine_check.py" "$out/tone.wav" 440 >"$out/tone-check" 2>&1; then
+            pass "jackbus_tone (native node): $(cat "$out/tone-check" | cut -d' ' -f2-)"
+        else
+            flunk "jackbus_tone" "$out/tone-check" "$out/ex-tone"
+        fi
+    else
+        flunk "example clients" "$out/ex-tone" "$out/ex-simple"
+    fi
+    sleep 3.5
+    if grep -q 'client tone registered' "$out/ex-events" && grep -q 'client simple2 gone' "$out/ex-events" \
+       && grep -q 'tone:out -> system:playback' "$out/ex-events"; then
+        pass "jackbus_events (native events): $(grep -c . "$out/ex-events") events, the other examples' lives among them"
+    else
+        flunk "jackbus_events" "$out/ex-events"
+    fi
+fi
+
 # a stuck client (jack_zombie never returns from a process callback): the server
 # copes as it does with any stuck client, and JackBus clients still open afterwards
 bg bus jack_zombie >"$out/zombie" 2>&1
@@ -218,7 +249,7 @@ left=$(lsp | grep -v '^system:' | cut -d: -f1 | sort -u | tr '\n' ' ')
 [ -z "$left" ] && pass "every program exited on SIGTERM" || flunk "still connected after SIGTERM: $left"
 kill -TERM "$server_pid"; wait "$server_pid" 2>/dev/null
 grep -qE 'Segmentation|Assertion|terminate called|refused' "$out/jackd.log" && flunk "server log" "$out/jackd.log"
-[ "$bus_checked" -ge 7 ] && pass "$bus_checked long-running programs checked JackBus clients by their maps" || flunk "only $bus_checked programs checked by their maps"
+[ "$bus_checked" -ge 8 ] && pass "$bus_checked long-running programs checked JackBus clients by their maps" || flunk "only $bus_checked programs checked by their maps"
 
 echo "logs: $out"
 [ $fail -eq 0 ] && echo "ALL PASS" || echo "SOME FAILED"

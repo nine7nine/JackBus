@@ -26,6 +26,7 @@ unset JACKBUS_TRANSPORT
 
 cc -O2 $tcf -Wall -I"$root/common" -o "$out/bus_client" "$here/bus_client.c" -L"$fork_lib" -ljack -ldl || exit 1
 cc -O2 $tcf -Wall -o "$out/bus_proto" "$here/bus_proto.c" -lpthread || exit 1
+cc -O2 $tcf -Wall -I"$root/common" -o "$out/bus_node" "$here/bus_node.c" -L"$fork_lib" -ljack -lpthread || exit 1
 c++ -std=gnu++11 -O2 $tcf -Wall -I"$root/posix" -o "$out/fd_trailer" "$here/fd_trailer.cpp" "$root/posix/JackFdPassing.cpp" -lpthread || exit 1
 
 export JACK_DEFAULT_SERVER=jbbus
@@ -148,6 +149,53 @@ t1=$(date +%s%N)
 wait $pp || rc=1
 ms=$(( (t1 - t0) / 1000000 ))
 if [ $rc -eq 0 ] && [ $ms -lt 1500 ]; then pass "a silent connection holds nobody up (probe took $ms ms)"; else flunk "silent connection (probe $ms ms)" "$out/proto-silent" "$out/during-silent"; fi
+
+# 6. the native API: nodes (cycle record, buffer table, events, ports while running)
+if timeout 90 "$out/bus_node" full >"$out/node-full" 2>&1; then
+    pass "nodes: $(grep -c '^PASS' "$out/node-full") checks ($(grep '^PASS audio through' "$out/node-full" | cut -d' ' -f2-))"
+else
+    flunk "nodes" "$out/node-full"
+fi
+# writing into an unconnected input (the shared zero buffer) is a crash, and only
+# the writer's; the server goes on
+timeout 20 "$out/bus_node" rtwrite >"$out/node-rtwrite" 2>&1; rc=$?
+if [ $rc -eq 139 ] && bc -b probe after-rtwrite >"$out/after-rtwrite" 2>&1; then
+    pass "a node writing the zero buffer crashes (SIGSEGV), the server goes on"
+else
+    flunk "zero buffer write (exit $rc)" "$out/node-rtwrite" "$out/after-rtwrite"
+fi
+# a node's realtime thread: no system call but futex in its cycles. The node is
+# started under strace, so its realtime thread is traced from its creation: it is
+# the thread that makes itself SCHED_FIFO, and its cycles run from then until the
+# cancellation signal of its close (thread set-up before, teardown after)
+rt_cycles() {  # rt_cycles <strace file> -> the realtime thread's lines in its cycles
+    rt=$(grep -E 'sched_setscheduler\([0-9]+, SCHED_FIFO' "$1" | head -1 | awk '{print $1}')
+    [ -n "$rt" ] || return 1
+    awk -v t="$rt" '$1 == t' "$1" | sed -n '/sched_setscheduler(/,$p' | sed '1d' | sed '/ --- SIG/,$d'
+}
+if [ -n "$san" ]; then
+    echo "SKIP node RT system calls (sanitizer run)"
+elif command -v strace >/dev/null; then
+    timeout 30 strace -f -qq -o "$out/node-steady.strace" "$out/bus_node" steady 3 >"$out/node-steady" 2>&1
+    if rt_cycles "$out/node-steady.strace" >"$out/node-steady.loop" && [ -s "$out/node-steady.loop" ]; then
+        calls=$(sed -E 's/^[0-9]+ +//; s/\(.*//; s/^<\.\.\. ([a-z_0-9]+) resumed>.*/\1/' "$out/node-steady.loop" | sort | uniq -c | awk '{printf "%s:%s ", $2, $1}')
+        others=$(grep -vcE '^[0-9]+ +(futex\(|<\.\.\. futex resumed>)' "$out/node-steady.loop")
+        if [ "$others" -eq 0 ]; then
+            pass "a node's realtime thread, in its cycles from the first on: no system call but futex ($calls)"
+        else
+            flunk "node RT system calls in its cycles ($calls)" "$out/node-steady.loop"
+        fi
+    else
+        flunk "node RT system calls: no realtime thread traced" "$out/node-steady"
+    fi
+    # the negative control: one system call in a cycle must be seen
+    BUS_NODE_RT_SYSCALL=1 timeout 30 strace -f -qq -o "$out/node-ctl.strace" "$out/bus_node" steady 1 >"$out/node-ctl" 2>&1
+    if rt_cycles "$out/node-ctl.strace" | grep -q 'getppid('; then
+        pass "the trace sees a system call made in a cycle (negative control)"
+    else
+        flunk "the trace missed a system call made in a cycle" "$out/node-ctl"
+    fi
+fi
 
 if grep -qE 'Segmentation|Assertion|terminate called' "$out/jackd.log"; then flunk "server log" "$out/jackd.log"; fi
 stop_server || flunk "server did not exit on SIGTERM"
