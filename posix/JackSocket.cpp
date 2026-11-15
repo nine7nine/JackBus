@@ -49,7 +49,7 @@ JackClientSocket::JackClientSocket(): JackClientRequestInterface(), fSocket(-1),
     fPromiscuousGid = jack_group2gid(promiscuous);
 }
 
-JackClientSocket::JackClientSocket(int socket): JackClientRequestInterface(), fSocket(socket),fTimeOut(0), fPromiscuous(false), fPromiscuousGid(-1)
+JackClientSocket::JackClientSocket(int socket): JackClientRequestInterface(), fSocket(socket),fTimeOut(0), fNonBlocking(false), fPromiscuous(false), fPromiscuousGid(-1)
 {}
 
 #if defined(__sun__) || defined(sun)
