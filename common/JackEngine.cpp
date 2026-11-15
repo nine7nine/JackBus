@@ -37,6 +37,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackLockedEngine.h"
 #include "JackExternalClient.h"
 #include "JackInternalClient.h"
+#include "JackDriver.h"
 #include "JackEngineControl.h"
 #include "JackClientControl.h"
 #include "JackServerGlobals.h"
@@ -64,6 +65,7 @@ JackEngine::JackEngine(JackGraphManager* manager,
     fEngineControl = control;
     fSelfConnectMode = self_connect_mode;
     fRollingResetPending = 0;
+    memset(fIsDriver, 0, sizeof(fIsDriver));
     for (int i = 0; i < CLIENT_NUM; i++) {
         fClientTable[i] = NULL;
         fPeerPid[i] = 0;
@@ -337,6 +339,7 @@ void JackEngine::ReleaseRefnum(int refnum)
     fAliveTable.ClearSlot(refnum);
 #endif
     __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)NULL, __ATOMIC_RELEASE);  // jack2-nspa: read by the RT thread (CheckXRun, CalcCPULoad)
+    __atomic_store_n(&fIsDriver[refnum], (unsigned char)0, __ATOMIC_RELAXED);
     fPeerPid[refnum] = 0;
     fPeerStart[refnum] = 0;
     fPeerNextCheck[refnum] = 0;
@@ -345,7 +348,7 @@ void JackEngine::ReleaseRefnum(int refnum)
     if (fEngineControl->fTemporary) {
         int i;
         for (i = fEngineControl->fDriverNum; i < CLIENT_NUM; i++) {
-            if (fClientTable[i]) {
+            if (fClientTable[i] && !IsDriverRef(i)) {
                 break;
             }
         }
@@ -390,7 +393,7 @@ bool JackEngine::Process(jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end
     }
 
     // Cycle  begin
-    fEngineControl->CycleBegin(fClientTable, fGraphManager, cur_cycle_begin, prev_cycle_end, bound);
+    fEngineControl->CycleBegin(fClientTable, fGraphManager, cur_cycle_begin, prev_cycle_end, bound, fIsDriver);
     const bool finished = fGraphManager->IsFinishedGraph();
     UpdateClientCycles(cur_cycle_begin, bound, finished);     // the cycle that ends, before the graph is reset
 
@@ -460,6 +463,9 @@ void JackEngine::UpdateClientCycles(jack_time_t cur_cycle_begin, int bound, bool
             continue;       // not in the graph (an internal client, or inactive)
         }
         ClientCycle& c = fClientCycle[i];
+        if (IsDriverRef(i)) {
+            continue;   // a driver opened while running (a bridge)
+        }
         JackClientTiming* timing = fGraphManager->GetClientTiming(i);
         const jack_time_t finished_at = timing->FinishedAt();
         const jack_time_t awake_at = timing->AwakeAt();
@@ -564,7 +570,7 @@ void JackEngine::CheckXRun(jack_time_t callback_usecs)  // REVOIR les conditions
     clients[0] = 0;
     for (int i = fEngineControl->fDriverNum; i < bound; i++) {
         JackClientInterface* client = __atomic_load_n(&fClientTable[i], __ATOMIC_ACQUIRE);  // RT thread
-        if (client && client->GetClientControl()->IsActive()) {
+        if (client && !IsDriverRef(i) && client->GetClientControl()->IsActive()) {
             JackClientTiming* timing = fGraphManager->GetClientTiming(i);
             jack_client_state_t status = timing->Status();
             jack_time_t signaled_date = timing->SignaledAt();
@@ -1079,6 +1085,7 @@ int JackEngine::ClientInternalOpen(const char* name, int* ref, JackEngineControl
         goto error;
     }
 
+    __atomic_store_n(&fIsDriver[refnum], (unsigned char)(dynamic_cast<JackDriverClientInterface*>(client) != NULL), __ATOMIC_RELAXED);
     __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)client, __ATOMIC_RELEASE);
     UpdateRefNumBound();
 
@@ -1696,7 +1703,7 @@ int JackEngine::GetClientCycleStats(JackClientCycleStats* stats, int max)
     for (int i = fEngineControl->fDriverNum; i < CLIENT_NUM && n < max; i++) {
         JackClientInterface* client = fClientTable[i];
         const uint32_t member = __atomic_load_n(&fCycleMember[i], __ATOMIC_RELAXED);
-        if (!client || !(member & 1)) {
+        if (!client || IsDriverRef(i) || !(member & 1)) {
             continue;
         }
         JackClientCycleStats& s = stats[n++];

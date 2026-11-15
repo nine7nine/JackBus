@@ -167,6 +167,13 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         // read by the RT thread): per-cycle loops over clients stop there
         int fRefNumBound;
         void UpdateRefNumBound();
+        // jack2-nspa: which refnums are drivers (server side). Drivers opened at the start hold
+        // the refnums below fEngineControl->fDriverNum, which the engine's per client loops skip;
+        // a driver opened while the server runs (a sound card bridge) gets any free refnum and
+        // must not change fDriverNum (it is in shared memory, and clients use it), so the loops
+        // skip by this too. Written by the request thread, read by the RT thread.
+        unsigned char fIsDriver[CLIENT_NUM];
+        bool IsDriverRef(int refnum) const { return __atomic_load_n(&fIsDriver[refnum], __ATOMIC_RELAXED) != 0; }
         // jack2-nspa: the CPU load statistics are reset when clients come and go; they are the
         // RT thread's (CalcCPULoad), so other threads only ask for it and Process() does it
         int fRollingResetPending;

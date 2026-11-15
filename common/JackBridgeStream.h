@@ -105,7 +105,15 @@ class JackBridgeDirection
 
         double TargetDelay() const { return fTarget; }     // card frames
         double Latency() const;                            // master frames: the delay + the filter's
-        const JackBridgeStats& Stats() const { return fStats; }
+        const JackBridgeStats& Stats() const { return fStats; }   // graph side's own thread
+
+        // for other threads (published at the end of each cycle)
+        double PublishedLatency() const { return fPubLatency.load(std::memory_order_relaxed); }
+        int PublishedState() const { return fPubState.load(std::memory_order_relaxed); }
+        int64_t PublishedResyncs() const { return fPubResyncs.load(std::memory_order_relaxed); }
+        int64_t PublishedLost() const { return fPubLost.load(std::memory_order_relaxed); }
+        int64_t PublishedUnderruns() const { return fPubUnderruns.load(std::memory_order_relaxed); }
+        void PublishStats();
 
     protected:
 
@@ -140,6 +148,19 @@ class JackBridgeDirection
         int64_t fBase;             // card position of the resampler's input 0 (capture)
                                    // or output 0 (playback)
         float* fScratch[64];       // one chunk per channel: FIFO <-> resampler (allocated in Init)
+        std::atomic<double> fPubLatency;
+        std::atomic<int> fPubState;
+        std::atomic<int64_t> fPubResyncs;
+        std::atomic<int64_t> fPubLost;
+        std::atomic<int64_t> fPubUnderruns;
+
+        // publishes the stats however Cycle returns
+        struct Publisher
+        {
+            JackBridgeDirection* fDir;
+            explicit Publisher(JackBridgeDirection* dir): fDir(dir) {}
+            ~Publisher() { fDir->PublishStats(); }
+        };
 };
 
 class JackBridgeCapture : public JackBridgeDirection

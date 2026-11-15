@@ -1580,6 +1580,33 @@ SERVER_EXPORT bool jackctl_server_load_session_file(
     return (server_ptr->engine->LoadInternalSessionFile(file) >= 0);
 }
 
+SERVER_EXPORT bool jackctl_server_add_bridge(jackctl_server * server_ptr, jackctl_driver * driver_ptr)
+{
+    if (!server_ptr || !server_ptr->engine || !driver_ptr) {
+        return false;
+    }
+    JSList * paramlist;
+    if (!jackctl_create_param_list(driver_ptr->parameters, &paramlist)) {
+        return false;
+    }
+    const int res = server_ptr->engine->AddBridge(driver_ptr->desc_ptr, paramlist);
+    jackctl_destroy_param_list(paramlist);
+    return res == 0;
+}
+
+SERVER_EXPORT bool jackctl_server_remove_bridge(jackctl_server * server_ptr, const char * name)
+{
+    return server_ptr && server_ptr->engine && name && server_ptr->engine->RemoveBridge(name) == 0;
+}
+
+SERVER_EXPORT int jackctl_server_get_bridges(jackctl_server * server_ptr, char names[][64 + 1], int max)
+{
+    if (!server_ptr || !server_ptr->engine) {
+        return 0;
+    }
+    return server_ptr->engine->GetBridgeNames(names, max);
+}
+
 SERVER_EXPORT bool jackctl_server_add_slave(jackctl_server * server_ptr, jackctl_driver * driver_ptr)
 {
     if (server_ptr && server_ptr->engine) {

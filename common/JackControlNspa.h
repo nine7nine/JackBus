@@ -87,6 +87,23 @@ jackctl_driver_refresh_constraints(struct jackctl_driver * driver);
 JACK_NSPA_CONTROL_EXPORT void
 jackctl_server_set_backend_lost_callback(struct jackctl_server * server, void (*callback)(void * arg), void * arg);
 
+/*
+ * Sound card bridges: a card on its own clock, joined to the master's graph with adaptive
+ * resampling (the "bridge" driver). Added and removed while the server runs (after start).
+ * add: `driver` is the bridge driver (jackctl_server_get_drivers_list, named "bridge") with its
+ * parameters set (device, and optionally name, mode, period, nperiods, wake, quality): each call
+ * adds a bridge with the parameters as they are then. remove: by the bridge's client name (the
+ * card's ALSA id unless "name" was set). get: the bridges' client names; returns how many.
+ */
+JACK_NSPA_CONTROL_EXPORT bool
+jackctl_server_add_bridge(struct jackctl_server * server, struct jackctl_driver * driver);
+
+JACK_NSPA_CONTROL_EXPORT bool
+jackctl_server_remove_bridge(struct jackctl_server * server, const char * name);
+
+JACK_NSPA_CONTROL_EXPORT int
+jackctl_server_get_bridges(struct jackctl_server * server, char names[][64 + 1], int max);
+
 #ifdef __cplusplus
 }
 #endif

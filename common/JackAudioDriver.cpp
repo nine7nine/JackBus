@@ -28,6 +28,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackLockedEngine.h"
 #include "JackException.h"
 #include <assert.h>
+#include <time.h>
 
 using namespace std;
 
@@ -35,8 +36,68 @@ namespace Jack
 {
 
 JackAudioDriver::JackAudioDriver(const char* name, const char* alias, JackLockedEngine* engine, JackSynchro* table)
-        : JackDriver(name, alias, engine, table)
+        : JackDriver(name, alias, engine, table), fBridges(NULL), fBridgeList(NULL), fBridgeTime(0),
+          fBridgeFramePeriod(0.0)
 {}
+
+/*
+ jack2-nspa: the sound card bridges (JackBridgeSet.h), run by the master in its own cycle.
+ Playback first, right after the master's own playback: the previous cycle's buffers, as the
+ master's own ports in async mode. It takes this cycle's list and timing. Capture after the
+ graph has started: each bridge fills its ports and signals the clients that read them.
+ The timing is the master's frame timer (its DLL): the cycle's start, put on CLOCK_MONOTONIC_RAW
+ (the bridges' cards' timestamps) by the offset measured now, whatever JACK's clock source, and
+ the measured frame period.
+*/
+void JackAudioDriver::RunBridgesPlayback()
+{
+    if (!fBridges || !fIsMaster) {
+        return;
+    }
+    fBridgeList = fBridges->Acquire();
+    if (!fBridgeList || fBridgeList->fCount == 0) {
+        return;
+    }
+    const jack_nframes_t n = fEngineControl->fBufferSize;
+    JackTimer timer;
+    fEngineControl->ReadFrameTime(&timer);
+    jack_nframes_t frames;
+    jack_time_t current, next;
+    float period;
+    double period_us = 0.0;
+    if (timer.GetCycleTimes(&frames, &current, &next, &period) == 0) {
+        period_us = period;
+    } else {
+        current = timer.CurTime();
+    }
+    if (period_us <= 0.0) {
+        period_us = 1e6 * double(n) / double(fEngineControl->fSampleRate);
+    }
+    struct timespec raw;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &raw);
+    const int64_t raw_ns = int64_t(raw.tv_sec) * 1000000000LL + raw.tv_nsec;
+    const int64_t offset = raw_ns - int64_t(GetMicroSeconds()) * 1000;
+    fBridgeTime = int64_t(current) * 1000 + offset;
+    fBridgeFramePeriod = period_us * 1000.0 / double(n);
+    for (int i = 0; i < fBridgeList->fCount; i++) {
+        fBridgeList->fBridges[i]->BridgePlayback(fBridgeTime, fBridgeFramePeriod, n);
+    }
+}
+
+void JackAudioDriver::RunBridgesCapture()
+{
+    if (!fBridges || !fIsMaster) {
+        return;
+    }
+    if (fBridgeList) {
+        const jack_nframes_t n = fEngineControl->fBufferSize;
+        for (int i = 0; i < fBridgeList->fCount; i++) {
+            fBridgeList->fBridges[i]->BridgeCapture(fBridgeTime, fBridgeFramePeriod, n);
+        }
+        fBridgeList = NULL;
+    }
+    fBridges->CycleDone();
+}
 
 JackAudioDriver::~JackAudioDriver()
 {}
@@ -238,6 +299,7 @@ int JackAudioDriver::ProcessAsync()
         jack_error("JackAudioDriver::ProcessAsync: write error, stopping...");
         return -1;
     }
+    RunBridgesPlayback();
 
     // Process graph
     ProcessGraphAsync();
@@ -271,6 +333,7 @@ void JackAudioDriver::ProcessGraphAsyncMaster()
     if (ResumeRefNum() < 0) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ResumeRefNum error");
     }
+    RunBridgesCapture();
 
     if (ProcessReadSlaves() < 0) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ProcessReadSlaves error");
@@ -306,6 +369,9 @@ int JackAudioDriver::ProcessSync()
         jack_error("JackAudioDriver::ProcessSync: read error, stopping...");
         return -1;
     }
+
+    // jack2-nspa: bridges' playback from the previous cycle's buffers, before the graph runs
+    RunBridgesPlayback();
 
     // Process graph
     ProcessGraphSync();
@@ -343,6 +409,7 @@ void JackAudioDriver::ProcessGraphSyncMaster()
         if (ResumeRefNum() < 0) {
             jack_error("JackAudioDriver::ProcessGraphSyncMaster: ResumeRefNum error");
         }
+        RunBridgesCapture();
 
         if (ProcessReadSlaves() < 0) {
             jack_error("JackAudioDriver::ProcessGraphSync: ProcessReadSlaves error, engine may now behave abnormally!!");

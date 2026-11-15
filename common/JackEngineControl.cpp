@@ -37,7 +37,8 @@ void JackEngineControl::CalcCPULoad(JackClientInterface** table,
                                     JackGraphManager* manager,
                                     jack_time_t cur_cycle_begin,
                                     jack_time_t prev_cycle_end,
-                                    int refnum_bound)
+                                    int refnum_bound,
+                                    const unsigned char* drivers)
 {
     fPrevCycleTime = fCurCycleTime;
     fCurCycleTime = cur_cycle_begin;
@@ -47,6 +48,9 @@ void JackEngineControl::CalcCPULoad(JackClientInterface** table,
     if (!fSyncMode) {
         for (int i = fDriverNum; i < refnum_bound; i++) {
             JackClientInterface* client = __atomic_load_n(&table[i], __ATOMIC_ACQUIRE);  // jack2-nspa: written by the request thread
+            if (drivers && __atomic_load_n(&drivers[i], __ATOMIC_RELAXED)) {
+                continue;   // a driver opened while running (a bridge)
+            }
             JackClientTiming* timing = manager->GetClientTiming(i);
             if (client && client->GetClientControl()->IsActive() && timing->Status() == Finished) {
                 last_cycle_end = JACK_MAX(last_cycle_end, timing->FinishedAt());

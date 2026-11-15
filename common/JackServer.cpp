@@ -45,6 +45,9 @@ namespace Jack
 //----------------
 JackServer::JackServer(bool sync, bool temporary, int timeout, bool rt, int priority, int port_max, bool verbose, jack_timer_type_t clock, char self_connect_mode, const char* server_name)
 {
+    pthread_mutex_init(&fBridgeLock, NULL);
+    fBridgeMonitorRunning = false;
+    fBridgeMonitorStop.store(false);
     if (rt) {
         jack_info("JACK server starting in realtime mode with priority %ld", priority);
     } else {
@@ -77,6 +80,8 @@ JackServer::JackServer(bool sync, bool temporary, int timeout, bool rt, int prio
 
 JackServer::~JackServer()
 {
+    StopBridgeMonitor();    // normally stopped in Close already
+    pthread_mutex_destroy(&fBridgeLock);
     JackGraphManager::Destroy(fGraphManager);
     delete fMetadata;
     delete fDriverInfo;
@@ -120,6 +125,7 @@ int JackServer::Open(jack_driver_desc_t* driver_desc, JSList* driver_params)
     fFreewheelDriver->SetMaster(false);
     fAudioDriver->SetMaster(true);
     fAudioDriver->AddSlave(fFreewheelDriver);
+    fAudioDriver->SetBridges(&fBridges);
     InitTime();
     SetClockSource(fEngineControl->fClockSource);
     return 0;
@@ -146,6 +152,13 @@ int JackServer::Close()
     jack_log("JackServer::Close");
     fMasterConnections.clear();
     fRequestChannel.Close();
+    StopBridgeMonitor();
+    while (!fBridgeInfos.empty()) {     // the master is stopped: nothing runs them now
+        JackDriverInfo* info = fBridgeInfos.front();
+        fBridgeInfos.pop_front();
+        fBridges.Remove(dynamic_cast<JackBridgeInterface*>(info->GetBackend()), false);
+        CloseBridge(info);
+    }
     if (fAudioDriver && !fAudioDriverClosed) {
         fAudioDriver->Detach();
         fAudioDriver->Close();
@@ -288,6 +301,15 @@ int JackServer::SetBufferSize(jack_nframes_t buffer_size)
     }
 
     if (fAudioDriver->SetBufferSize(buffer_size) == 0) {
+        // jack2-nspa: the bridges follow (no allocation; they place their delays again)
+        pthread_mutex_lock(&fBridgeLock);
+        for (std::list<JackDriverInfo*>::iterator it = fBridgeInfos.begin(); it != fBridgeInfos.end(); it++) {
+            JackBridgeInterface* bridge = dynamic_cast<JackBridgeInterface*>((*it)->GetBackend());
+            if (bridge) {
+                bridge->BridgeBufferSize(buffer_size);
+            }
+        }
+        pthread_mutex_unlock(&fBridgeLock);
         fEngine->NotifyBufferSize(buffer_size);
         return running->Start();
     } else { // Failure: try to restore current value
@@ -545,9 +567,153 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
         fEngine->NotifySampleRate(fEngineControl->fSampleRate);
     }
 
-    // And finally start
+    // And finally start (jack2-nspa: the bridges go on with the new master; their delays are
+    // placed again, as after a master xrun)
     fAudioDriver->SetMaster(true);
+    fAudioDriver->SetBridges(&fBridges);
     return fAudioDriver->Start();
+}
+
+//------------------------------------
+// jack2-nspa: sound card bridges
+//------------------------------------
+
+void JackServer::CloseBridge(JackDriverInfo* info)
+{
+    JackDriverClientInterface* driver = info->GetBackend();
+    if (driver) {
+        driver->Stop();
+        driver->Detach();
+        driver->Close();
+    }
+    delete info;
+}
+
+int JackServer::AddBridge(jack_driver_desc_t* driver_desc, JSList* driver_params)
+{
+    JackDriverInfo* info = new JackDriverInfo();
+    // the bridge driver's factory opens the card and the bridge's client (OpenBridge)
+    JackDriverClientInterface* driver = info->Open(driver_desc, fEngine, GetSynchroTable(), driver_params);
+    if (!driver) {
+        jack_error("AddBridge: cannot open the bridge");
+        delete info;
+        return -1;
+    }
+    JackBridgeInterface* bridge = dynamic_cast<JackBridgeInterface*>(driver);
+    if (!bridge) {
+        jack_error("AddBridge: %s is not a bridge driver", driver_desc->name);
+        driver->Close();
+        delete info;
+        return -1;
+    }
+    driver->SetMaster(false);
+    if (driver->Attach() < 0) {
+        jack_error("AddBridge: cannot register the bridge's ports");
+        driver->Close();
+        delete info;
+        return -1;
+    }
+    if (driver->Start() < 0) {
+        jack_error("AddBridge: cannot start the bridge's card");
+        driver->Detach();
+        driver->Close();
+        delete info;
+        return -1;
+    }
+    const bool running = fAudioDriver && !fAudioDriverClosed && fAudioDriver->IsRunning();
+    pthread_mutex_lock(&fBridgeLock);
+    if (!fBridges.Add(bridge, running)) {
+        pthread_mutex_unlock(&fBridgeLock);
+        CloseBridge(info);
+        return -1;
+    }
+    fBridgeInfos.push_back(info);
+    pthread_mutex_unlock(&fBridgeLock);
+    StartBridgeMonitor();
+    return 0;
+}
+
+void* JackServer::BridgeMonitorEntry(void* arg)
+{
+    JackServer* server = (JackServer*)arg;
+    while (!server->fBridgeMonitorStop.load(std::memory_order_acquire)) {
+        pthread_mutex_lock(&server->fBridgeLock);
+        for (std::list<JackDriverInfo*>::iterator it = server->fBridgeInfos.begin(); it != server->fBridgeInfos.end(); it++) {
+            JackBridgeInterface* bridge = dynamic_cast<JackBridgeInterface*>((*it)->GetBackend());
+            if (bridge) {
+                bridge->BridgeMonitor();
+            }
+        }
+        pthread_mutex_unlock(&server->fBridgeLock);
+        struct timespec quarter = { 0, 250000000 };
+        nanosleep(&quarter, NULL);
+    }
+    return NULL;
+}
+
+void JackServer::StartBridgeMonitor()
+{
+    if (fBridgeMonitorRunning) {
+        return;
+    }
+    // a plain thread, whatever the caller's scheduling
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+    pthread_attr_setschedpolicy(&attr, SCHED_OTHER);
+    struct sched_param sp;
+    memset(&sp, 0, sizeof(sp));
+    pthread_attr_setschedparam(&attr, &sp);
+    fBridgeMonitorStop.store(false, std::memory_order_release);
+    fBridgeMonitorRunning = (pthread_create(&fBridgeMonitor, &attr, BridgeMonitorEntry, this) == 0);
+    pthread_attr_destroy(&attr);
+}
+
+void JackServer::StopBridgeMonitor()
+{
+    if (!fBridgeMonitorRunning) {
+        return;
+    }
+    fBridgeMonitorStop.store(true, std::memory_order_release);
+    pthread_join(fBridgeMonitor, NULL);
+    fBridgeMonitorRunning = false;
+}
+
+int JackServer::RemoveBridge(const char* name)
+{
+    for (std::list<JackDriverInfo*>::iterator it = fBridgeInfos.begin(); it != fBridgeInfos.end(); it++) {
+        JackDriverClientInterface* driver = (*it)->GetBackend();
+        if (!driver || strcmp(driver->GetClientControl()->fName, name) != 0) {
+            continue;
+        }
+        const bool running = fAudioDriver && !fAudioDriverClosed && fAudioDriver->IsRunning();
+        pthread_mutex_lock(&fBridgeLock);
+        if (!fBridges.Remove(dynamic_cast<JackBridgeInterface*>(driver), running)) {
+            pthread_mutex_unlock(&fBridgeLock);
+            // the master may still use it: leave it open (leaked, never freed under it)
+            jack_error("RemoveBridge: %s is still in use by the master, left open", name);
+            return -1;
+        }
+        JackDriverInfo* info = *it;
+        fBridgeInfos.erase(it);
+        pthread_mutex_unlock(&fBridgeLock);
+        CloseBridge(info);
+        return 0;
+    }
+    jack_error("RemoveBridge: no bridge %s", name);
+    return -1;
+}
+
+int JackServer::GetBridgeNames(char names[][JACK_CLIENT_NAME_SIZE + 1], int max)
+{
+    int n = 0;
+    for (std::list<JackDriverInfo*>::iterator it = fBridgeInfos.begin(); it != fBridgeInfos.end() && n < max; it++) {
+        JackDriverClientInterface* driver = (*it)->GetBackend();
+        if (driver) {
+            snprintf(names[n++], JACK_CLIENT_NAME_SIZE + 1, "%s", driver->GetClientControl()->fName);
+        }
+    }
+    return n;
 }
 
 //----------------------

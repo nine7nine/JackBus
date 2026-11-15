@@ -206,7 +206,9 @@ bool JackBridgeAlsa::Configure(snd_pcm_t* pcm, bool capture, int* channels, snd_
     }
     snd_pcm_sw_params_set_avail_min(pcm, sw, wake);
     snd_pcm_sw_params_set_tstamp_mode(pcm, sw, SND_PCM_TSTAMP_ENABLE);
-    snd_pcm_sw_params_set_tstamp_type(pcm, sw, SND_PCM_TSTAMP_TYPE_MONOTONIC);
+    // CLOCK_MONOTONIC_RAW: the domain the master gives its cycle times in (JackBridgeSet.h);
+    // MONOTONIC would add NTP's slewing between the card's clock and the master's
+    snd_pcm_sw_params_set_tstamp_type(pcm, sw, SND_PCM_TSTAMP_TYPE_MONOTONIC_RAW);
     if (snd_pcm_sw_params(pcm, sw) < 0) {
         fprintf(stderr, "bridge: %s: software parameters refused\n", dir);
         return false;

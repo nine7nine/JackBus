@@ -50,6 +50,16 @@ static void SetShift(double ppm)
     }
 }
 
+// the cards' timestamps are on CLOCK_MONOTONIC_RAW: a cycle start on CLOCK_MONOTONIC goes there by
+// the offset measured now, as the server does (JackAudioDriver::RunBridgesPlayback)
+static int64_t ToRaw(int64_t mono_ns)
+{
+    struct timespec r, m;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &r);
+    clock_gettime(CLOCK_MONOTONIC, &m);
+    return mono_ns + (int64_t(r.tv_sec) - int64_t(m.tv_sec)) * 1000000000LL + (r.tv_nsec - m.tv_nsec);
+}
+
 static int64_t Now()
 {
     struct timespec ts;
@@ -142,14 +152,15 @@ static void* MasterThread(void* arg)
         const int64_t t_c = t0 + k * cycle_ns;
         struct timespec ts = { time_t(t_c / 1000000000LL), long(t_c % 1000000000LL) };
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+        const int64_t t_raw = ToRaw(t_c);
         // capture first (the graph's inputs), then playback (its outputs)
-        if (m->channels_cap) m->cap->Cycle(t_c, m->n, 1e9 / m->rate, &outp[0]);
+        if (m->channels_cap) m->cap->Cycle(t_raw, m->n, 1e9 / m->rate, &outp[0]);
         const bool silent = getenv("BRIDGE_SILENT") != NULL;
         for (int i = 0; i < m->n; i++) {
             const float v = silent ? 0.0f : float(0.5 * sin(2 * M_PI * f * double(frames + i) / m->rate));
             for (int c = 0; c < m->channels_play; c++) in[c][i] = v;
         }
-        if (m->channels_play) m->play->Cycle(t_c, m->n, 1e9 / m->rate, &inp[0]);
+        if (m->channels_play) m->play->Cycle(t_raw, m->n, 1e9 / m->rate, &inp[0]);
         const JackBridgeStats& cs = m->cap->Stats();
         const JackBridgeStats& ps = m->play->Stats();
         if ((!m->channels_cap || cs.fState == kBridgeLocked) && (!m->channels_play || ps.fState == kBridgeLocked)

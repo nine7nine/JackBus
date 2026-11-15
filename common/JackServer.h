@@ -25,6 +25,10 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "driver_interface.h"
 #include "JackDriverLoader.h"
 #include "JackDriverInfo.h"
+#include "JackBridgeSet.h"
+#include <list>
+#include <atomic>
+#include <pthread.h>
 #include "JackConnectionManager.h"
 #include "JackGlobals.h"
 #include "JackPlatformPlug.h"
@@ -75,6 +79,19 @@ class SERVER_EXPORT JackServer
             every port the next master has; the rest wait for a later one (a card's MIDI ports
             while the dummy driver stands in) */
         std::map<std::string, std::set<std::string> > fMasterConnections;
+        // jack2-nspa: the sound card bridges (the master runs them in its cycle)
+        JackBridgeSet fBridges;
+        std::list<JackDriverInfo*> fBridgeInfos;
+        void CloseBridge(JackDriverInfo* info);
+        // the bridge monitor: a plain thread (not RT), four times a second, BridgeMonitor() on
+        // each bridge; fBridgeLock keeps it, adding, removing and buffer size changes apart
+        pthread_mutex_t fBridgeLock;
+        pthread_t fBridgeMonitor;
+        bool fBridgeMonitorRunning;
+        std::atomic<bool> fBridgeMonitorStop;
+        static void* BridgeMonitorEntry(void* arg);
+        void StartBridgeMonitor();
+        void StopBridgeMonitor();
         void SaveMasterConnections();
         void RestoreMasterConnections();
         JackServerControlLock fControlLock; /*! serializes SetBufferSize/SetFreewheel/SwitchMaster
@@ -118,6 +135,12 @@ class SERVER_EXPORT JackServer
         JackDriverInfo* AddSlave(jack_driver_desc_t* driver_desc, JSList* driver_params);
         void RemoveSlave(JackDriverInfo* info);
         int SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_params);
+
+        // jack2-nspa: a sound card bridge (the "bridge" driver), added and removed while the
+        // server runs; by its client name (the card's)
+        int AddBridge(jack_driver_desc_t* driver_desc, JSList* driver_params);
+        int RemoveBridge(const char* name);
+        int GetBridgeNames(char names[][JACK_CLIENT_NAME_SIZE + 1], int max);
 
         // Object access
         JackLockedEngine* GetEngine();

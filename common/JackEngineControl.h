@@ -151,10 +151,10 @@ struct SERVER_EXPORT JackEngineControl : public JackShmMem
         fFrameTimer.IncFrameTime(fBufferSize, callback_usecs, fPeriodUsecs);
     }
 
-    void CycleBegin(JackClientInterface** table, JackGraphManager* manager, jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end, int refnum_bound = CLIENT_NUM)
+    void CycleBegin(JackClientInterface** table, JackGraphManager* manager, jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end, int refnum_bound = CLIENT_NUM, const unsigned char* drivers = NULL)
     {
         fTransport.CycleBegin(fSampleRate, cur_cycle_begin);
-        CalcCPULoad(table, manager, cur_cycle_begin, prev_cycle_end, refnum_bound);
+        CalcCPULoad(table, manager, cur_cycle_begin, prev_cycle_end, refnum_bound, drivers);
 #ifdef JACK_MONITOR
         fProfiler.Profile(table, manager, fPeriodUsecs, cur_cycle_begin, prev_cycle_end);
 #endif
@@ -189,7 +189,7 @@ struct SERVER_EXPORT JackEngineControl : public JackShmMem
     }
 
     // Private
-    void CalcCPULoad(JackClientInterface** table, JackGraphManager* manager, jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end, int refnum_bound = CLIENT_NUM);
+    void CalcCPULoad(JackClientInterface** table, JackGraphManager* manager, jack_time_t cur_cycle_begin, jack_time_t prev_cycle_end, int refnum_bound = CLIENT_NUM, const unsigned char* drivers = NULL);
     void ResetRollingUsecs();
 
 } POST_PACKED_STRUCTURE;

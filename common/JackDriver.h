@@ -31,6 +31,8 @@
 namespace Jack
 {
 
+class JackBridgeSet;
+
 class JackLockedEngine;
 class JackGraphManager;
 struct JackEngineControl;
@@ -81,6 +83,10 @@ class SERVER_EXPORT JackDriverInterface
 
         virtual void SetMaster(bool onoff) = 0;
         virtual bool GetMaster() = 0;
+
+        // jack2-nspa: the sound card bridges a master runs in its cycle (JackBridgeSet.h);
+        // audio drivers take them, wrappers pass them on, others ignore them
+        virtual void SetBridges(JackBridgeSet* bridges) { (void)bridges; }
 
         virtual void AddSlave(JackDriverInterface* slave) = 0;
         virtual void RemoveSlave(JackDriverInterface* slave) = 0;
@@ -220,6 +226,14 @@ class SERVER_EXPORT JackDriver : public JackDriverClientInterface
                          jack_nframes_t playback_latency);
 
         virtual int Close();
+
+        // jack2-nspa: open/close as a client in the graph while the server runs (a sound card
+        // bridge): like Open/Close, but without counting in fDriverNum (shared memory, which
+        // clients read: drivers opened at the start hold the refnums below it) and without
+        // touching the engine's buffer size or rate. The engine knows it is a driver anyway.
+        int OpenBridge(const char* capture_driver_name, const char* playback_driver_name,
+                       jack_nframes_t capture_latency, jack_nframes_t playback_latency);
+        int CloseBridge();
 
         virtual int Process();
 

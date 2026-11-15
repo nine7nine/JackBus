@@ -65,6 +65,7 @@ bool JackBridgeAnchor::Get(uint32_t* epoch, int64_t* index, int64_t* pos) const
 
 JackBridgeDirection::JackBridgeDirection()
     : fHaveLast(false), fEpoch(0), fState(kBridgeIdle), fStateCycles(0), fFadeIn(0), fTarget(0.0),
+      fPubLatency(0.0), fPubState(kBridgeIdle), fPubResyncs(0), fPubLost(0), fPubUnderruns(0),
       fRatio(1.0), fBase(0)
 {
     memset(&fStats, 0, sizeof(fStats));
@@ -134,6 +135,17 @@ void JackBridgeDirection::Stop()
 double JackBridgeDirection::Latency() const
 {
     return fTarget * fParams.fMasterRate / fParams.fCardRate;
+}
+
+void JackBridgeDirection::PublishStats()
+{
+    // only once a delay is placed does the latency mean anything
+    const bool placed = fState == kBridgeAcquire || fState == kBridgeLocked;
+    fPubLatency.store(placed ? Latency() : 0.0, std::memory_order_relaxed);
+    fPubState.store(fState, std::memory_order_relaxed);
+    fPubResyncs.store(fStats.fResyncs, std::memory_order_relaxed);
+    fPubLost.store(fStats.fLost, std::memory_order_relaxed);
+    fPubUnderruns.store(fStats.fUnderruns, std::memory_order_relaxed);
 }
 
 double JackBridgeDirection::CardPeriod(const JackBridgeClockState& cs)
@@ -308,6 +320,7 @@ bool JackBridgeCapture::Place(const JackBridgeClockState& cs, double p, uint32_t
 
 void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, float* const* out)
 {
+    Publisher publish(this);
     fStats.fCycles++;
     JackBridgeClockState cs;
     if (fClock.Snapshot(&cs)) {
@@ -458,6 +471,7 @@ void JackBridgeCapture::Cycle(int64_t t_ns, int n, double master_ns_per_frame, f
 
 void JackBridgePlayback::Cycle(int64_t t_ns, int n, double master_ns_per_frame, const float* const* in)
 {
+    Publisher publish(this);
     fStats.fCycles++;
     JackBridgeClockState cs;
     if (fClock.Snapshot(&cs)) {

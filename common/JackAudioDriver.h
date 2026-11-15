@@ -22,6 +22,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #define __JackAudioDriver__
 
 #include "JackDriver.h"
+#include "JackBridgeSet.h"
 
 namespace Jack
 {
@@ -62,6 +63,15 @@ class SERVER_EXPORT JackAudioDriver : public JackDriver
         bool IsCaptureChannelNeeded(int chn, bool graph_change_pending);
         void SkipCaptureChannel(int chn, jack_nframes_t nframes);
 
+        // jack2-nspa: the sound card bridges this master runs (NULL: none); the cycle's timing
+        // for them, worked out once per cycle (RunBridgesPlayback, before RunBridgesCapture)
+        JackBridgeSet* fBridges;
+        JackBridgeList* fBridgeList;
+        int64_t fBridgeTime;
+        double fBridgeFramePeriod;
+        void RunBridgesPlayback();
+        void RunBridgesCapture();
+
         int ProcessAsync();
         void ProcessGraphAsync();
         void ProcessGraphAsyncMaster();
@@ -101,6 +111,8 @@ class SERVER_EXPORT JackAudioDriver : public JackDriver
         virtual int Write();
 
         virtual int SetBufferSize(jack_nframes_t buffer_size);
+
+        virtual void SetBridges(JackBridgeSet* bridges) { fBridges = bridges; }
         virtual int SetSampleRate(jack_nframes_t sample_rate);
 
         virtual int ClientNotify(int refnum, const char* name, int notify, int sync, const char* message, int value1, int value2);

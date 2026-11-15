@@ -76,6 +76,7 @@ class SERVER_EXPORT JackThreadedDriver : public JackDriverClientInterface, publi
         virtual int SetSampleRate(jack_nframes_t sample_rate);
 
         virtual void SetMaster(bool onoff);
+        virtual void SetBridges(JackBridgeSet* bridges) { fDriver->SetBridges(bridges); }
         virtual bool GetMaster();
 
         virtual void AddSlave(JackDriverInterface* slave);

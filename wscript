@@ -782,6 +782,17 @@ def build_drivers(bld):
             target='alsarawmidi',
             source=alsarawmidi_src,
             use=['ALSA'])
+        # jack2-nspa: sound card bridges (adaptive resampling), added while the server runs
+        create_driver_obj(
+            bld,
+            target='bridge',
+            source=[
+                'linux/bridge/JackBridgeDriver.cpp',
+                'common/JackBridgeCore.cpp',
+                'common/JackBridgeStream.cpp',
+                'common/JackBridgeResampler.cpp',
+                'common/JackBridgeAlsa.cpp'],
+            use=['ALSA'])
 
     if bld.env['BUILD_DRIVER_FFADO']:
         create_driver_obj(

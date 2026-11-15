@@ -134,6 +134,42 @@ int JackDriver::Open(jack_nframes_t buffer_size,
     return 0;
 }
 
+int JackDriver::OpenBridge(const char* capture_driver_name, const char* playback_driver_name,
+                           jack_nframes_t capture_latency, jack_nframes_t playback_latency)
+{
+    int refnum = -1;
+    char name_res[JACK_CLIENT_NAME_SIZE + 1];
+    int status;
+    if (fEngine->ClientCheck(fClientControl.fName, -1, name_res, JACK_PROTOCOL_VERSION, (int)JackNullOption, (int*)&status) < 0) {
+        jack_error("Client name = %s conflits with another running client", fClientControl.fName);
+        return -1;
+    }
+    strcpy(fClientControl.fName, name_res);
+    if (fEngine->ClientInternalOpen(fClientControl.fName, &refnum, &fEngineControl, &fGraphManager, this, false) != 0) {
+        jack_error("Cannot allocate internal client for bridge %s", fClientControl.fName);
+        return -1;
+    }
+    fClientControl.fRefNum = refnum;
+    fClientControl.SetActive(true);
+    fCaptureLatency = capture_latency;
+    fPlaybackLatency = playback_latency;
+    snprintf(fCaptureDriverName, sizeof(fCaptureDriverName), "%s", capture_driver_name);
+    snprintf(fPlaybackDriverName, sizeof(fPlaybackDriverName), "%s", playback_driver_name);
+    fGraphManager->DirectConnect(fClientControl.fRefNum, fClientControl.fRefNum); // as Open (sync mode)
+    SetupDriverSync(fClientControl.fRefNum, false);
+    return 0;
+}
+
+int JackDriver::CloseBridge()
+{
+    if (fClientControl.fRefNum < 0) {
+        return -1;
+    }
+    fGraphManager->DirectDisconnect(fClientControl.fRefNum, fClientControl.fRefNum);
+    fClientControl.SetActive(false);
+    return fEngine->ClientInternalClose(fClientControl.fRefNum, false);
+}
+
 int JackDriver::Close()
 {
     if (fClientControl.fRefNum >= 0) {

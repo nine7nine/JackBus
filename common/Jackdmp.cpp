@@ -32,6 +32,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "types.h"
 #include "jack.h"
 #include "control.h"
+#include "JackControlNspa.h"
 #include "JackConstants.h"
 #include "JackPlatformPlug.h"
 #ifdef __ANDROID__
@@ -271,7 +272,7 @@ int main(int argc, char** argv)
             return 0;
         }
     }
-    const char *options = "-d:X:I:P:uvshrRL:STFl:t:mn:p:C:"
+    const char *options = "-d:X:I:B:P:uvshrRL:STFl:t:mn:p:C:"
         "a:"
 #ifdef __linux__
         "c:"
@@ -304,6 +305,7 @@ int main(int argc, char** argv)
                                        { "sync", 0, 0, 'S' },
                                        { "autoconnect", 1, 0, 'a' },
                                        { "cpu-dma-latency", 1, 0, 1000 },
+                                       { "bridge", 1, 0, 'B' },
                                        { 0, 0, 0, 0 }
                                    };
 
@@ -319,6 +321,7 @@ int main(int argc, char** argv)
     union jackctl_parameter_value value;
 
     std::list<char*> internals_list;
+    std::list<char*> bridges_list;      // jack2-nspa: --bridge device[/period][@wake]
     std::list<char*> slaves_list;
     std::list<char*>::iterator it;
 
@@ -407,6 +410,10 @@ int main(int argc, char** argv)
 
             case 'I':
                 internals_list.push_back(optarg);
+                break;
+
+            case 'B':
+                bridges_list.push_back(optarg);
                 break;
 
             case 'p':
@@ -636,6 +643,43 @@ int main(int argc, char** argv)
     if (!jackctl_server_start(server_ctl)) {
         fprintf(stderr, "Failed to start server\n");
         goto close_server;
+    }
+
+    // jack2-nspa: sound card bridges, once the server runs
+    for (std::list<char*>::iterator it = bridges_list.begin(); it != bridges_list.end(); it++) {
+        jackctl_driver_t * bridge = jackctl_server_get_driver(server_ctl, "bridge");
+        if (!bridge) {
+            fprintf(stderr, "No bridge driver: cannot bridge %s\n", *it);
+            break;
+        }
+        char spec[256];
+        snprintf(spec, sizeof(spec), "%s", *it);
+        char * at = strchr(spec, '@');
+        char * slash = strchr(spec, '/');
+        union jackctl_parameter_value v;
+        const JSList * params = jackctl_driver_get_parameters(bridge);
+        jackctl_parameter_t * param;
+        if (at) {
+            *at = 0;
+            if ((param = jackctl_get_parameter(params, "wake"))) {
+                snprintf(v.str, sizeof(v.str), "%s", at + 1);
+                jackctl_parameter_set_value(param, &v);
+            }
+        }
+        if (slash) {
+            *slash = 0;
+            if ((param = jackctl_get_parameter(params, "period"))) {
+                v.ui = (uint32_t)atoi(slash + 1);
+                jackctl_parameter_set_value(param, &v);
+            }
+        }
+        if ((param = jackctl_get_parameter(params, "device"))) {
+            snprintf(v.str, sizeof(v.str), "%s", spec);
+            jackctl_parameter_set_value(param, &v);
+        }
+        if (!jackctl_server_add_bridge(server_ctl, bridge)) {
+            fprintf(stderr, "Cannot bridge %s\n", *it);
+        }
     }
 
     notify_server_start(server_name);

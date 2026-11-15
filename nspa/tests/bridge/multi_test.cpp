@@ -25,6 +25,16 @@
 
 using namespace Jack;
 
+// the cards' timestamps are on CLOCK_MONOTONIC_RAW: a cycle start on CLOCK_MONOTONIC goes there by
+// the offset measured now, as the server does (JackAudioDriver::RunBridgesPlayback)
+static int64_t ToRaw(int64_t mono_ns)
+{
+    struct timespec r, m;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &r);
+    clock_gettime(CLOCK_MONOTONIC, &m);
+    return mono_ns + (int64_t(r.tv_sec) - int64_t(m.tv_sec)) * 1000000000LL + (r.tv_nsec - m.tv_nsec);
+}
+
 static int64_t Now()
 {
     struct timespec ts;
@@ -105,18 +115,19 @@ static void* MasterThread(void* arg)
         }
         struct timespec ts = { time_t(t_c / 1000000000LL), long(t_c % 1000000000LL) };
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
+        const int64_t t_raw = ToRaw(t_c);
         // as in a server cycle: every card's capture before the graph, playback after it
         int64_t spent[16] = { 0 };
         for (size_t i = 0; i < m->cards.size(); i++) {
             Card* c = m->cards[i];
             const int64_t a = Now();
-            if (c->cch) c->cap.Cycle(t_c, m->n, 1e9 / m->rate, &c->outp[0]);
+            if (c->cch) c->cap.Cycle(t_raw, m->n, 1e9 / m->rate, &c->outp[0]);
             spent[i] += Now() - a;
         }
         for (size_t i = 0; i < m->cards.size(); i++) {
             Card* c = m->cards[i];
             const int64_t a = Now();
-            if (c->pch) c->play.Cycle(t_c, m->n, 1e9 / m->rate, &c->inp[0]);
+            if (c->pch) c->play.Cycle(t_raw, m->n, 1e9 / m->rate, &c->inp[0]);
             spent[i] += Now() - a;
         }
         for (size_t i = 0; i < m->cards.size(); i++) {
