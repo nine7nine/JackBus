@@ -199,6 +199,7 @@ def build(bld):
             '../posix/JackPosixServerLaunch.cpp',
             '../posix/JackBusClientChannel.cpp',
             'JackBusLibClient.cpp',
+            'JackBusNode.cpp',
             ]
 
     if bld.env['IS_FREEBSD']:

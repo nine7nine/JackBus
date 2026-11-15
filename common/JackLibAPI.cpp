@@ -239,6 +239,27 @@ LIB_EXPORT jack_client_t* jackbus_client_open(const char* ext_client_name, jack_
 #endif
 }
 
+#ifdef __linux__
+// libjack-internal (JackBusNode): a client of the JackBus socket, varargs as a va_list
+jack_client_t* JackBusClientOpenV(const char* ext_client_name, jack_options_t options, jack_status_t* status, va_list ap)
+{
+    JackGlobals::CheckContext("jackbus_node_open");
+    try {
+        assert(JackGlobals::fOpenMutex);
+        JackGlobals::fOpenMutex->Lock();
+        jack_client_t* res = jack_client_open_aux(ext_client_name, options, status, ap, true);
+        JackGlobals::fOpenMutex->Unlock();
+        return res;
+    } catch (std::bad_alloc& e) {
+        jack_error("Memory allocation error...");
+        return NULL;
+    } catch (...) {
+        jack_error("Unknown error...");
+        return NULL;
+    }
+}
+#endif
+
 LIB_EXPORT int jack_client_close(jack_client_t* ext_client)
 {
     JackGlobals::CheckContext("jack_client_close");
