@@ -23,11 +23,12 @@ static int process(jack_nframes_t n, void *arg)
 {
 	(void)arg;
 	const float *x = jack_port_get_buffer(in, n);
-	float p = peak;   /* written here, read and reset by main once a second (a test: no lock) */
+	float p;
+	__atomic_load(&peak, &p, __ATOMIC_RELAXED);   /* main reads and resets it once a second */
 	for (jack_nframes_t i = 0; i < n; i++)
 		if (fabsf(x[i]) > p)
 			p = fabsf(x[i]);
-	peak = p;
+	__atomic_store(&peak, &p, __ATOMIC_RELAXED);
 	memset(jack_port_get_buffer(out, n), 0, n * sizeof(float));
 	__atomic_add_fetch(&cycles, 1, __ATOMIC_RELAXED);
 	return 0;
@@ -55,8 +56,8 @@ int main(int argc, char **argv)
 	for (int t = 0; t < seconds; t++) {
 		sleep(1);
 		unsigned long now = __atomic_load_n(&cycles, __ATOMIC_RELAXED);
-		float p = peak;
-		peak = 0.0f;
+		float p, zero = 0.0f;
+		__atomic_exchange(&peak, &zero, &p, __ATOMIC_RELAXED);
 		printf("t=%d cycles=%lu rate=%lu xruns=%d peak=%.1f\n", t + 1, now, now - last,
 		       __atomic_load_n(&xruns, __ATOMIC_RELAXED), p > 0 ? 20.0 * log10(p) : -200.0);
 		fflush(stdout);

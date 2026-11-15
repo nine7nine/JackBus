@@ -33,7 +33,7 @@ if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
     exit $?
 fi
 work=$(mktemp -d /tmp/nspa-bridge-server.XXXXXX)
-cc -O2 -Wall -I"$root/common" -o "$work/client" "$here/bridge_client.c" -L"$JACK_BUILD/common" -ljack -lm || exit 1
+cc -O2 -Wall ${NSPA_TEST_CFLAGS:-} -I"$root/common" -o "$work/client" "$here/bridge_client.c" -L"$JACK_BUILD/common" -ljack -lm || exit 1
 export JACK_DEFAULT_SERVER="nspa-bridge-$$"
 jackd=$JACK_BUILD/jackd; [ -x "$jackd" ] || jackd=$JACK_BUILD/linux/jackd
 bridges=""

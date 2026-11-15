@@ -21,7 +21,7 @@ namespace Jack
 JackBridgeDriver::JackBridgeDriver(const char* name, JackLockedEngine* engine, JackSynchro* table)
     : JackAudioDriver(name, "alsa_pcm", engine, table), fHaveCap(false), fHavePlay(false),
       fReportedCapture(0), fReportedPlayback(0), fLoggedCapState(-1), fLoggedPlayState(-1), fLoggedCard(-1),
-      fLoggedResyncs(0)
+      fLoggedResyncs(0), fLastReopen(0)
 {
     fDevice[0] = 0;
     memset(fIn, 0, sizeof(fIn));
@@ -225,14 +225,26 @@ void JackBridgeDriver::BridgeMonitor()
     }
 
     // state changes, once each: locked (with the delays), the card gone or back
-    const int card = fCard.State();
+    int card = fCard.State();
     if (card != fLoggedCard) {
         if (card == kAlsaLost) {
-            jack_info("bridge %s: the card is gone", fClientControl.fName);
+            jack_info("bridge %s: the card is gone (its ports stay, silent, until it is back)", fClientControl.fName);
         } else if (card == kAlsaFailed) {
             jack_error("bridge %s: the card failed", fClientControl.fName);
         }
         fLoggedCard = card;
+    }
+    // a lost or failed card: open it again once a second; the ports and their connections stay
+    if (card == kAlsaLost || card == kAlsaFailed) {
+        const int64_t now = GetMicroSeconds();
+        if (now - fLastReopen >= 1000000) {
+            fLastReopen = now;
+            if (fCard.Reopen()) {
+                jack_info("bridge %s: the card is back", fClientControl.fName);
+                card = fCard.State();
+                fLoggedCard = card;
+            }
+        }
     }
     const int cs = fHaveCap ? fCap.PublishedState() : kBridgeLocked;
     const int ps = fHavePlay ? fPlay.PublishedState() : kBridgeLocked;

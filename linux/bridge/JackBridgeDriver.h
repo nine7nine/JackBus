@@ -62,6 +62,7 @@ class JackBridgeDriver : public JackAudioDriver, public JackBridgeInterface
         int fLoggedPlayState;
         int fLoggedCard;
         int64_t fLoggedResyncs;
+        int64_t fLastReopen;        // us: the last try at reopening a lost card
 };
 
 } // end of namespace

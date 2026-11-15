@@ -113,7 +113,7 @@ static int64_t NowNs()
 JackBridgeAlsa::JackBridgeAlsa()
     : fCap(NULL), fPlay(NULL), fCapFormat(SND_PCM_FORMAT_UNKNOWN), fPlayFormat(SND_PCM_FORMAT_UNKNOWN),
       fRate(0), fPeriod(0), fBufferSize(0), fCapChannels(0), fPlayChannels(0), fBatch(false),
-      fLinked(false), fHaveCap(false), fHavePlay(false), fCapRead(0), fPlayWritten(0), fPlayOffset(0), fLastRead(0), fLastFill(0), fLastQueued(0), fTimerWakes(0), fConv(NULL),
+      fLinked(false), fHaveCap(false), fHavePlay(false), fStartedCap(NULL), fStartedPlay(NULL), fCapRead(0), fPlayWritten(0), fPlayOffset(0), fLastRead(0), fLastFill(0), fLastQueued(0), fTimerWakes(0), fConv(NULL),
       fThreadRunning(false), fRun(false), fState(kAlsaClosed), fXruns(0)
 {}
 
@@ -244,8 +244,36 @@ bool JackBridgeAlsa::Open(const JackBridgeAlsaParams& params)
     return fConv != NULL;
 }
 
+bool JackBridgeAlsa::Reopen()
+{
+    JackBridgeAlsaParams p = fParams;
+    const unsigned rate = fRate;
+    const int cch = fCapChannels, pch = fPlayChannels;
+    Stop();                 // the card thread has ended; closes what is left
+    p.fCaptureChannels = cch;
+    p.fPlaybackChannels = pch;
+    if (!Open(p)) {
+        fState.store(kAlsaLost, std::memory_order_release);
+        return false;
+    }
+    if (fRate != rate || fCapChannels != cch || fPlayChannels != pch) {
+        fprintf(stderr, "bridge: the card came back different (%u Hz, %d/%d channels)\n", fRate, fCapChannels, fPlayChannels);
+        Stop();
+        fState.store(kAlsaLost, std::memory_order_release);
+        return false;
+    }
+    if (!Start(fStartedCap, fStartedPlay)) {
+        Stop();
+        fState.store(kAlsaLost, std::memory_order_release);
+        return false;
+    }
+    return true;
+}
+
 bool JackBridgeAlsa::Start(JackBridgeCapture* capture, JackBridgePlayback* playback)
 {
+    fStartedCap = capture;
+    fStartedPlay = playback;
     fHaveCap = (capture && fCap);
     fHavePlay = (playback && fPlay);
     if (fHaveCap) {

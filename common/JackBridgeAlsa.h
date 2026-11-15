@@ -76,6 +76,10 @@ class JackBridgeAlsa
         // connects the directions (either may be NULL), then starts the card and its thread
         bool Start(JackBridgeCapture* capture, JackBridgePlayback* playback);
         void Stop();     // non-RT: joins the thread, closes the card
+        // non-RT, the card lost (unplugged): open it again with what Open and Start were given
+        // and start it, if it comes back the same (rate, channels). Positions go on counting;
+        // the directions see a new epoch and place their delays again. False: not yet.
+        bool Reopen();
         int State() const { return fState.load(std::memory_order_acquire); }
         long Xruns() const { return fXruns.load(std::memory_order_relaxed); }
         long TimerWakes() const { return fTimerWakes; }   // informational, card thread's
@@ -107,6 +111,8 @@ class JackBridgeAlsa
         JackBridgeCardPlayback fCardPlay;
         bool fHaveCap;
         bool fHavePlay;
+        JackBridgeCapture* fStartedCap;      // what Start was given (Reopen)
+        JackBridgePlayback* fStartedPlay;
         int64_t fCapRead;          // card frames read (capture position of the next one)
         int64_t fPlayWritten;      // card frames written (playback position of the next one)
         // One card, one clock: when capture and playback are linked, the playback direction's
