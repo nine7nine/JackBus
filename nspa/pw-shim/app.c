@@ -2,10 +2,13 @@
  * jackbus-pw: the application's JACK client.
  *
  * One JACK client per process, as a JACK application has: a node of the
- * native JackBus API (jack/jackbus.h), opened when the first pw_filter
- * connects and closed when the last one goes. Every filter is a group of
- * ports on it, and the node's process function runs each connected filter in
- * turn, in the JACK realtime thread.
+ * native JackBus API (jack/jackbus.h), opened at the first reference (a
+ * pw_filter or pw_stream connecting, or a registry listing JackBus's devices)
+ * and closed with the last. It is active (in the graph's cycle) only while a
+ * filter or stream is connected: an application that only enumerates devices
+ * costs the graph nothing. Every filter and stream is a group of ports on
+ * it, and the node's process function runs each in turn, in the JACK
+ * realtime thread, after the data loop's queued invokes (loop.c).
  *
  * The list of connected filters and streams is published to that thread the way the node
  * publishes its port table: a new array, an atomic pointer, and the old array
@@ -13,7 +16,8 @@
  * cycle runs). The realtime thread never waits.
  *
  * The node's events are read by a small non-realtime thread: a SHUTDOWN puts
- * every filter in the error state, on its own loop.
+ * every filter in the error state, on its own loop; client and port changes
+ * tell the registries (core.c) to look again.
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -44,6 +48,7 @@ static struct {
 	pthread_t events;
 	int wake[2];			/* stops the event thread */
 	bool events_running;
+	bool active;
 	char name[JACK_CLIENT_NAME_SIZE_MAX];	/* asked for */
 } app = { .lock = PTHREAD_MUTEX_INITIALIZER, .wake = { -1, -1 } };
 
@@ -51,6 +56,7 @@ static int app_process(jackbus_node_t *node, const jackbus_cycle_t *cycle, void 
 {
 	(void)node; (void)arg;
 	atomic_fetch_add_explicit(&app.seq, 1, memory_order_seq_cst);
+	shim_data_loop_run();
 	struct filter_list *l = atomic_load_explicit(&app.list, memory_order_seq_cst);
 	for (size_t i = 0; l && i < l->count; i++)
 		l->members[i]->process(l->members[i], cycle);
@@ -93,9 +99,15 @@ static void *event_thread(void *arg)
 			break;
 		jackbus_event_t e;
 		while (jackbus_node_next_event(app.node, &e) == 1) {
+			if (e.type == JACKBUS_EVENT_CLIENT || e.type == JACKBUS_EVENT_PORT ||
+			    e.type == JACKBUS_EVENT_RENAME || e.type == JACKBUS_EVENT_LOST) {
+				shim_registry_changed();
+				continue;
+			}
 			if (e.type != JACKBUS_EVENT_SHUTDOWN)
 				continue;
 			shim_log("the JACK server went away: %s", e.name);
+			shim_data_loop_set_running(false);
 			pthread_mutex_lock(&app.lock);
 			struct filter_list *l = atomic_load(&app.list);
 			for (size_t i = 0; l && i < l->count; i++)
@@ -125,7 +137,6 @@ jackbus_node_t *shim_app_ref(const char *name)
 		struct filter_list *l = calloc(1, sizeof(*l));
 		atomic_store(&app.list, l);
 		if (jackbus_node_set_process(app.node, app_process, NULL) != 0
-		    || jackbus_node_activate(app.node) != 0
 		    || pipe2(app.wake, O_CLOEXEC) != 0) {
 			shim_warn("can't start the JACK client \"%s\"", name);
 			jackbus_node_close(app.node);
@@ -165,7 +176,9 @@ void shim_app_unref(void)
 	close(app.wake[0]);
 	close(app.wake[1]);
 	app.wake[0] = app.wake[1] = -1;
+	app.active = false;
 	jackbus_node_close(node);		/* the realtime thread is gone after this */
+	shim_data_loop_set_running(false);
 	free(atomic_exchange(&app.list, NULL));
 	shim_log("JACK client closed");
 }
@@ -173,6 +186,29 @@ void shim_app_unref(void)
 const char *shim_app_client_name(void)
 {
 	return app.node ? app.name : NULL;
+}
+
+jack_client_t *shim_app_client(void)
+{
+	return app.node ? jackbus_node_client(app.node) : NULL;
+}
+
+/* under app.lock: in the graph's cycle while something runs in it */
+static void set_active(bool active)
+{
+	if (app.node == NULL || active == app.active)
+		return;
+	if (active) {
+		if (jackbus_node_activate(app.node) != 0) {
+			shim_warn("can't activate the JACK client \"%s\"", app.name);
+			return;
+		}
+		shim_data_loop_set_running(true);
+	} else {
+		jackbus_node_deactivate(app.node);
+		shim_data_loop_set_running(false);	/* no cycle runs from here */
+	}
+	app.active = active;
 }
 
 void shim_app_attach(struct shim_member *f)
@@ -188,6 +224,7 @@ void shim_app_attach(struct shim_member *f)
 		l->count = n + 1;
 		atomic_store(&app.list, l);
 		shim_app_retire(old);
+		set_active(true);
 	}
 	pthread_mutex_unlock(&app.lock);
 }
@@ -204,6 +241,8 @@ void shim_app_detach(struct shim_member *f)
 					l->members[l->count++] = old->members[i];
 			atomic_store(&app.list, l);
 			shim_app_retire(old);	/* from here no cycle runs f */
+			if (l->count == 0)
+				set_active(false);
 		}
 	}
 	pthread_mutex_unlock(&app.lock);

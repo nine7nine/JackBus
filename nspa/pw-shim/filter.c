@@ -3,8 +3,10 @@
  *
  * Every pw_filter of the process is a group of ports on one JACK client (the
  * application's node, app.c); each "32 bit float mono audio" DSP port is one
- * JACK audio port, named after the port, or "<node.name>/<port>" when the
- * filter's node.name isn't the client's. The node runs each connected
+ * JACK audio port, each "8 bit raw midi" or "32 bit raw UMP" port one JACK
+ * MIDI port (a control sequence per cycle, converted in place: midi.c), named
+ * after the port, or "<node.name>/<port>" when the filter's node.name isn't
+ * the client's. pw_filter_get_data_loop() is the JACK thread's (loop.c). The node runs each connected
  * filter's process callback in the JACK realtime thread, at the server's rate
  * and period: whatever the application asked for (node.latency, node.rate,
  * PIPEWIRE_QUANTUM, ...) is logged and not obeyed, as WineASIO does with a
@@ -28,8 +30,13 @@
 #include <spa/utils/result.h>
 #include <spa/utils/string.h>
 
+#include <spa/control/control.h>
+#include <sys/mman.h>
+#include <jack/midiport.h>
+
 #include "shim.h"
 
+#define MIDI_SIZE 32768u		/* a cycle's MIDI as a control sequence */
 #define PORT_DATA_OFFSET SPA_ROUND_UP_N(sizeof(struct filter_port), 16)
 
 enum notify_bits {
@@ -45,10 +52,13 @@ struct filter_port {
 	struct pw_properties *props;
 	jackbus_port_t *bport;
 	bool is_audio;
+	bool is_midi, ump;		/* MIDI: as MIDI 1.0 bytes, or UMP */
 	uint32_t number;		/* input_N / output_N when it has no name */
+	uint8_t *midi;			/* MIDI: the sequence buffer, locked */
 
 	/* per cycle, realtime thread only */
 	float *buf;
+	void *jmidi;			/* MIDI: the JACK buffer */
 	bool used;
 
 	/* the DSP buffer seen as a pw_buffer, for dequeue/queue users */
@@ -169,8 +179,23 @@ static void filter_process(struct shim_member *m, const jackbus_cycle_t *c)
 	f->nframes = c->nframes;
 	for (size_t i = 0; a && i < a->count; i++) {
 		struct filter_port *p = a->ports[i];
-		p->buf = jackbus_port_audio(p->bport);
 		p->used = false;
+		if (!p->is_midi) {
+			p->buf = jackbus_port_audio(p->bport);
+			continue;
+		}
+		p->jmidi = jackbus_port_midi(p->bport);
+		p->sdata.data = p->midi;
+		p->sdata.maxsize = MIDI_SIZE;
+		p->chunk.offset = 0;
+		p->chunk.stride = 1;
+		p->chunk.flags = 0;
+		if (p->direction == PW_DIRECTION_INPUT) {
+			p->chunk.size = shim_midi_from_jack(p->jmidi, p->midi, MIDI_SIZE, p->ump);
+		} else {
+			jack_midi_clear_buffer(p->jmidi);
+			p->chunk.size = 0;
+		}
 	}
 
 	if (atomic_load_explicit(&f->streaming, memory_order_acquire) &&
@@ -187,6 +212,13 @@ static void filter_process(struct shim_member *m, const jackbus_cycle_t *c)
 	 * (a JACK output buffer still holds the previous cycle) */
 	for (size_t i = 0; a && i < a->count; i++) {
 		struct filter_port *p = a->ports[i];
+		if (p->is_midi) {
+			if (p->direction == PW_DIRECTION_OUTPUT && p->used)
+				shim_midi_to_jack(p->midi, MIDI_SIZE, p->chunk.offset, p->chunk.size,
+						p->jmidi, c->nframes);
+			p->jmidi = NULL;
+			continue;
+		}
 		if (p->direction == PW_DIRECTION_OUTPUT && p->buf && !p->used)
 			memset(p->buf, 0, c->nframes * sizeof(float));
 		p->buf = NULL;
@@ -217,11 +249,20 @@ static void emit_format(struct pw_filter *f, struct filter_port *p)
 {
 	uint8_t buffer[512];
 	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
-	struct spa_pod *fmt = spa_pod_builder_add_object(&b,
-			SPA_TYPE_OBJECT_Format, SPA_PARAM_Format,
-			SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-			SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
-			SPA_FORMAT_AUDIO_format, SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32));
+	struct spa_pod *fmt;
+	if (p->is_midi)
+		fmt = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_Format, SPA_PARAM_Format,
+				SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_application),
+				SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_control),
+				SPA_FORMAT_CONTROL_types,
+				SPA_POD_Int(1u << (p->ump ? SPA_CONTROL_UMP : SPA_CONTROL_Midi)));
+	else
+		fmt = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_Format, SPA_PARAM_Format,
+				SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+				SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
+				SPA_FORMAT_AUDIO_format, SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32));
 	spa_hook_list_call(&f->listeners, struct pw_filter_events, param_changed, 0,
 			port_user_data(p), SPA_PARAM_Format, fmt);
 }
@@ -241,8 +282,7 @@ static void on_notify(void *data, uint64_t count)
 		spa_hook_list_call(&f->listeners, struct pw_filter_events, io_changed, 0,
 				NULL, SPA_IO_Position, &f->position, sizeof(f->position));
 		spa_list_for_each(p, &f->ports, link)
-			if (p->is_audio)
-				emit_format(f, p);
+			emit_format(f, p);
 		if (!(f->flags & PW_FILTER_FLAG_INACTIVE)) {
 			atomic_store(&f->active, true);
 			set_state(f, PW_FILTER_STATE_STREAMING, 0, NULL);
@@ -358,11 +398,12 @@ static int register_port(struct pw_filter *f, struct filter_port *p)
 	shim_app_port_name(pw_properties_get(f->props, PW_KEY_NODE_NAME), pname, name, sizeof(name));
 
 	unsigned long flags = out ? JackPortIsOutput : JackPortIsInput;
-	p->bport = jackbus_port_add(f->node, name, JACKBUS_AUDIO, flags);
+	int kind = p->is_midi ? JACKBUS_MIDI : JACKBUS_AUDIO;
+	p->bport = jackbus_port_add(f->node, name, kind, flags);
 	for (int i = 2; p->bport == NULL && i < 100; i++) {
 		char unique[310];
 		snprintf(unique, sizeof(unique), "%s-%d", name, i);
-		p->bport = jackbus_port_add(f->node, unique, JACKBUS_AUDIO, flags);
+		p->bport = jackbus_port_add(f->node, unique, kind, flags);
 	}
 	if (p->bport == NULL)
 		return -EIO;
@@ -381,8 +422,11 @@ SHIM_EXPORT void *pw_filter_add_port(struct pw_filter *f, enum pw_direction dire
 	if (props == NULL)
 		props = pw_properties_new(NULL, NULL);
 	dsp = pw_properties_get(props, PW_KEY_FORMAT_DSP);
-	if (dsp == NULL || !spa_streq(dsp, "32 bit float mono audio")) {
-		/* MIDI/UMP and video DSP ports: not yet */
+	bool audio = dsp && spa_streq(dsp, "32 bit float mono audio");
+	bool midi = dsp && spa_streq(dsp, "8 bit raw midi");
+	bool ump = dsp && spa_streq(dsp, "32 bit raw UMP");
+	if (!audio && !midi && !ump) {
+		/* video DSP ports: never; other control formats: not on JACK */
 		shim_warn("%s: port format \"%s\" is not supported", f->name, dsp ? dsp : "(none)");
 		pw_properties_free(props);
 		errno = ENOTSUP;
@@ -392,11 +436,24 @@ SHIM_EXPORT void *pw_filter_add_port(struct pw_filter *f, enum pw_direction dire
 		pw_properties_free(props);
 		return NULL;
 	}
+	if (!audio) {
+		void *mem = NULL;
+		if (posix_memalign(&mem, 64, MIDI_SIZE) != 0) {
+			pw_properties_free(props);
+			free(p);
+			return NULL;
+		}
+		memset(mem, 0, MIDI_SIZE);
+		mlock(mem, MIDI_SIZE);
+		p->midi = mem;
+	}
 	p->filter = f;
 	p->direction = direction;
 	p->flags = flags;
 	p->props = props;
-	p->is_audio = true;
+	p->is_audio = audio;
+	p->is_midi = !audio;
+	p->ump = ump;
 	p->sbuf.n_datas = 1;
 	p->sbuf.datas = &p->sdata;
 	p->sdata.type = SPA_DATA_MemPtr;
@@ -408,6 +465,7 @@ SHIM_EXPORT void *pw_filter_add_port(struct pw_filter *f, enum pw_direction dire
 	if (f->node && register_port(f, p) < 0) {
 		pthread_mutex_unlock(&f->ports_lock);
 		pw_properties_free(props);
+		free(p->midi);
 		free(p);
 		errno = EIO;
 		return NULL;
@@ -432,6 +490,7 @@ SHIM_EXPORT int pw_filter_remove_port(void *port_data)
 	if (p->bport)
 		jackbus_port_remove(p->bport);
 	pw_properties_free(p->props);
+	free(p->midi);
 	free(p);
 	return 0;
 }
@@ -565,6 +624,7 @@ SHIM_EXPORT void pw_filter_destroy(struct pw_filter *f)
 	spa_list_for_each_safe(p, t, &f->ports, link) {
 		spa_list_remove(&p->link);
 		pw_properties_free(p->props);
+		free(p->midi);
 		free(p);
 	}
 	pw_loop_destroy_source(f->core->context->main_loop, f->notify);
@@ -643,9 +703,7 @@ SHIM_EXPORT uint64_t pw_filter_get_nsec(struct pw_filter *f)
 
 SHIM_EXPORT struct pw_loop *pw_filter_get_data_loop(struct pw_filter *f)
 {
-	/* not emulated yet: invoke on it runs on the main loop */
-	shim_log("%s: pw_filter_get_data_loop returns the main loop", f->name);
-	return f->core->context->main_loop;
+	return shim_data_loop_get(f->core->context);
 }
 
 SHIM_EXPORT struct pw_buffer *pw_filter_dequeue_buffer(void *port_data)
@@ -653,6 +711,13 @@ SHIM_EXPORT struct pw_buffer *pw_filter_dequeue_buffer(void *port_data)
 	struct filter_port *p = port_from_user_data(port_data);
 	struct pw_filter *f = p->filter;
 
+	if (p->is_midi) {
+		if (!f->in_process || p->jmidi == NULL)
+			return NULL;
+		p->used = true;
+		p->pwbuf.size = p->chunk.size;
+		return &p->pwbuf;
+	}
 	if (!f->in_process || p->buf == NULL)
 		return NULL;
 	p->used = true;
@@ -676,6 +741,19 @@ SHIM_EXPORT void *pw_filter_get_dsp_buffer(void *port_data, uint32_t n_samples)
 	struct filter_port *p = port_from_user_data(port_data);
 	struct pw_filter *f = p->filter;
 
+	if (p->is_midi) {
+		/* as PipeWire: the sequence buffer; an output's chunk says n_samples
+		 * floats, the sequence's own size bounds what is read */
+		if (!f->in_process || p->jmidi == NULL)
+			return NULL;
+		p->used = true;
+		if (p->direction == PW_DIRECTION_OUTPUT) {
+			p->chunk.offset = 0;
+			p->chunk.size = n_samples * sizeof(float);
+			p->chunk.stride = sizeof(float);
+		}
+		return p->midi;
+	}
 	if (!f->in_process || p->buf == NULL || n_samples > f->nframes)
 		return NULL;
 	p->used = true;

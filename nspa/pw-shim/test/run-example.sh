@@ -111,26 +111,37 @@ run_config() {  # rate period
     sed 's/^/  /' "$logs/two-check-a-$rate.log" "$logs/two-check-b-$rate.log" "$logs/two-$rate.log" 2>/dev/null | grep -E 'check:|twofilter:'
     echo "$res pw-twofilter at $rate/$period: one client, ports $ports"
 
-    # 4. pw_stream playback: PipeWire's audio-src (F32, 2 channels, 44100 Hz only)
+    # 4. pw_stream playback: PipeWire's audio-src (F32, 2 channels, 44100 Hz
+    #    only, RT_PROCESS): as it is at 44100, resampled by the shim elsewhere;
+    #    a continuous 440 Hz sine either way
     "$launcher" -v "$out/audio-src" >"$logs/src-$rate.log" 2>&1 &
     srcp=$!
-    if [ "$rate" = 44100 ]; then
-        i=0; while [ $i -lt 100 ] && ! jack_lsp 2>/dev/null | grep -q '^audio-src:FL'; do sleep 0.1; i=$((i + 1)); done
-        timeout 20 jack_rec -f "$logs/src.wav" -d 2 audio-src:FL >/dev/null 2>&1
-        if python3 -I "$tree/nspa/tests/tools/sine_check.py" "$logs/src.wav" 440 >"$logs/src-check" 2>&1; then
-            echo "PASS pw_stream playback (audio-src) at $rate: $(cut -d' ' -f2- "$logs/src-check")"
-        else
-            echo "FAIL pw_stream playback (audio-src) at $rate"; cat "$logs/src-check" "$logs/src-$rate.log" | tail -8; fail=1
-        fi
+    i=0; while [ $i -lt 100 ] && ! jack_lsp 2>/dev/null | grep -q '^audio-src:FL'; do sleep 0.1; i=$((i + 1)); done
+    sleep 0.3
+    timeout 20 jack_rec -f "$logs/src.wav" -d 2 audio-src:FL >/dev/null 2>&1
+    how="as it is"
+    if [ "$rate" != 44100 ]; then
+        how="resampled 44100 -> $rate"
+        grep -q "resampled 44100 Hz -> $rate Hz" "$logs/src-$rate.log" || how="NOT resampled?"
+    fi
+    if python3 -I "$tree/nspa/tests/tools/sine_check.py" "$logs/src.wav" 440 >"$logs/src-check" 2>&1 &&
+       [ "$how" != "NOT resampled?" ]; then
+        echo "PASS pw_stream playback (audio-src, 44100 Hz) at $rate, $how: $(cut -d' ' -f2- "$logs/src-check")"
     else
-        sleep 1.5
-        if grep -q "rate 44100 Hz asked, JackBus runs at $rate Hz" "$logs/src-$rate.log"; then
-            echo "PASS pw_stream at $rate: audio-src (44100 only) refused, with the reason"
-        else
-            echo "FAIL pw_stream at $rate: audio-src not refused as expected"; tail -5 "$logs/src-$rate.log"; fail=1
-        fi
+        echo "FAIL pw_stream playback (audio-src) at $rate ($how)"; cat "$logs/src-check" "$logs/src-$rate.log" | tail -8; fail=1
     fi
     kill -INT $srcp 2>/dev/null; wait $srcp 2>/dev/null
+    if [ "$rate" != 44100 ]; then
+        JACKBUS_PW_RESAMPLE=0 "$launcher" -v "$out/audio-src" >"$logs/src-nors-$rate.log" 2>&1 &
+        srcp=$!
+        sleep 1.5
+        if grep -q "rate 44100 Hz asked, JackBus runs at $rate Hz (resampling is off)" "$logs/src-nors-$rate.log"; then
+            echo "PASS pw_stream at $rate with JACKBUS_PW_RESAMPLE=0: audio-src refused, with the reason"
+        else
+            echo "FAIL pw_stream at $rate: JACKBUS_PW_RESAMPLE=0 did not refuse"; tail -5 "$logs/src-nors-$rate.log"; fail=1
+        fi
+        kill -INT $srcp 2>/dev/null; wait $srcp 2>/dev/null
+    fi
 
     # 5. pw_stream capture: PipeWire's audio-capture (F32, any rate), fed a tone
     "$launcher" "$out/audio-capture" >"$logs/cap-$rate.log" 2>&1 &

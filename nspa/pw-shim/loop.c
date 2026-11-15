@@ -16,10 +16,15 @@
 #include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <time.h>
+#include <stdatomic.h>
+#include <sys/mman.h>
 
 #define SHIM_EXPORT __attribute__((visibility("default")))
 #define PW_API_LOOP_IMPL SHIM_EXPORT
 #include <pipewire/loop.h>
+#include <pipewire/data-loop.h>
+#include <pipewire/context.h>
 
 #include <spa/utils/names.h>
 #include <spa/utils/result.h>
@@ -418,4 +423,401 @@ SHIM_EXPORT void pw_thread_loop_accept(struct pw_thread_loop *loop) { pw_loop_ac
 SHIM_EXPORT bool pw_thread_loop_in_thread(struct pw_thread_loop *loop)
 {
 	return loop->running && pthread_equal(loop->thread, pthread_self());
+}
+
+/* ------------------------------------------------------------ data loop */
+
+/*
+ * The data loop of PipeWire is the realtime thread that runs process
+ * callbacks; here that is the JACK realtime thread of the application's
+ * node. pw_loop_invoke() on it queues the function in a slot; the JACK
+ * thread runs the queued functions at the start of each cycle, before any
+ * process callback, so they are serialized with process as in PipeWire. The
+ * realtime side takes no lock and makes no system call: a blocking caller
+ * polls its slot. Called in the JACK thread itself, the function runs at
+ * once; while the node is not in the cycle, the caller runs it.
+ *
+ * Sources (timers, fds) added to the data loop go to the main loop: no fd
+ * is polled in the JACK thread.
+ */
+#define INVOKE_SLOTS 64
+#define INVOKE_DATA 1024
+
+enum { SLOT_FREE, SLOT_FILLED, SLOT_DONE, SLOT_CANCELLED };
+
+struct invoke_slot {
+	atomic_int state;
+	bool block;
+	int res;
+	spa_invoke_func_t func;
+	struct spa_loop *loop;
+	uint32_t seq;
+	size_t size;
+	void *user_data;
+	uint8_t data[INVOKE_DATA] __attribute__((aligned(16)));
+};
+
+static struct {
+	pthread_mutex_t lock;		/* callers */
+	uint32_t w;			/* under lock */
+	uint32_t r;			/* the JACK thread, or a drain while no cycle runs */
+	atomic_bool running;
+	struct invoke_slot *slots;	/* locked memory, made on first use */
+} dl = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+struct pw_data_loop {
+	struct pw_loop *loop;
+	struct spa_hook_list listener_list;
+	bool emulated;			/* the JACK thread's, else a thread of its own */
+	/* emulated */
+	struct pw_loop this;
+	struct spa_loop spa_loop;
+	struct pw_loop *main;
+	bool warned;
+	/* a thread of its own (pw_data_loop_new) */
+	pthread_t thread;
+	bool running;
+	char name[32];
+};
+
+bool shim_in_rt_thread(void)
+{
+	jack_client_t *c = shim_app_client();
+	return c != NULL && atomic_load(&dl.running) &&
+		pthread_equal(pthread_self(), jack_client_thread_id(c));
+}
+
+/* the queued functions, in order; the caller is the only consumer */
+static void run_slots(void)
+{
+	for (;;) {
+		struct invoke_slot *sl = &dl.slots[dl.r % INVOKE_SLOTS];
+		int st = atomic_load_explicit(&sl->state, memory_order_acquire);
+		if (st == SLOT_CANCELLED) {
+			atomic_store_explicit(&sl->state, SLOT_FREE, memory_order_release);
+			dl.r++;
+			continue;
+		}
+		if (st != SLOT_FILLED)
+			break;
+		int res = sl->func(sl->loop, true, sl->seq, sl->size ? sl->data : NULL,
+				sl->size, sl->user_data);
+		int expected = SLOT_FILLED;
+		if (sl->block) {
+			sl->res = res;
+			if (!atomic_compare_exchange_strong(&sl->state, &expected, SLOT_DONE))
+				atomic_store_explicit(&sl->state, SLOT_FREE, memory_order_release);
+		} else {
+			atomic_store_explicit(&sl->state, SLOT_FREE, memory_order_release);
+		}
+		dl.r++;
+	}
+}
+
+void shim_data_loop_run(void)
+{
+	if (dl.slots)
+		run_slots();
+}
+
+/* called once the node is in the cycle, and once no cycle runs any more */
+void shim_data_loop_set_running(bool running)
+{
+	pthread_mutex_lock(&dl.lock);
+	atomic_store(&dl.running, running);
+	if (!running && dl.slots)
+		run_slots();		/* what was queued for a cycle that won't come */
+	pthread_mutex_unlock(&dl.lock);
+}
+
+static void sleep_us(long us)
+{
+	struct timespec ts = { 0, us * 1000 };
+	nanosleep(&ts, NULL);
+}
+
+static int data_invoke(void *object, spa_invoke_func_t func, uint32_t seq,
+		const void *data, size_t size, bool block, void *user_data)
+{
+	struct pw_data_loop *d = object;
+	int res;
+
+	if (shim_in_rt_thread())
+		return func(&d->spa_loop, false, seq, data, size, user_data);
+
+	pthread_mutex_lock(&dl.lock);
+	if (!atomic_load(&dl.running) || dl.slots == NULL || size > INVOKE_DATA) {
+		if (size > INVOKE_DATA && atomic_load(&dl.running) && !d->warned) {
+			shim_warn("data loop: an invoke of %zu bytes runs in the caller", size);
+			d->warned = true;
+		}
+		res = func(&d->spa_loop, false, seq, data, size, user_data);
+		pthread_mutex_unlock(&dl.lock);
+		return res;
+	}
+	struct invoke_slot *sl = &dl.slots[dl.w % INVOKE_SLOTS];
+	for (int i = 0; atomic_load_explicit(&sl->state, memory_order_acquire) != SLOT_FREE; i++) {
+		if (i == 20000) {		/* 2 s: no cycle has run */
+			pthread_mutex_unlock(&dl.lock);
+			return -EPIPE;
+		}
+		sleep_us(100);
+	}
+	sl->func = func;
+	sl->loop = &d->spa_loop;
+	sl->seq = seq;
+	sl->size = size;
+	sl->user_data = user_data;
+	sl->block = block;
+	if (size)
+		memcpy(sl->data, data, size);
+	atomic_store_explicit(&sl->state, SLOT_FILLED, memory_order_release);
+	dl.w++;
+	pthread_mutex_unlock(&dl.lock);
+
+	if (!block)
+		return seq == SPA_ID_INVALID ? 0 : SPA_RESULT_RETURN_ASYNC(seq);
+	for (int i = 0; i < 40000; i++) {	/* 2 s */
+		if (atomic_load_explicit(&sl->state, memory_order_acquire) == SLOT_DONE) {
+			res = sl->res;
+			atomic_store_explicit(&sl->state, SLOT_FREE, memory_order_release);
+			return res;
+		}
+		sleep_us(50);
+	}
+	int expected = SLOT_FILLED;
+	if (atomic_compare_exchange_strong(&sl->state, &expected, SLOT_CANCELLED))
+		return -ETIMEDOUT;
+	res = sl->res;				/* it finished meanwhile */
+	atomic_store_explicit(&sl->state, SLOT_FREE, memory_order_release);
+	return res;
+}
+
+static void warn_source(struct pw_data_loop *d)
+{
+	if (!d->warned)
+		shim_log("data loop: sources run on the main loop");
+	d->warned = true;
+}
+
+static int data_add_source(void *object, struct spa_source *source)
+{
+	struct pw_data_loop *d = object;
+	warn_source(d);
+	return spa_loop_add_source(d->main->loop, source);
+}
+
+static int data_update_source(void *object, struct spa_source *source)
+{
+	struct pw_data_loop *d = object;
+	return spa_loop_update_source(d->main->loop, source);
+}
+
+static int data_remove_source(void *object, struct spa_source *source)
+{
+	struct pw_data_loop *d = object;
+	return spa_loop_remove_source(d->main->loop, source);
+}
+
+static const struct spa_loop_methods data_loop_methods = {
+	SPA_VERSION_LOOP_METHODS,
+	.add_source = data_add_source,
+	.update_source = data_update_source,
+	.remove_source = data_remove_source,
+	.invoke = data_invoke,
+};
+
+static struct pw_data_loop *data_loop_of(struct pw_context *context)
+{
+	if (context->data_loop)
+		return context->data_loop;
+	pthread_mutex_lock(&dl.lock);
+	if (dl.slots == NULL) {
+		void *mem = NULL;
+		if (posix_memalign(&mem, 64, INVOKE_SLOTS * sizeof(struct invoke_slot)) == 0) {
+			memset(mem, 0, INVOKE_SLOTS * sizeof(struct invoke_slot));
+			mlock(mem, INVOKE_SLOTS * sizeof(struct invoke_slot));
+			dl.slots = mem;
+		}
+	}
+	pthread_mutex_unlock(&dl.lock);
+
+	struct pw_data_loop *d = calloc(1, sizeof(*d));
+	if (d == NULL)
+		return NULL;
+	d->emulated = true;
+	d->main = context->main_loop;
+	d->spa_loop.iface = SPA_INTERFACE_INIT(SPA_TYPE_INTERFACE_Loop, SPA_VERSION_LOOP,
+			&data_loop_methods, d);
+	d->this.system = d->main->system;
+	d->this.loop = &d->spa_loop;
+	d->this.control = d->main->control;
+	d->this.utils = d->main->utils;
+	snprintf(d->name, sizeof(d->name), "data-loop.0");
+	d->this.name = d->name;
+	d->loop = &d->this;
+	spa_hook_list_init(&d->listener_list);
+	context->data_loop = d;
+	return d;
+}
+
+struct pw_loop *shim_data_loop_get(struct pw_context *context)
+{
+	struct pw_data_loop *d = data_loop_of(context);
+	return d ? d->loop : context->main_loop;
+}
+
+void shim_data_loop_free(struct pw_context *context)
+{
+	struct pw_data_loop *d = context->data_loop;
+	if (d == NULL)
+		return;
+	spa_hook_list_call(&d->listener_list, struct pw_data_loop_events, destroy, 0);
+	spa_hook_list_clean(&d->listener_list);
+	context->data_loop = NULL;
+	free(d);
+}
+
+SHIM_EXPORT struct pw_data_loop *pw_context_get_data_loop(struct pw_context *context)
+{
+	return data_loop_of(context);
+}
+
+SHIM_EXPORT struct pw_loop *pw_context_acquire_loop(struct pw_context *context, const struct spa_dict *props)
+{
+	(void)props;
+	return shim_data_loop_get(context);
+}
+
+SHIM_EXPORT void pw_context_release_loop(struct pw_context *context, struct pw_loop *loop)
+{
+	(void)context; (void)loop;
+}
+
+/* pw_data_loop_new(): an application's own loop thread, as in PipeWire */
+static void *data_loop_thread(void *user_data)
+{
+	struct pw_data_loop *d = user_data;
+	int res;
+
+	pw_loop_enter(d->loop);
+	while (d->running) {
+		if ((res = pw_loop_iterate(d->loop, -1)) < 0 && res != -EINTR)
+			shim_warn("data loop: %s", spa_strerror(res));
+	}
+	pw_loop_leave(d->loop);
+	return NULL;
+}
+
+SHIM_EXPORT struct pw_data_loop *pw_data_loop_new(const struct spa_dict *props)
+{
+	struct pw_data_loop *d = calloc(1, sizeof(*d));
+	if (d == NULL)
+		return NULL;
+	if ((d->loop = pw_loop_new(props)) == NULL) {
+		free(d);
+		return NULL;
+	}
+	spa_hook_list_init(&d->listener_list);
+	snprintf(d->name, sizeof(d->name), "%s", d->loop->name);
+	return d;
+}
+
+SHIM_EXPORT void pw_data_loop_add_listener(struct pw_data_loop *loop, struct spa_hook *listener,
+		const struct pw_data_loop_events *events, void *data)
+{
+	spa_hook_list_append(&loop->listener_list, listener, events, data);
+}
+
+SHIM_EXPORT int pw_data_loop_wait(struct pw_data_loop *loop, int timeout)
+{
+	return loop->emulated ? -ENOTSUP : pw_loop_iterate(loop->loop, timeout);
+}
+
+static int do_data_stop(struct spa_loop *l, bool async, uint32_t seq,
+		const void *data, size_t size, void *user_data)
+{
+	struct pw_data_loop *d = user_data;
+	d->running = false;
+	return 0;
+}
+
+SHIM_EXPORT void pw_data_loop_exit(struct pw_data_loop *loop)
+{
+	if (!loop->emulated)
+		loop->running = false;
+}
+
+SHIM_EXPORT struct pw_loop *pw_data_loop_get_loop(struct pw_data_loop *loop)
+{
+	return loop->loop;
+}
+
+SHIM_EXPORT const char *pw_data_loop_get_name(struct pw_data_loop *loop)
+{
+	return loop->name;
+}
+
+SHIM_EXPORT const char *pw_data_loop_get_class(struct pw_data_loop *loop)
+{
+	return "data.rt";
+}
+
+SHIM_EXPORT int pw_data_loop_start(struct pw_data_loop *loop)
+{
+	int res;
+	if (loop->emulated || loop->running)
+		return 0;
+	loop->running = true;
+	if ((res = pthread_create(&loop->thread, NULL, data_loop_thread, loop)) != 0) {
+		loop->running = false;
+		return -res;
+	}
+	return 0;
+}
+
+SHIM_EXPORT int pw_data_loop_stop(struct pw_data_loop *loop)
+{
+	if (loop->emulated || !loop->running)
+		return 0;
+	pw_loop_invoke(loop->loop, do_data_stop, 1, NULL, 0, false, loop);
+	pthread_join(loop->thread, NULL);
+	return 0;
+}
+
+SHIM_EXPORT void pw_data_loop_destroy(struct pw_data_loop *loop)
+{
+	if (loop == NULL || loop->emulated)
+		return;		/* the context's: freed with the context */
+	pw_data_loop_stop(loop);
+	spa_hook_list_call(&loop->listener_list, struct pw_data_loop_events, destroy, 0);
+	spa_hook_list_clean(&loop->listener_list);
+	pw_loop_destroy(loop->loop);
+	free(loop);
+}
+
+SHIM_EXPORT bool pw_data_loop_in_thread(struct pw_data_loop *loop)
+{
+	if (loop->emulated)
+		return shim_in_rt_thread();
+	return loop->running && pthread_equal(pthread_self(), loop->thread);
+}
+
+SHIM_EXPORT struct spa_thread *pw_data_loop_get_thread(struct pw_data_loop *loop)
+{
+	if (loop->emulated || !loop->running)
+		return NULL;
+	return (struct spa_thread *)loop->thread;
+}
+
+SHIM_EXPORT int pw_data_loop_invoke(struct pw_data_loop *loop, spa_invoke_func_t func,
+		uint32_t seq, const void *data, size_t size, bool block, void *user_data)
+{
+	return pw_loop_invoke(loop->loop, func, seq, data, size, block, user_data);
+}
+
+SHIM_EXPORT void pw_data_loop_set_thread_utils(struct pw_data_loop *loop,
+		struct spa_thread_utils *thread_utils)
+{
+	(void)loop; (void)thread_utils;
 }

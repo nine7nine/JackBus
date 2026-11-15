@@ -19,19 +19,32 @@ SPA_PLUGINDIR := $(shell pkg-config --variable=plugindir libspa-0.2)
 
 CFLAGS   ?= -O2 -g
 CFLAGS   += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
+CXXFLAGS ?= -O2 -g
+CXXFLAGS += -std=c++11 -Wall -fno-exceptions -fno-rtti
 CPPFLAGS += $(PW_CFLAGS) -I$(JACK_TREE)/common
 
-SRCS = pw.c loop.c core.c filter.c app.c stream.c
+SRCS = pw.c loop.c core.c filter.c app.c stream.c midi.c
+# JackBus's bridge resampler, for streams at another rate (built in, not copied)
+RESAMPLER = $(JACK_TREE)/common/JackBridgeResampler.cpp
+OBJS = $(OUT)/obj/resample.o $(OUT)/obj/JackBridgeResampler.o
 SHIM = $(OUT)/lib/libpipewire-0.3.so.0
 
 all: $(SHIM)
 
-$(SHIM): $(SRCS) shim.h Makefile
+$(OUT)/obj/resample.o: resample.cpp resample.h $(JACK_TREE)/common/JackBridgeResampler.h
+	@mkdir -p $(@D)
+	$(CXX) -I$(JACK_TREE)/common $(CXXFLAGS) -fPIC -fvisibility=hidden -c -o $@ $<
+
+$(OUT)/obj/JackBridgeResampler.o: $(RESAMPLER) $(JACK_TREE)/common/JackBridgeResampler.h
+	@mkdir -p $(@D)
+	$(CXX) -I$(JACK_TREE)/common $(CXXFLAGS) -fPIC -fvisibility=hidden -c -o $@ $<
+
+$(SHIM): $(SRCS) $(OBJS) shim.h resample.h Makefile
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) -DSHIM_SPA_PLUGINDIR='"$(SPA_PLUGINDIR)"' $(CFLAGS) \
 		-fPIC -fvisibility=hidden -shared \
 		-Wl,-soname,libpipewire-0.3.so.0 -Wl,--no-undefined -Wl,-z,defs \
-		-o $@ $(SRCS) -L$(JACK_BUILD)/common -ljack -ldl -lpthread -lm
+		-o $@ $(SRCS) $(OBJS) -L$(JACK_BUILD)/common -ljack -ldl -lpthread -lm
 
 TEST_APPS = $(OUT)/pw-probe $(OUT)/pw-twofilter $(OUT)/jbpw-check \
 	$(if $(PW_EXAMPLES),$(OUT)/audio-dsp-filter $(OUT)/audio-src $(OUT)/audio-capture)
