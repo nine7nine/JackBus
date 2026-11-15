@@ -257,7 +257,7 @@ jack_controller_start_server(
 
     controller_ptr->started = true;
 
-    /* jack2-nspa: the sound card bridges listed */
+    /* JackBus: the sound card bridges listed */
     controller_ptr->bridges_running = 0;
     jack_controller_bridges_apply(controller_ptr);
 
@@ -580,7 +580,7 @@ static union jackctl_parameter_value slave_drivers_parameter_get_default_value(v
 #undef controller_ptr
 
 /*
- jack2-nspa: sound card bridges. The "bridges" engine parameter lists them as jackd's --bridge
+ JackBus: sound card bridges. The "bridges" engine parameter lists them as jackd's --bridge
  takes them, device[/period[/nperiods]][@wake], separated by spaces (device names have commas:
  "hw:U44,0"). They are added once the server runs, and while it runs a change to the list adds
  and removes bridges at once. A listed card that is not there, or cannot be opened, stays listed
@@ -1002,7 +1002,7 @@ jack_controller_bridges_remove(
 
 #undef controller_ptr
 
-/* jack2-nspa: sound card hotplug. The ALSA driver's device list was built once, when jackdbus
+/* JackBus: sound card hotplug. The ALSA driver's device list was built once, when jackdbus
    started; a card plugged in later never appeared. jackdbus watches /dev/snd (inotify, read
    without blocking from the main loop, which wakes every 200 ms anyway) and, once the changes
    have settled, rebuilds the list (jackctl_driver_refresh_constraints), copies it again into
@@ -1192,7 +1192,7 @@ static void jack_controller_snd_watch_run(struct jack_controller * controller_pt
     jack_controller_bridges_apply(controller_ptr);
 }
 
-/* jack2-nspa: surviving an unplugged card. When the master driver's device goes away (a USB
+/* JackBus: surviving an unplugged card. When the master driver's device goes away (a USB
    interface pulled out), the driver thread calls back (jackctl_server_set_backend_lost_callback)
    instead of telling clients the server stopped. On the next tick, jackdbus puts the dummy
    driver in its place, at the same rate and buffer size and with as many ports, so clients

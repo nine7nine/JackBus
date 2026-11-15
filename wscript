@@ -782,7 +782,7 @@ def build_drivers(bld):
             target='alsarawmidi',
             source=alsarawmidi_src,
             use=['ALSA'])
-        # jack2-nspa: sound card bridges (adaptive resampling), added while the server runs
+        # JackBus: sound card bridges (adaptive resampling), added while the server runs
         create_driver_obj(
             bld,
             target='bridge',

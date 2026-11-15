@@ -1,4 +1,4 @@
-/* jack2-nspa hardware test helper: create N ALSA sequencer ports (half
+/* JackBus hardware test helper: create N ALSA sequencer ports (half
  * readable, half writable, all subscribable) and keep them for S seconds.
  * Usage: seq_ports N seconds */
 #include <alsa/asoundlib.h>

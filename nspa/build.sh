@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build jack2-nspa with the same compiler flags and waf options Arch's makepkg
+# Build JackBus with the same compiler flags and waf options Arch's makepkg
 # uses for jack2, into ./build.
 #
 # Usage: nspa/build.sh [extra waf configure args]

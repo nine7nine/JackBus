@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the sound card bridge on snd-aloop, in real time (no JACK server, no sound).
+ JackBus: the sound card bridge on snd-aloop, in real time (no JACK server, no sound).
 
  A master thread runs ideal cycles on CLOCK_MONOTONIC (as JACK's filtered cycle times would).
  A sine goes out through the bridge's playback direction to hw:Loopback,0,0; the loopback

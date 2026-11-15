@@ -132,7 +132,7 @@ bool JackMessageBuffer::Execute()
 }
 
 /*
- jack2-nspa: the instance is never freed. Destroy() used to delete it while a thread whose log
+ JackBus: the instance is never freed. Destroy() used to delete it while a thread whose log
  function is JackMessageBufferAdd (a realtime thread still finishing) could have read the pointer
  and be writing into it: a use after free, and with the next Create() at the same address, two
  threads on one cell (seen by ThreadSanitizer as a race between AddMessage and the log

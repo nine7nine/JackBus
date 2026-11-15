@@ -1,4 +1,4 @@
-/* jack2-nspa hardware test helper.
+/* JackBus hardware test helper.
  *   hwutil wait [secs=10]   wait until a server accepts clients (exit 0) or time out (exit 1)
  *   hwutil midi-ports       print the number of MIDI ports the server has
  *   hwutil xruns [secs]     count xrun callbacks and the peak DSP load for secs

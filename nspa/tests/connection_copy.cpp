@@ -1,4 +1,4 @@
-/* jack2-nspa: JackConnectionManager::CopyFrom() must make the destination
+/* JackBus: JackConnectionManager::CopyFrom() must make the destination
  * byte-identical to the source, whatever stale state the destination holds
  * (JackAtomicState copies the current state into the *next* one, which still
  * holds an older graph). Random connect/disconnect/port add/remove on both,

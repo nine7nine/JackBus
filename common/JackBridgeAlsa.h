@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the card side of the sound card bridge for ALSA (see JackBridgeCore.h).
+ JackBus: the card side of the sound card bridge for ALSA (see JackBridgeCore.h).
 
  One card, one or both directions, its own realtime thread. The thread waits on the card
  (poll), reads what the card captured into the capture FIFO and writes what the graph side

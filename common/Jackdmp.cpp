@@ -323,7 +323,7 @@ int main(int argc, char** argv)
     union jackctl_parameter_value value;
 
     std::list<char*> internals_list;
-    std::list<char*> bridges_list;      // jack2-nspa: --bridge device[/period[/nperiods]][@wake]
+    std::list<char*> bridges_list;      // JackBus: --bridge device[/period[/nperiods]][@wake]
     std::list<char*> slaves_list;
     std::list<char*>::iterator it;
 
@@ -647,7 +647,7 @@ int main(int argc, char** argv)
         goto close_server;
     }
 
-    // jack2-nspa: sound card bridges, once the server runs (device[/period[/nperiods]][@wake])
+    // JackBus: sound card bridges, once the server runs (device[/period[/nperiods]][@wake])
     for (std::list<char*>::iterator it = bridges_list.begin(); it != bridges_list.end(); it++) {
         if (!jackctl_server_add_bridge_spec(server_ctl, *it, NULL)) {
             fprintf(stderr, "Cannot bridge %s\n", *it);

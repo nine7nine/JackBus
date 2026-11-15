@@ -1,4 +1,4 @@
-/* jack2-nspa hardware test: MIDI timing through -X seq, both directions.
+/* JackBus hardware test: MIDI timing through -X seq, both directions.
  *
  * One process is an ALSA sequencer client ("nspaseqloop", ports "out" and
  * "in") and a JACK client. jackd -X seq exposes the ALSA ports as

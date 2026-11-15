@@ -747,7 +747,7 @@ bool
 paths_init()
 {
 	const char *home_dir, *xdg_config_home, *xdg_log_home;
-	char *config_home_alloc = NULL, *log_home_alloc = NULL;  /* jack2-nspa: freed below */
+	char *config_home_alloc = NULL, *log_home_alloc = NULL;  /* JackBus: freed below */
     
     home_dir = getenv("HOME");
     if (home_dir == NULL)

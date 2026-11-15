@@ -168,7 +168,7 @@ class JackAtomicArrayState
         ~JackAtomicArrayState() // Not virtual ??
         {}
 
-        // jack2-nspa: atomic snapshot of fCounter, as in JackAtomicState (written with CAS by
+        // JackBus: atomic snapshot of fCounter, as in JackAtomicState (written with CAS by
         // other threads and processes; a plain read of the volatile is a data race).
         UInt32 LoadCounter1() const
         {

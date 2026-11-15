@@ -1,5 +1,5 @@
 /*
- jack2-nspa: sound card bridges as the master driver sees them.
+ JackBus: sound card bridges as the master driver sees them.
 
  A bridge (the "bridge" driver, linux/bridge) joins a card on its own clock to the master's graph.
  The master runs every bridge in its own cycle: each bridge's playback side right after the

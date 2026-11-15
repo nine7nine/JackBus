@@ -1,4 +1,4 @@
-/* jack2-nspa: input-port mixdown correctness.
+/* JackBus: input-port mixdown correctness.
  *
  * One client connects k = 0..6 of its own outputs to one of its inputs and
  * checks, every cycle, that the input buffer is exactly the sum of the

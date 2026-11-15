@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the sound card bridge driver (jack_bridge.so).
+ JackBus: the sound card bridge driver (jack_bridge.so).
 
  One card on its own clock, joined to the master's graph: a client named after the card (its
  ALSA id), with physical capture and playback ports, run by the master in its own cycle

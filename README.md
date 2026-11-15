@@ -1,4 +1,4 @@
-# jack2dbus-nspa
+# JackBus
 
 JACK2 1.9.22 with real-time safety, correctness and performance work on the
 server engine, the ALSA driver, `jackdbus` and libjack's internals. It builds as
@@ -14,7 +14,7 @@ side file in which each client's realtime thread holds a robust mutex, so the
 server knows the moment a client dies. A stock libjack never opens it, and this
 libjack does without it on a stock server.
 
-**[Architecture document](https://nine7nine.github.io/jack2dbus-nspa/)**: how the
+**[Architecture document](https://nine7nine.github.io/JackBus/)**: how the
 server, libjack, shared memory and the activation graph work, every change with
 diagrams, and the measurements behind them (source: [`docs/index.html`](docs/index.html)).
 
@@ -227,12 +227,12 @@ nspa/tests/hw/run-hw.sh [hw:PCH]                 # real hardware, outputs muted
 
 ## Building and installing
 
-Arch Linux: `nspa/pkg/jack2dbus-nspa` contains a PKGBUILD that replaces `jack2`
+Arch Linux: `nspa/pkg/JackBus` contains a PKGBUILD that replaces `jack2`
 and `jack2-dbus` (it provides `jack2=1.9.22`, so `lib32-jack2` stays
 installable):
 
 ```sh
-cd nspa/pkg/jack2dbus-nspa
+cd nspa/pkg/JackBus
 makepkg -si                 # or NSPA_REPO=/path/to/clone makepkg -si
 jack_control exit           # end the old jackdbus; D-Bus starts the new one
 ```

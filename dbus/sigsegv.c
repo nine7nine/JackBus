@@ -10,7 +10,7 @@
  *
  * Copyright (C) 2005 - 2008 Jaco Kroon
  *
- * jack2-nspa: rewritten to be async-signal-safe. The previous handler called
+ * JackBus: rewritten to be async-signal-safe. The previous handler called
  * jack_error() (vsnprintf, stat/fopen/fprintf on the log file),
  * __cxa_demangle() (malloc), walked frame pointers and finished with exit()
  * while the server's realtime threads were still running. A crash inside

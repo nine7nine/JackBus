@@ -39,7 +39,7 @@ class JackAlsaDriver : public JackAudioDriver
     private:
 
         jack_driver_t* fDriver;
-        /* jack2-nspa: the cards whose device reservations Open took (-1: none), released by
+        /* JackBus: the cards whose device reservations Open took (-1: none), released by
            Close. Not looked up again at Close: a card that was unplugged has no index left. */
         int fReservedCaptureCard;
         int fReservedPlaybackCard;
@@ -87,7 +87,7 @@ class JackAlsaDriver : public JackAudioDriver
         int Write();
 
         // BufferSize can be changed
-        /* jack2-nspa: the wake timer (alsa_driver_wait): "adaptive" (the default), "on", "off",
+        /* JackBus: the wake timer (alsa_driver_wait): "adaptive" (the default), "on", "off",
            or a margin in us (on) */
         void SetWakeTimer(const char* mode)
         {

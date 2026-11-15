@@ -378,13 +378,13 @@ int JackDriver::Start()
     if (fIsMaster) {
         fEngineControl->InitFrameTime();
     }
-    __atomic_store_n(&fIsRunning, true, __ATOMIC_RELEASE);  // jack2-nspa: read by other threads (IsRunning)
+    __atomic_store_n(&fIsRunning, true, __ATOMIC_RELEASE);  // JackBus: read by other threads (IsRunning)
     return StartSlaves();
 }
 
 int JackDriver::Stop()
 {
-    __atomic_store_n(&fIsRunning, false, __ATOMIC_RELEASE);  // jack2-nspa: read by other threads (IsRunning)
+    __atomic_store_n(&fIsRunning, false, __ATOMIC_RELEASE);  // JackBus: read by other threads (IsRunning)
     return StopSlaves();
 }
 

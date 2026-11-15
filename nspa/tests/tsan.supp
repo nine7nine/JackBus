@@ -1,4 +1,4 @@
-# ThreadSanitizer suppressions for jack2-nspa test runs.
+# ThreadSanitizer suppressions for JackBus test runs.
 #
 # Only pre-existing accesses that are racy by design are listed: mostly
 # fields in shared memory that several threads/processes read and write with

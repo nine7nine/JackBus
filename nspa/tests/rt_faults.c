@@ -1,4 +1,4 @@
-/* jack2-nspa: page faults taken by a client's process thread inside its
+/* JackBus: page faults taken by a client's process thread inside its
  * process callback when the client cannot mlock() the shared segments (run
  * it with a small RLIMIT_MEMLOCK, e.g. `ulimit -l 64`). libjack prefaults the
  * segments and the start of the RT stack in that case, so the callback should

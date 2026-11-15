@@ -1,5 +1,5 @@
 #!/bin/sh
-# jack2-nspa: sound card hotplug in jackdbus (the ALSA device list follows cards coming and
+# JackBus: sound card hotplug in jackdbus (the ALSA device list follows cards coming and
 # going). Must run inside nspa/run-isolated.sh.
 #
 # A real card is "unplugged" and "plugged in" without touching hardware or needing root: in

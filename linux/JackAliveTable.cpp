@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2026 jack2-nspa
+Copyright (C) 2026 JackBus
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU Lesser General Public License as published by
@@ -134,7 +134,7 @@ bool JackAliveTable::Connect(const char* server_name)
     BuildName(server_name, fName, sizeof(fName));
     int fd = shm_open(fName, O_RDWR, 0);
     if (fd < 0) {
-        // a server without it (stock JACK2, or an older jack2-nspa): nothing to do
+        // a server without it (stock JACK2, or an older JackBus): nothing to do
         jack_log("JackAliveTable::Connect %s: %s", fName, strerror(errno));
         return false;
     }

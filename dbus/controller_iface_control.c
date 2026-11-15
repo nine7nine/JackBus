@@ -59,7 +59,7 @@ jack_controller_control_send_signal_server_stopped()
 
 #define controller_ptr ((struct jack_controller *)call->context)
 
-/* jack2-nspa: the sound card bridges listed (the "bridges" engine parameter), each as it is now:
+/* JackBus: the sound card bridges listed (the "bridges" engine parameter), each as it is now:
    (spec, client name, card, capture, playback, rate, period, nperiods, capture channels, playback
    channels, capture latency, playback latency, drift ppm, xruns, resyncs, underruns). A bridge
    not running (the server stopped, its card not there) has an empty name and card "stopped" or
@@ -215,7 +215,7 @@ fail:
 }
 
 /*
- * jack2-nspa: how each client in the graph keeps up, as an array of (client name,
+ * JackBus: how each client in the graph keeps up, as an array of (client name,
  * cycles it had not finished when the next one began, its longest cycle in us).
  */
 static

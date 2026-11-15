@@ -1,4 +1,4 @@
-/* jack2-nspa: JackNoCancelScope with asynchronous cancellation.
+/* JackBus: JackNoCancelScope with asynchronous cancellation.
  *
  * libjack's RT and notification threads use PTHREAD_CANCEL_ASYNCHRONOUS and
  * are cancelled by jack_client_close(). Inside a JackNoCancelScope a cancel

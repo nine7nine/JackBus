@@ -1,5 +1,5 @@
 /*
- * jack2-nspa test client: behaves like a patchbay. It wants every notification (port
+ * JackBus test client: behaves like a patchbay. It wants every notification (port
  * registration and connections, client registration, graph order, latency), has one
  * input connected from system:capture_1, and leaves at once when told the server is
  * going away (it closes its sockets right in the shutdown callback, as a client that

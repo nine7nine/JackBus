@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the two directions of the sound card bridge (see JackBridgeStream.h).
+ JackBus: the two directions of the sound card bridge (see JackBridgeStream.h).
 */
 
 #include "JackBridgeStream.h"

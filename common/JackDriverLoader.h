@@ -31,7 +31,7 @@ JSList* jack_internals_load(JSList* internals);
 void jack_free_driver_params(JSList * param_ptr);
 void jack_print_driver_options(jack_driver_desc_t* desc, FILE* file);
 
-/* jack2-nspa: the descriptor a driver module returns now, built afresh (with today's device
+/* JackBus: the descriptor a driver module returns now, built afresh (with today's device
    list, for the ALSA driver), or NULL if the module can't be loaded or asked. `symbol` is the
    descriptor function's name ("driver_get_descriptor" for drivers). Free the result with
    jack_driver_descriptor_free. */

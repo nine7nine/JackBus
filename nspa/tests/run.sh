@@ -1,5 +1,5 @@
 #!/bin/sh
-# jack2-nspa test matrix. Must run inside nspa/run-isolated.sh:
+# JackBus test matrix. Must run inside nspa/run-isolated.sh:
 #   nspa/run-isolated.sh nspa/tests/run.sh [quick]
 #
 # Matrix (server <- client libjack):
@@ -14,7 +14,7 @@ if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
 fi
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
-out="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}"
+out="${NSPA_TEST_OUT:-/tmp/JackBus-tests}"
 mkdir -p "$out"
 fork_lib="$JACK_BUILD/common"
 tcf="${NSPA_TEST_CFLAGS:-}"   # extra flags for test programs (e.g. -fsanitize=thread)

@@ -1,5 +1,6 @@
-# jack2dbus-nspa: JACK2 1.9.22 with RT / correctness / performance fixes
-# (https://github.com/nine7nine/jack2dbus-nspa, see the commit log). One package
+# JackBus: a JACK server (JACK2 1.9.22 compatible) with RT / correctness / performance fixes
+# and sound card bridges (https://github.com/nine7nine/JackBus, see the commit log). Formerly
+# packaged as jack2dbus-nspa. One package
 # replacing Arch's jack2 and jack2-dbus (same files, same paths, same configure
 # options; no docs, no lib32). Client API/ABI, shared memory layout and protocol
 # are unchanged: applications linked against jack2 keep working, and Arch's
@@ -8,12 +9,12 @@
 # Builds the main branch from GitHub. To build from a local clone instead:
 #   NSPA_REPO=/path/to/jack2 [NSPA_BRANCH=nspa] makepkg
 
-pkgname=jack2dbus-nspa
+pkgname=jackbus
 pkgver=1.9.22.r0.g0
 pkgrel=1
-pkgdesc="The JACK low-latency audio server, with D-Bus (jackdbus), jack2-nspa RT fixes"
+pkgdesc="JackBus: the JACK low-latency audio server (JACK2 1.9.22 compatible), with D-Bus (jackdbus), RT fixes and sound card bridges"
 arch=(x86_64)
-url="https://github.com/nine7nine/jack2dbus-nspa"
+url="https://github.com/nine7nine/JackBus"
 license=(GPL-2.0-or-later LGPL-2.1-or-later)
 depends=(
   alsa-lib libasound.so
@@ -38,7 +39,8 @@ optdepends=(
 # jack2 1.9.22 provides; the version keeps dependents such as lib32-jack2
 # (depends on jack2=1.9.22) installable
 provides=(jack jack2=1.9.22 jack2-dbus=1.9.22 libjack.so libjacknet.so libjackserver.so)
-conflicts=(jack jack2 jack2-dbus)
+conflicts=(jack jack2 jack2-dbus jack2dbus-nspa)
+replaces=(jack2dbus-nspa)
 # LTO on (makepkg's default LTOFLAGS=-flto=auto). Arch builds jack2 with !lto
 # because of upstream #485, whose cause the fork fixed (C1, shm index/ownership);
 # the LTO build passes the whole test suite. Measured in the engine against the

@@ -1,5 +1,5 @@
 /*
- jack2-nspa: several cards bridged at once, against one master (no JACK server, no sound).
+ JackBus: several cards bridged at once, against one master (no JACK server, no sound).
 
  Each card is opened in duplex (all its channels) with its own card thread; one master thread
  runs ideal cycles on CLOCK_MONOTONIC and, as the server will, runs every card's capture

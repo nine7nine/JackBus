@@ -205,7 +205,7 @@ jack_controller_dbus_get_parameter_address_ex(
         return false;
     }
 
-    /* jack2-nspa: the signature is allocated (dbus_free): it leaked on every parameter call */
+    /* JackBus: the signature is allocated (dbus_free): it leaked on every parameter call */
     as = strcmp(signature, "as") == 0;
     if (!as)
     {
@@ -234,7 +234,7 @@ jack_controller_dbus_get_parameter_address_ex(
                 JACK_DBUS_ERROR_INVALID_ARGS,
                 "Invalid arguments to method '%s'. Parameter address array must contain not more than %u elements.",
                 call->method_name,
-                (unsigned int)PARAM_ADDRESS_SIZE);  /* jack2-nspa: were swapped (%s read an integer) */
+                (unsigned int)PARAM_ADDRESS_SIZE);  /* JackBus: were swapped (%s read an integer) */
             return false;
         }
 
@@ -1032,7 +1032,7 @@ JACK_DBUS_METHODS_END
  *
  */
 
-/* jack2-nspa: the value lists of the parameters under a container changed (the ALSA driver's
+/* JackBus: the value lists of the parameters under a container changed (the ALSA driver's
    device list after a sound card was plugged in or removed). Clients that show those lists read
    them again (GetParameterConstraint); values are untouched. */
 JACK_DBUS_SIGNAL_ARGUMENTS_BEGIN(ConstraintsChanged)

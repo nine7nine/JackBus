@@ -1,4 +1,4 @@
-/* jack2-nspa stress/consistency client.
+/* JackBus stress/consistency client.
  *
  * Opens N clients in a chain (c0 -> c1 -> ... -> cN-1, 8 audio ports each),
  * runs a connect/disconnect loop on the chain from the main thread, and in

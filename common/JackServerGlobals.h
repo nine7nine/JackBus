@@ -44,7 +44,7 @@ struct SERVER_EXPORT JackServerGlobals
 
     static bool (* on_device_acquire)(const char* device_name);
     static void (* on_device_release)(const char* device_name);
-    /* jack2-nspa: the master driver lost its device; called once, from the driver thread as it
+    /* JackBus: the master driver lost its device; called once, from the driver thread as it
        ends (set a flag, nothing more). NULL: clients are told the server stopped (shutdown). */
     static void (* on_backend_lost)(void* arg);
     static void* on_backend_lost_arg;

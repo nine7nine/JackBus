@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the core of the sound card bridge, which joins a card that runs on its own clock to
+ JackBus: the core of the sound card bridge, which joins a card that runs on its own clock to
  the graph of the master card, with adaptive resampling.
 
  Two sides per card:

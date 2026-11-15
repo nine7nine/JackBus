@@ -84,7 +84,7 @@ class SERVER_EXPORT JackDriverInterface
         virtual void SetMaster(bool onoff) = 0;
         virtual bool GetMaster() = 0;
 
-        // jack2-nspa: the sound card bridges a master runs in its cycle (JackBridgeSet.h);
+        // JackBus: the sound card bridges a master runs in its cycle (JackBridgeSet.h);
         // audio drivers take them, wrappers pass them on, others ignore them
         virtual void SetBridges(JackBridgeSet* bridges) { (void)bridges; }
 
@@ -227,7 +227,7 @@ class SERVER_EXPORT JackDriver : public JackDriverClientInterface
 
         virtual int Close();
 
-        // jack2-nspa: open/close as a client in the graph while the server runs (a sound card
+        // JackBus: open/close as a client in the graph while the server runs (a sound card
         // bridge): like Open/Close, but without counting in fDriverNum (shared memory, which
         // clients read: drivers opened at the start hold the refnums below it) and without
         // touching the engine's buffer size or rate. The engine knows it is a driver anyway.
@@ -263,7 +263,7 @@ class SERVER_EXPORT JackDriver : public JackDriverClientInterface
         virtual int ProcessWriteAsync();
 
         virtual bool IsFixedBufferSize();
-        /* jack2-nspa: the device went away (not an ordinary failure): see JackThreadedDriver::Execute */
+        /* JackBus: the device went away (not an ordinary failure): see JackThreadedDriver::Execute */
         virtual bool IsDeviceLost() { return false; }
         virtual int SetBufferSize(jack_nframes_t buffer_size);
         virtual int SetSampleRate(jack_nframes_t sample_rate);

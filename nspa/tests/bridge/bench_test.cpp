@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the sound card bridge's graph side cost (no hardware, no threads).
+ JackBus: the sound card bridge's graph side cost (no hardware, no threads).
 
  A synthetic card side keeps one card's FIFOs and clocks fed, exactly in step, while the graph
  side runs capture and playback cycles; only the graph side's two Cycle() calls are timed (what

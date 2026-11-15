@@ -1,4 +1,4 @@
-/* jack2-nspa: JACK mutexes must be priority-inheriting (glibc kind bit
+/* JackBus: JACK mutexes must be priority-inheriting (glibc kind bit
  * PTHREAD_MUTEX_PRIO_INHERIT_NP = 0x20) and keep their type. */
 #include "JackPosixMutex.h"
 #include <cstdio>

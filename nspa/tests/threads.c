@@ -1,4 +1,4 @@
-/* jack2-nspa: libjack threading behaviour.
+/* JackBus: libjack threading behaviour.
  *
  *  api-concurrency  two application threads use one client's API at once
  *                   (port register/unregister vs connect/disconnect/get_ports):

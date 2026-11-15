@@ -1,5 +1,5 @@
 #!/bin/sh
-# jack2-nspa: system calls made by the server's realtime driver thread while
+# JackBus: system calls made by the server's realtime driver thread while
 # the graph changes (connect/disconnect) and xruns happen. Must run inside
 # nspa/run-isolated.sh. The driver thread is identified as the thread doing the
 # periodic clock_nanosleep() of the dummy driver. It must not write() /
@@ -13,7 +13,7 @@ if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
 fi
 which=$1
 gating=${2:-gating}
-out="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}"
+out="${NSPA_TEST_OUT:-/tmp/JackBus-tests}"
 trace="$out/rt_syscalls.$which.strace"
 stress="$out/stress64"
 xrun="$out/xrun_timer"

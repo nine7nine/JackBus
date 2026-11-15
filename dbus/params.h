@@ -87,7 +87,7 @@ void jack_params_destroy(jack_params_handle params);
 bool jack_params_set_driver(jack_params_handle params, const char * name);
 jackctl_driver_t * jack_params_get_driver(jack_params_handle params);
 
-/* jack2-nspa: copy a driver's parameter constraints from the control API again, after
+/* JackBus: copy a driver's parameter constraints from the control API again, after
    jackctl_driver_refresh_constraints() replaced them (the copies here point into them; call it
    right after, before any D-Bus message is handled). false: unknown driver, or out of memory
    (the parameter then has no list). */

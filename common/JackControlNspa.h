@@ -1,5 +1,5 @@
 /*
-Copyright (C) 2026 jack2-nspa
+Copyright (C) 2026 JackBus
 
 This program is free software; you can redistribute it and/or modify
 it under the terms of the GNU Lesser General Public License as published by
@@ -18,7 +18,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 */
 
 /*
- jack2-nspa additions to the server control API (libjackserver, common/JackControlAPI.cpp),
+ JackBus additions to the server control API (libjackserver, common/JackControlAPI.cpp),
  for jackdbus. Not part of libjack: applications are not concerned.
  */
 

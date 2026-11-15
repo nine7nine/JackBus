@@ -610,7 +610,7 @@ jack_controller_patchbay_find_client_port_by_name(
     return NULL;
 }
 
-/* jack2-nspa: `report`: log a port whose client is not in the graph (an error where the
+/* JackBus: `report`: log a port whose client is not in the graph (an error where the
    port must be there; not where the lookup only asks whether it is there yet) */
 static
 struct jack_graph_port *
@@ -1591,7 +1591,7 @@ unlock:
 }
 
 /*
- jack2-nspa: for session managers, before they stop an application. Its clients are
+ JackBus: for session managers, before they stop an application. Its clients are
  taken out of the graph (as by jack_deactivate) and the switch is in effect when the
  reply comes: the application's process can then be stopped without the graph missing
  a cycle, whatever its libjack, even if it is killed in the middle of its callback.
@@ -1683,7 +1683,7 @@ jack_controller_dbus_detach_process(
 #undef controller_ptr
 #define controller_ptr ((struct jack_controller *)context)
 
-/* jack2-nspa: the graph as it is when the patchbay starts, every port and connection, once,
+/* JackBus: the graph as it is when the patchbay starts, every port and connection, once,
  * from the first notification of any kind (they all come on this client's one notification
  * thread, so nothing else adds to the graph meanwhile). It used to wait for the first
  * graph-order callback and was skipped whenever another notification came first (a client

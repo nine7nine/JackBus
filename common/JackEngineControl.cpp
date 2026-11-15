@@ -47,7 +47,7 @@ void JackEngineControl::CalcCPULoad(JackClientInterface** table,
     // In Asynchronous mode, last cycle end is the max of client end dates
     if (!fSyncMode) {
         for (int i = fDriverNum; i < refnum_bound; i++) {
-            JackClientInterface* client = __atomic_load_n(&table[i], __ATOMIC_ACQUIRE);  // jack2-nspa: written by the request thread
+            JackClientInterface* client = __atomic_load_n(&table[i], __ATOMIC_ACQUIRE);  // JackBus: written by the request thread
             if (drivers && __atomic_load_n(&drivers[i], __ATOMIC_RELAXED)) {
                 continue;   // a driver opened while running (a bridge)
             }

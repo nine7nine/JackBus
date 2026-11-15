@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the core of the sound card bridge (see JackBridgeCore.h).
+ JackBus: the core of the sound card bridge (see JackBridgeCore.h).
 */
 
 #include "JackBridgeCore.h"

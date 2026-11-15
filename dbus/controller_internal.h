@@ -24,7 +24,7 @@
 #include <stdbool.h>
 #include "jslist.h"
 #include "jack/control.h"
-#include "JackControlNspa.h"      /* jack2-nspa additions: detach clients, client timings */
+#include "JackControlNspa.h"      /* JackBus additions: detach clients, client timings */
 #include "jack/jack.h"
 #include "jack/session.h"
 #include "jackdbus.h"
@@ -74,7 +74,7 @@ struct jack_controller
 
     long pending_save;          /* uptime seconds */
 
-    /* jack2-nspa: sound cards coming and going (inotify on /dev/snd), so the ALSA driver's
+    /* JackBus: sound cards coming and going (inotify on /dev/snd), so the ALSA driver's
        device list follows them without restarting jackdbus */
     int snd_watch_fd;           /* -1: no inotify */
     int snd_watch_wd;           /* -1: /dev/snd not watched (yet, or any more) */
@@ -82,14 +82,14 @@ struct jack_controller
     int64_t snd_last_change;    /* ms of the latest one */
     int64_t snd_last_rewatch;   /* ms of the last attempt to watch /dev/snd */
 
-    /* jack2-nspa: the master driver's device went away (set from the dying driver thread) */
+    /* JackBus: the master driver's device went away (set from the dying driver thread) */
     int backend_lost;
     /* while the dummy driver stands in for it: the driver to go back to, when to try next */
     jackctl_driver_t * fallback_from;
     int64_t fallback_next_try;  /* ms */
     int fallback_failures;
 
-    /* jack2-nspa: sound card bridges. The "bridges" engine parameter (kept with the settings)
+    /* JackBus: sound card bridges. The "bridges" engine parameter (kept with the settings)
        lists them; these are the ones running now (spec as listed, the bridge's client name). */
     struct jack_parameter bridges_vparam;
     union jackctl_parameter_value bridges_vparam_value;
@@ -101,7 +101,7 @@ struct jack_controller
 
 #define DEFAULT_DRIVER "dummy"
 
-/* jack2-nspa: sound card bridges (controller.c) */
+/* JackBus: sound card bridges (controller.c) */
 void
 jack_controller_bridges_apply(
     struct jack_controller * controller_ptr);
@@ -262,7 +262,7 @@ extern struct jack_dbus_interface_descriptor g_jack_controller_iface_patchbay;
 extern struct jack_dbus_interface_descriptor g_jack_controller_iface_session_manager;
 extern struct jack_dbus_interface_descriptor g_jack_controller_iface_transport;
 
-/* jack2-nspa: org.jackaudio.Configure.ConstraintsChanged(as container): the value lists of
+/* JackBus: org.jackaudio.Configure.ConstraintsChanged(as container): the value lists of
    the parameters under this container changed (ALSA devices after a card came or went) */
 void
 jack_controller_configure_send_signal_constraints_changed(const char * const * address, int count);

@@ -1,4 +1,4 @@
-/* jack2-nspa: frame timer behaviour across a server-side xrun.
+/* JackBus: frame timer behaviour across a server-side xrun.
  *
  * Run against a sync-mode server (jackd -S ...): the process callback sleeps
  * for several periods at cycle XRUN_AT, which makes the driver cycle overrun

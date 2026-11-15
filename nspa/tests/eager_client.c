@@ -1,5 +1,5 @@
 /*
- * jack2-nspa test client: joins a server the moment it comes up and connects at once, as a
+ * JackBus test client: joins a server the moment it comes up and connects at once, as a
  * bridge does (PipeWire's JACK client): it retries jack_client_open every millisecond, then
  * registers in and out, activates, and connects system:capture_1 -> in and
  * out -> system:playback_1. Prints "connected" and stays until its standard input closes or

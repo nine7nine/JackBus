@@ -1,5 +1,5 @@
 /*
- * jack2-nspa test: the server's per-client cycle statistics
+ * JackBus test: the server's per-client cycle statistics
  * (org.jackaudio.JackControl.GetClientTimings), driven by nspa/tests/jackdbus.sh.
  *
  *   client_timings <late> <periods> [reactivate]

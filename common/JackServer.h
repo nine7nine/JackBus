@@ -74,12 +74,12 @@ class SERVER_EXPORT JackServer
         JackSynchro fSynchroTable[CLIENT_NUM];
         bool fFreewheel;
         bool fAudioDriverClosed;   /*! master closed after a failed SwitchMaster */
-        /*! jack2-nspa: connections of the master driver's ports, by name, across master switches
+        /*! JackBus: connections of the master driver's ports, by name, across master switches
             (control thread only, under fControlLock): taken when a master goes, restored for
             every port the next master has; the rest wait for a later one (a card's MIDI ports
             while the dummy driver stands in) */
         std::map<std::string, std::set<std::string> > fMasterConnections;
-        // jack2-nspa: the sound card bridges (the master runs them in its cycle)
+        // JackBus: the sound card bridges (the master runs them in its cycle)
         JackBridgeSet fBridges;
         std::list<JackDriverInfo*> fBridgeInfos;
         void CloseBridge(JackDriverInfo* info);
@@ -138,7 +138,7 @@ class SERVER_EXPORT JackServer
         void RemoveSlave(JackDriverInfo* info);
         int SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_params);
 
-        // jack2-nspa: a sound card bridge (the "bridge" driver), added and removed while the
+        // JackBus: a sound card bridge (the "bridge" driver), added and removed while the
         // server runs; by its client name (the card's)
         // name: if not NULL, receives the new bridge's client name (JACK_CLIENT_NAME_SIZE + 1)
         int AddBridge(jack_driver_desc_t* driver_desc, JSList* driver_params, char* name = NULL);

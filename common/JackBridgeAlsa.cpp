@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the card side of the sound card bridge for ALSA (see JackBridgeAlsa.h).
+ JackBus: the card side of the sound card bridge for ALSA (see JackBridgeAlsa.h).
 */
 
 #include "JackBridgeAlsa.h"

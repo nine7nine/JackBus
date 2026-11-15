@@ -408,7 +408,7 @@ struct JackClientTiming
     }
 
     /*
-     jack2-nspa: shared between processes and threads with no lock (the server's RT thread and
+     JackBus: shared between processes and threads with no lock (the server's RT thread and
      every client write them, the engine's other threads read them): each access is a relaxed
      atomic one. The same instructions as plain accesses on x86-64; no torn 64-bit values on
      32-bit clients; and the sharing is visible to ThreadSanitizer. The layout is unchanged.

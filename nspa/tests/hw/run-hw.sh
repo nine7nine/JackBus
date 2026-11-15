@@ -1,5 +1,5 @@
 #!/bin/sh
-# jack2-nspa real-hardware tests (ALSA). Not part of nspa/tests/run.sh.
+# JackBus real-hardware tests (ALSA). Not part of nspa/tests/run.sh.
 #
 #   nspa/tests/hw/run-hw.sh [device=hw:PCH]
 #
@@ -18,7 +18,7 @@
 # NSPA_HW_MUTE_SELFTEST=1 checks only the watchdog (no JACK).
 #
 # Environment: NSPA_BUILD_DIR (default ./build), NSPA_HW_OUT (default
-# /tmp/jack2-nspa-hw), NSPA_HW_SERVERS (default "fork system"), NSPA_HW_LOW
+# /tmp/JackBus-hw), NSPA_HW_SERVERS (default "fork system"), NSPA_HW_LOW
 # (low-latency configurations, default "64x2 64x3 128x2"), NSPA_HW_ONLY
 # (subset of: load capture seq lowlat sync midi kill; default all), NSPA_HW_ALSA_ARGS (more
 # ALSA driver options for the fork's server only, e.g. "-w 0").
@@ -26,7 +26,7 @@ set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../../.." && pwd)"
 dev="${1:-hw:PCH}"
-out="${NSPA_HW_OUT:-/tmp/jack2-nspa-hw}"
+out="${NSPA_HW_OUT:-/tmp/JackBus-hw}"
 build="${NSPA_BUILD_DIR:-$root/build}"
 card="${dev#hw:}"; card="${card%%,*}"
 

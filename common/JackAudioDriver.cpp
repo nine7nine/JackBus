@@ -41,7 +41,7 @@ JackAudioDriver::JackAudioDriver(const char* name, const char* alias, JackLocked
 {}
 
 /*
- jack2-nspa: the sound card bridges (JackBridgeSet.h), run by the master in its own cycle.
+ JackBus: the sound card bridges (JackBridgeSet.h), run by the master in its own cycle.
  Playback first, right after the master's own playback: the previous cycle's buffers, as the
  master's own ports in async mode. It takes this cycle's list and timing. Capture after the
  graph has started: each bridge fills its ports and signals the clients that read them.
@@ -370,7 +370,7 @@ int JackAudioDriver::ProcessSync()
         return -1;
     }
 
-    // jack2-nspa: bridges' playback from the previous cycle's buffers, before the graph runs
+    // JackBus: bridges' playback from the previous cycle's buffers, before the graph runs
     RunBridgesPlayback();
 
     // Process graph

@@ -338,7 +338,7 @@ void JackEngine::ReleaseRefnum(int refnum)
 #ifdef __linux__
     fAliveTable.ClearSlot(refnum);
 #endif
-    __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)NULL, __ATOMIC_RELEASE);  // jack2-nspa: read by the RT thread (CheckXRun, CalcCPULoad)
+    __atomic_store_n(&fClientTable[refnum], (JackClientInterface*)NULL, __ATOMIC_RELEASE);  // JackBus: read by the RT thread (CheckXRun, CalcCPULoad)
     __atomic_store_n(&fIsDriver[refnum], (unsigned char)0, __ATOMIC_RELAXED);
     fPeerPid[refnum] = 0;
     fPeerStart[refnum] = 0;

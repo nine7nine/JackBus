@@ -1,4 +1,4 @@
-/* jack2-nspa: JackMidiRawOutputWriteQueue across the 32-bit frame wrap.
+/* JackBus: JackMidiRawOutputWriteQueue across the 32-bit frame wrap.
  *
  * Drives the real queue from libjackserver with a mock send queue that, like
  * JackALSARawMidiSendQueue, refuses bytes that are not due yet. A sysex

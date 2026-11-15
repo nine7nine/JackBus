@@ -302,7 +302,7 @@ int JackServer::SetBufferSize(jack_nframes_t buffer_size)
     }
 
     if (fAudioDriver->SetBufferSize(buffer_size) == 0) {
-        // jack2-nspa: the bridges follow (no allocation; they place their delays again)
+        // JackBus: the bridges follow (no allocation; they place their delays again)
         pthread_mutex_lock(&fBridgeLock);
         for (std::list<JackDriverInfo*>::iterator it = fBridgeInfos.begin(); it != fBridgeInfos.end(); it++) {
             JackBridgeInterface* bridge = dynamic_cast<JackBridgeInterface*>((*it)->GetBackend());
@@ -442,7 +442,7 @@ void JackServer::RemoveSlave(JackDriverInfo* info)
     slave->Close();
 }
 
-/* jack2-nspa: the master's ports and what they are connected to, by name (for SwitchMaster) */
+/* JackBus: the master's ports and what they are connected to, by name (for SwitchMaster) */
 void JackServer::SaveMasterConnections()
 {
     JackGraphManager* graph = GetGraphManager();
@@ -517,7 +517,7 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
     driver info that fDriverInfo already pointed to (double free on close).
     */
 
-    // Remove current master (jack2-nspa: its connections are kept, by port name)
+    // Remove current master (JackBus: its connections are kept, by port name)
     if (!fAudioDriverClosed) {
         SaveMasterConnections();
         fAudioDriver->Stop();
@@ -561,7 +561,7 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
     RestoreMasterConnections();
     BridgesFollowMaster(old_buffer_size, old_sample_rate);
 
-    // Notify clients of new values (jack2-nspa: only those that changed)
+    // Notify clients of new values (JackBus: only those that changed)
     if (fEngineControl->fBufferSize != old_buffer_size) {
         fEngine->NotifyBufferSize(fEngineControl->fBufferSize);
     }
@@ -569,7 +569,7 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
         fEngine->NotifySampleRate(fEngineControl->fSampleRate);
     }
 
-    // And finally start (jack2-nspa: the bridges go on with the new master; their delays are
+    // And finally start (JackBus: the bridges go on with the new master; their delays are
     // placed again, as after a master xrun)
     fAudioDriver->SetMaster(true);
     fAudioDriver->SetBridges(&fBridges);
@@ -577,7 +577,7 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
 }
 
 //------------------------------------
-// jack2-nspa: sound card bridges
+// JackBus: sound card bridges
 //------------------------------------
 
 void JackServer::BridgesFollowMaster(jack_nframes_t old_buffer_size, jack_nframes_t old_sample_rate)

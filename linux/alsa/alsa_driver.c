@@ -666,7 +666,7 @@ alsa_driver_configure_stream (alsa_driver_t *driver, char *device_name,
 		return -1;
 	}
 
-	int tstamp = 1;	/* jack2-nspa: monotonic timestamps, for the wake timer */
+	int tstamp = 1;	/* JackBus: monotonic timestamps, for the wake timer */
 	err = snd_pcm_sw_params_set_tstamp_mode(handle, sw_params, SND_PCM_TSTAMP_ENABLE);
 	if (err < 0) {
 		jack_info("Could not enable ALSA time stamp mode for %s (err %d)",
@@ -1019,7 +1019,7 @@ alsa_driver_reset_parameters (alsa_driver_t *driver,
 {
 	/* XXX unregister old ports ? */
 	alsa_driver_release_channel_dependent_memory (driver);
-	/* jack2-nspa: lateness depends on the period size: an adaptive wake timer that went on
+	/* JackBus: lateness depends on the period size: an adaptive wake timer that went on
 	   watches again (the driver is stopped here) */
 	if (driver->wake_timer_adaptive) {
 		driver->wake_timer_us = -1;
@@ -1389,7 +1389,7 @@ alsa_driver_set_clock_sync_status (alsa_driver_t *driver, channel_t chn,
 
 static int under_gdb = FALSE;
 
-/* jack2-nspa: the wake timer's automatic margin: an eighth of a period, between 50 and 500 us.
+/* JackBus: the wake timer's automatic margin: an eighth of a period, between 50 and 500 us.
    It covers the position's jitter and the interrupt's usual delay, which don't grow with the
    period. */
 int
@@ -1399,7 +1399,7 @@ alsa_driver_wake_margin (alsa_driver_t *driver)
 	return m < 50 ? 50 : (m > 500 ? 500 : m);
 }
 
-/* jack2-nspa: when a stream's period is due (jack time): when it has `ready` frames to give
+/* JackBus: when a stream's period is due (jack time): when it has `ready` frames to give
    or take. With `stored`, only from the position and the time of its last update in the
    status page (the period interrupt's): no syscall, and the card is not touched; -1 if
    those are not usable (no monotonic timestamps, an update too old). Otherwise from the
@@ -1516,7 +1516,7 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 #ifdef __ANDROID__
 		poll_result = poll (driver->pfd, nfds, -1);  //fix for sleep issue
 #else
-		/* jack2-nspa: the wake timer. Some cards' period interrupts arrive late or are
+		/* JackBus: the wake timer. Some cards' period interrupts arrive late or are
 		   dropped (Intel HDA: an interrupt after a late one is taken as "too early"; a
 		   deferred one waits for a kworker), while the position itself is right. So wait
 		   for the interrupt only until the position says the period is due, plus a
@@ -1750,7 +1750,7 @@ alsa_driver_wait (alsa_driver_t *driver, int extra_fd, int *status, float
 		playback_avail = INT_MAX;
 	}
 
-	/* jack2-nspa: adaptive wake timer. The wait began before the period was due, and the
+	/* JackBus: adaptive wake timer. The wait began before the period was due, and the
 	   wake (or the xrun: with two periods a dropped interrupt is one) came more than half a
 	   period after it: the notification was late or missing. After a few, the timer is on
 	   for the rest of the session. A cycle that ran long is not counted: its period was

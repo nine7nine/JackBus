@@ -1,4 +1,4 @@
-/* jack2-nspa hardware test: capture buffer in the cycle a capture port gets
+/* JackBus hardware test: capture buffer in the cycle a capture port gets
  * connected (C24).
  *
  * The ALSA driver fills only the capture ports that have connections, and it

@@ -1,5 +1,5 @@
 /*
- jack2-nspa: JackBridgeResampler quality, continuity, accounting, delay and speed.
+ JackBus: JackBridgeResampler quality, continuity, accounting, delay and speed.
 
  Build and run from the repository root (about 40 s; --quick: about 8 s):
 

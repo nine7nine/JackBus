@@ -150,7 +150,7 @@ struct jackctl_parameter
     struct jackctl_driver * driver_ptr;
     char id;
     jack_driver_param_constraint_desc_t * constraint_ptr;
-    /* jack2-nspa: called when the value is set or reset, for parameters that take
+    /* JackBus: called when the value is set or reset, for parameters that take
        effect on a running server (NULL for the others) */
     void (*on_change)(void * arg);
     void * on_change_arg;
@@ -1784,7 +1784,7 @@ SERVER_EXPORT bool jackctl_server_remove_slave(jackctl_server * server_ptr, jack
 }
 
 /*
- jack2-nspa: a session manager takes an application's clients out of the graph before
+ JackBus: a session manager takes an application's clients out of the graph before
  stopping it (JackEngine::DetachClients), the one named client_name or, if NULL, every
  client of process pid. Returns how many were taken out, -1 for an unknown client name
  or without a server.
@@ -1798,7 +1798,7 @@ SERVER_EXPORT int jackctl_server_detach_clients(jackctl_server * server_ptr, con
 }
 
 /*
- jack2-nspa: how each client in the graph keeps up (JackEngine::UpdateClientCycles):
+ JackBus: how each client in the graph keeps up (JackEngine::UpdateClientCycles):
  the cycles it had not finished when the next one began, and its longest cycle, since
  it was activated or the last reset. Fills up to max entries; returns how many, -1
  without a server.
@@ -1818,7 +1818,7 @@ SERVER_EXPORT int jackctl_server_get_client_timings(jackctl_server * server_ptr,
     return count;
 }
 
-/* jack2-nspa: two values of a parameter of this type are the same (a string up to its end:
+/* JackBus: two values of a parameter of this type are the same (a string up to its end:
    the bytes after it are not set) */
 static bool jackctl_constraint_value_equal(jackctl_param_type_t type,
     const jack_driver_param_value_t * a, const jack_driver_param_value_t * b)

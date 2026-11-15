@@ -1,4 +1,4 @@
-/* jack2-nspa: the server's per-cycle loops stop at the highest refnum in use.
+/* JackBus: the server's per-cycle loops stop at the highest refnum in use.
  *
  * Clients come and go so that live refnums are high, low, and the highest
  * one disappears:

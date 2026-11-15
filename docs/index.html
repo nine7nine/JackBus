@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>jack2dbus-nspa · architecture</title>
+<title>JackBus · architecture</title>
 <style>
 :root {
   --bg: #0a0c18;
@@ -259,7 +259,7 @@ td .better { color: var(--green); font-weight: 700; }
 td .k { font: 600 12.5px ui-monospace, Menlo, Consolas, monospace; color: #cfd3ff; }
 .pages { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 16px; }
 
-/* ---- jack2dbus-nspa additions ---- */
+/* ---- JackBus additions ---- */
 .flow.act { stroke: var(--violet); }
 .flow.req { stroke: var(--cyan); }
 .flow.ntf { stroke: var(--orange); }
@@ -354,7 +354,7 @@ pre.code .s { color: var(--amber); }
 
 <header class="hero">
   <div class="kicker">Architecture · Linux · PREEMPT_RT · x86_64</div>
-  <h1>jack2dbus-nspa</h1>
+  <h1>JackBus</h1>
   <p class="lede">
     JACK2 1.9.22 &mdash; the release Arch Linux ships &mdash; with a set of real-time, correctness and performance
     changes to the server engine, the ALSA driver, <code>jackdbus</code> and libjack's internals. It installs as one
@@ -388,7 +388,7 @@ pre.code .s { color: var(--amber); }
 
   <div class="tablebox" style="margin-top:6px">
     <table>
-      <tr><th style="border-left:3px solid transparent">Subsystem</th><th>Stock JACK2 1.9.22</th><th>jack2dbus-nspa</th></tr>
+      <tr><th style="border-left:3px solid transparent">Subsystem</th><th>Stock JACK2 1.9.22</th><th>JackBus</th></tr>
       <tr><td style="border-left:3px solid #8b8ff5">RT driver thread</td><td>socket <code>write()</code> per graph switch / xrun; glibc condvar signal every cycle; formatted logging</td><td>lock-free bounded queues drained by timed consumers; futex event count; zero syscalls besides the ALSA poll and activation futexes</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Per-cycle engine work</td><td>three loops over all 256 client slots, whatever the client count</td><td>loops stop at the highest refnum in use; successor scan skips 16 empty slots per test</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Graph edits</td><td>each edit copies a whole 19&nbsp;MB connection manager</td><td>only the rows that changed</td></tr>
@@ -420,7 +420,7 @@ pre.code .s { color: var(--amber); }
   </p>
   <div class="figure" id="fig-arch">
     <div class="controls"><button class="toggle" type="button" id="motion">Pause animation</button></div>
-    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 900" role="img" aria-label="System overview of jack2dbus-nspa">
+    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 900" role="img" aria-label="System overview of JackBus">
       <defs>
         <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="2.2" result="b"/>
@@ -577,7 +577,7 @@ pre.code .s { color: var(--amber); }
         <text x="436" y="549" class="t-sub">metadata · shared by every process</text>
       </g>
       <g>
-        <title>jack2dbus-nspa addition, optional on both sides: one 64-byte slot per client, in which the client's realtime thread holds a process-shared robust mutex for as long as it lives. A libjack that doesn't know the file never opens it; a fork libjack facing a server without it does without (§12)</title>
+        <title>JackBus addition, optional on both sides: one 64-byte slot per client, in which the client's realtime thread holds a process-shared robust mutex for as long as it lives. A libjack that doesn't know the file never opens it; a fork libjack facing a server without it does without (§12)</title>
         <rect x="420" y="570" width="340" height="46" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4" stroke-dasharray="5 3"/>
         <text x="436" y="590" class="t-mono">jack_alive.1000_default · new, optional</text>
         <text x="436" y="607" class="t-sub">one robust mutex per client · its RT thread holds it</text>
@@ -2179,7 +2179,7 @@ pre.code .s { color: var(--amber); }
       <tr><td>A sound card plugged in or removed</td><td>the ALSA device list is read once, at start: a USB interface plugged in later is not offered until jackdbus restarts</td><td><span class="better"><code>/dev/snd</code> watched from the main loop; about a second after a change (once the card's nodes are usable) the list is read again and <code>Configure.ConstraintsChanged</code> sent · no new thread, nothing on the RT path</span></td></tr>
     </table>
   </div>
-  <pre class="code" style="margin-top:14px"><span class="c"># jack2dbus-nspa additions · org.jackaudio.service /org/jackaudio/Controller</span>
+  <pre class="code" style="margin-top:14px"><span class="c"># JackBus additions · org.jackaudio.service /org/jackaudio/Controller</span>
 <span class="k">org.jackaudio.JackPatchbay.DetachClient</span>(s client_name)  → u detached
 <span class="k">org.jackaudio.JackPatchbay.DetachProcess</span>(x process_id)  → u detached
 <span class="k">org.jackaudio.JackControl.GetClientTimings</span>()          → a(suu)   <span class="c"># client, late cycles, longest cycle µs</span>
@@ -2926,7 +2926,7 @@ pre.code .s { color: var(--amber); }
         <text x="656" y="300" class="t-ok">two-server test: the first server survives the second's churn</text>
         <text x="656" y="324" class="t-ok">no leaked segments after any test run (leak check)</text>
         <text x="656" y="372" class="t-sub">Arch builds jack2 with options=(!lto) because of #485;</text>
-        <text x="656" y="390" class="t-sub">the jack2dbus-nspa package builds with LTO</text>
+        <text x="656" y="390" class="t-sub">the JackBus package builds with LTO</text>
       </g>
       <!-- ================= page 2: C25 ================= -->
       <g class="pageframe" data-name="C25 · stale futex files steal wakeups">
@@ -3251,7 +3251,7 @@ pre.code .s { color: var(--amber); }
       <text x="40" y="44" class="t-band">SERVER × LIBJACK · EVERY CELL IS A SUITE CHECK</text>
       <!-- headers -->
       <rect x="420" y="62" width="360" height="60" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.5"/>
-      <text x="600" y="88" text-anchor="middle" class="t-title">jack2dbus-nspa server</text>
+      <text x="600" y="88" text-anchor="middle" class="t-title">JackBus server</text>
       <text x="600" y="108" text-anchor="middle" class="t-sub">jackd / jackdbus · this fork</text>
       <rect x="800" y="62" width="360" height="60" rx="12" fill="url(#g-ms)" stroke="#fbbf24" stroke-width="1.5"/>
       <text x="980" y="88" text-anchor="middle" class="t-title">Arch jack2 1.9.22 server</text>
@@ -3534,12 +3534,12 @@ pre.code .s { color: var(--amber); }
 <section id="s21">
   <h2><span class="num">21</span>Packaging and deployment</h2>
   <p class="sub">
-    <code>nspa/pkg/jack2dbus-nspa/PKGBUILD</code> builds one package from the repository's <code>main</code> branch
+    <code>nspa/pkg/JackBus/PKGBUILD</code> builds one package from the repository's <code>main</code> branch
     (or a local clone with <code>NSPA_REPO</code>) that replaces Arch's <code>jack2</code> and <code>jack2-dbus</code>.
   </p>
   <div class="grid2">
     <div class="card">
-      <h3>jack2dbus-nspa</h3>
+      <h3>JackBus</h3>
       <p class="role">The same 62 files at the same paths as jack2 + jack2-dbus; docs and lib32 left out.</p>
       <ul>
         <li><b>Version.</b> <code>pkgver()</code> from <code>git describe</code> on the 1.9.22 tag, e.g.
@@ -3562,7 +3562,7 @@ pre.code .s { color: var(--amber); }
       <p class="role">jackdbus is a long-lived daemon: replacing files on disk doesn't replace the running process.</p>
       <ol class="timeline">
         <li><b>Keep a way back</b><span><code>sudo pacman -Sw jack2 jack2-dbus</code> puts Arch's packages in the cache.</span></li>
-        <li><b>Install</b><span><code>sudo pacman -U jack2dbus-nspa-*.pkg.tar.zst</code>; pacman offers to replace jack2 and jack2-dbus.</span></li>
+        <li><b>Install</b><span><code>sudo pacman -U JackBus-*.pkg.tar.zst</code>; pacman offers to replace jack2 and jack2-dbus.</span></li>
         <li><b>End the old daemon</b><span><code>jack_control exit</code>. <code>stop</code> isn't enough: the old daemon keeps 1.9.22's libjackserver mapped and can't load the new drivers (<code>undefined symbol … IsCaptureChannelNeeded</code>).</span></li>
         <li><b>Start</b><span>Your start script or <code>jack_control start</code>; D-Bus launches the new <code>/usr/bin/jackdbus</code>. If PipeWire held the card, a second start clears a "device busy".</span></li>
         <li><b>Check</b><span><code>readlink /proc/$(pgrep -x jackdbus)/exe</code> shows no "(deleted)"; <code>GetXruns</code> / <code>GetLoad</code> / <code>GetClientTimings</code> over D-Bus; <code>~/.log/jack/jackdbus.log</code>.</span></li>
@@ -3609,8 +3609,8 @@ pre.code .s { color: var(--amber); }
 </section>
 
 <footer>
-  jack2dbus-nspa · architecture, second edition · JACK2 1.9.22 + 98 commits (main <code>3b031c4e</code>,
-  github.com/nine7nine/jack2dbus-nspa) · protocol 9 · Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274 · updated 13 November 2026
+  JackBus · architecture, second edition · JACK2 1.9.22 + 98 commits (main <code>3b031c4e</code>,
+  github.com/nine7nine/JackBus) · protocol 9 · Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274 · updated 13 November 2026
 </footer>
 
 </main>

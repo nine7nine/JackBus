@@ -145,8 +145,8 @@ typedef struct _alsa_driver {
 
     alsa_midi_t *midi;
     int xrun_recovery;
-    int device_lost;   /* jack2-nspa: the card went away (POLLNVAL, -ENODEV): not recoverable here */
-    /* jack2-nspa: wake on a timer as well as on the period interrupt (see alsa_driver_wait).
+    int device_lost;   /* JackBus: the card went away (POLLNVAL, -ENODEV): not recoverable here */
+    /* JackBus: wake on a timer as well as on the period interrupt (see alsa_driver_wait).
        wake_timer_us: -1 off, else on with this margin (0: automatic, alsa_driver_wake_margin).
        wake_timer_adaptive: off until period notifications are seen coming late, then on. */
     int wake_timer_us;

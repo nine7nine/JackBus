@@ -1,4 +1,4 @@
-/* jack2-nspa: float -> integer conversion consistency (common/memops.c).
+/* JackBus: float -> integer conversion consistency (common/memops.c).
  *
  * The SIMD conversion functions process groups of 4 samples in a vector loop
  * and the remainder in a scalar tail. The same input value must produce the

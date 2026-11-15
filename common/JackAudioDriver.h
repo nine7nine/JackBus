@@ -63,7 +63,7 @@ class SERVER_EXPORT JackAudioDriver : public JackDriver
         bool IsCaptureChannelNeeded(int chn, bool graph_change_pending);
         void SkipCaptureChannel(int chn, jack_nframes_t nframes);
 
-        // jack2-nspa: the sound card bridges this master runs (NULL: none); the cycle's timing
+        // JackBus: the sound card bridges this master runs (NULL: none); the cycle's timing
         // for them, worked out once per cycle (RunBridgesPlayback, before RunBridgesCapture)
         JackBridgeSet* fBridges;
         JackBridgeList* fBridgeList;

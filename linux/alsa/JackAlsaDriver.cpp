@@ -55,7 +55,7 @@ static struct jack_constraint_enum_str_descriptor midi_constraint_descr_array[] 
     { 0 }
 };
 
-/* jack2-nspa: the wake timer (alsa_driver_wait); a number (us) means on with that margin */
+/* JackBus: the wake timer (alsa_driver_wait); a number (us) means on with that margin */
 static struct jack_constraint_enum_str_descriptor wake_timer_constraint_descr_array[] =
 {
     { "adaptive", "Adaptive: on once period notifications are seen coming late" },
@@ -603,7 +603,7 @@ extern "C"
 
 /* The cards and their PCM devices. `stream` -1: all of them (the "device" parameter); a
    stream direction: "none" first (the "device" parameter's device), then only cards and
-   devices that have that direction (jack2-nspa: the "capture" and "playback" parameters
+   devices that have that direction (JackBus: the "capture" and "playback" parameters
    get a list too, so a front end can offer them like the device). */
 static
 jack_driver_param_constraint_desc_t *
@@ -647,7 +647,7 @@ enum_alsa_devices(int stream = -1)
             continue;
         if (snd_ctl_card_info(handle, info) < 0)
         {
-            /* jack2-nspa: closed on every path; the list is rebuilt on hotplug */
+            /* JackBus: closed on every path; the list is rebuilt on hotplug */
             snd_ctl_close(handle);
             continue;
         }

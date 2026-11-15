@@ -1,5 +1,5 @@
 /*
- jack2-nspa test client for sound card bridges: reads one port, writes silence to another,
+ JackBus test client for sound card bridges: reads one port, writes silence to another,
  counts cycles and xruns, measures the level of what it reads, and prints once a second:
    t=<s> cycles=<n> xruns=<n> peak=<dBFS of the input this second>
  At the end: the two ports' latency ranges and flags.

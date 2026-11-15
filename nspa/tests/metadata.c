@@ -1,4 +1,4 @@
-/* jack2-nspa: metadata across libjack builds.
+/* JackBus: metadata across libjack builds.
  *
  * The metadata store is a Berkeley DB environment in /dev/shm/jack_db-<uid>,
  * shared by the server and every client. A client linked against another

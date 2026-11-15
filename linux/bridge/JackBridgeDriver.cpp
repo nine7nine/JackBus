@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the sound card bridge driver (see JackBridgeDriver.h).
+ JackBus: the sound card bridge driver (see JackBridgeDriver.h).
 */
 
 #include "JackBridgeDriver.h"

@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the two directions of the sound card bridge, graph side (see JackBridgeCore.h).
+ JackBus: the two directions of the sound card bridge, graph side (see JackBridgeCore.h).
 
  Capture: the card side writes the card's frames to the FIFO and keeps the card's clock; each
  master cycle, the graph side resamples them into the port buffers.

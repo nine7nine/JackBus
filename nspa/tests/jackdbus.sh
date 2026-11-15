@@ -1,5 +1,5 @@
 #!/bin/sh
-# jack2-nspa: jackdbus lifecycle tests. Must run inside nspa/run-isolated.sh.
+# JackBus: jackdbus lifecycle tests. Must run inside nspa/run-isolated.sh.
 # Uses a private session bus (the namespace has its own network, so its own
 # abstract sockets) and a temporary HOME, so the real D-Bus session and the
 # user's ~/.config/jack and ~/.log/jack are never touched.
@@ -136,7 +136,7 @@ rm -rf "$HOME/.config/jack"
 if start_jackdbus; then
     call org.jackaudio.Configure.SetParameterValue array:string:engine,driver variant:string:dummy
     if call org.jackaudio.JackControl.StartServer; then
-        stress="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/stress64"
+        stress="${NSPA_TEST_OUT:-/tmp/JackBus-tests}/stress64"
         LD_LIBRARY_PATH="$(dirname "$jackdbus")/../common" timeout 120 "$stress" 4 150 >/dev/null 2>&1 &
         spid=$!
         i=0; dbus_fail=0
@@ -168,7 +168,7 @@ rm -f /dev/shm/jack-* /dev/shm/jack_* 2>/dev/null
 # is up (as PipeWire's JACK client does): the system ports and that client's connections must
 # be in GetGraph, and no "cannot find client of port" in the log. The patchbay used to learn
 # the graph only from its first graph-order notification, skipped when another came first.
-eager_bin="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/eager_client"
+eager_bin="${NSPA_TEST_OUT:-/tmp/JackBus-tests}/eager_client"
 if [ ! -x "$eager_bin" ]; then
     echo "SKIP jackdbus-patchbay-start: no eager_client"
 elif start_jackdbus; then
@@ -228,7 +228,7 @@ fi
 # stopping it (org.jackaudio.JackPatchbay.DetachClient / DetachProcess): killed
 # afterwards, its departure costs the graph nothing, whatever its libjack (here
 # without its JackAliveTable slot, JACK_NO_ALIVE_SLOT=1, so only the detach helps)
-kill_bin="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/client_kill"
+kill_bin="${NSPA_TEST_OUT:-/tmp/JackBus-tests}/client_kill"
 if [ ! -x "$kill_bin" ]; then
     echo "SKIP jackdbus-detach: no client_kill"
 elif start_jackdbus; then
@@ -277,7 +277,7 @@ rm -rf "$HOME/.config/jack"
 # waiting for it and an independent one are not counted late, jackdbus' own client
 # (not in the graph) is not listed, a reset or a new activation starts afresh,
 # clients gone are no longer listed, and a stopped server is an error for Get only
-timings_bin="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/client_timings"
+timings_bin="${NSPA_TEST_OUT:-/tmp/JackBus-tests}/client_timings"
 timings() {  # one line per client: name late_cycles max_callback_usecs
     dbus-send --session --print-reply --dest=org.jackaudio.service /org/jackaudio/Controller \
         org.jackaudio.JackControl.GetClientTimings 2>/dev/null \
@@ -385,7 +385,7 @@ rm -rf "$HOME/.config/jack"
 # must not be written to their closed sockets, nor to its own request channel once that
 # is closed (1.9.22 logged three error lines per notification: 20 to 60 per stop with a
 # patchbay connected; the build before the fix: 158 and 166 lines over these three stops).
-pb_bin="${NSPA_TEST_OUT:-/tmp/jack2-nspa-tests}/patchbay_client"
+pb_bin="${NSPA_TEST_OUT:-/tmp/JackBus-tests}/patchbay_client"
 if [ ! -x "$pb_bin" ]; then
     echo "SKIP jackdbus-stop-quiet: no patchbay_client"
 elif start_jackdbus; then

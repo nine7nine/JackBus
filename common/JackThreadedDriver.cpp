@@ -252,7 +252,7 @@ bool JackThreadedDriver::Execute()
     waiting forever. Notify them through the usual shutdown callback.
     */
     if (fDriver->IsDeviceLost() && JackServerGlobals::on_backend_lost != NULL) {
-        /* jack2-nspa: the device went away and a controller (jackdbus) takes over: it puts
+        /* JackBus: the device went away and a controller (jackdbus) takes over: it puts
            another master driver in place, so clients are not told the server stopped. */
         jack_error("JackThreadedDriver::Execute: the device is gone, the controller takes over");
         JackServerGlobals::on_backend_lost(JackServerGlobals::on_backend_lost_arg);

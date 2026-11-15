@@ -1,4 +1,4 @@
-/* jack2-nspa: a client process that outlives its server must not disturb a
+/* JackBus: a client process that outlives its server must not disturb a
  * client of the same name on the next server.
  *
  * JACK's per-client futex is a file /dev/shm/jack_sem.<uid>_<server>_<client>.

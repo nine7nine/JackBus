@@ -1,5 +1,5 @@
 /*
- jack2-nspa: the sound card bridge in simulation (no hardware, no threads, deterministic).
+ JackBus: the sound card bridge in simulation (no hardware, no threads, deterministic).
 
  A master with an ideal clock runs cycles of n frames. A simulated card runs at its nominal rate
  times (1 + ppm): the kernel updates its position every `update` frames (a period, or a USB
