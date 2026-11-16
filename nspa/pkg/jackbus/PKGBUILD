@@ -6,6 +6,12 @@
 # are unchanged: applications linked against jack2 keep working, and Arch's
 # lib32-jack2 1.9.22 still works against this server.
 #
+# Also JackBus's shims: jackbus-pw (PipeWire applications), jackbus-pa
+# (PulseAudio applications; /usr/lib/jackbus-pa on the session's library
+# path sends them to JackBus while it runs, to PipeWire while it doesn't) and
+# jackbus-alsa (the "jackbus" ALSA device). Nothing changes for an
+# application until it is run through them or PatchBox's Shims switches are on.
+#
 # Builds the main branch from GitHub. To build from a local clone instead:
 #   NSPA_REPO=/path/to/jack2 [NSPA_BRANCH=nspa] makepkg
 
@@ -23,13 +29,14 @@ depends=(
   expat libexpat.so
   glibc
   libgcc
+  libpulse
   libsamplerate libsamplerate.so
   libstdc++
   opus libopus.so
   python-dbus
   systemd-libs libsystemd.so
 )
-makedepends=(alsa-lib db5.3 dbus expat git libffado libsamplerate opus python systemd)
+makedepends=(alsa-lib db5.3 dbus expat git libffado libpipewire libpulse libsamplerate opus python systemd)
 optdepends=(
   'a2jmidid: for ALSA MIDI to JACK MIDI bridging'
   'libffado: for firewire support using FFADO'
@@ -75,11 +82,22 @@ build() {
   # Arch's jack2: the metadata DB in /dev/shm is shared with every client
   python3 ./waf configure "${waf_options[@]}"
   python3 ./waf build
+
+  # the shims, against this build's libjack
+  local d
+  for d in pw-shim pa-shim jackbus-alsa; do
+    make -C nspa/$d JACK_BUILD="$PWD/build"
+  done
 }
 
 package() {
   cd jack2
   python3 ./waf install --destdir="$pkgdir"
+
+  local d
+  for d in pw-shim pa-shim jackbus-alsa; do
+    make -C nspa/$d JACK_BUILD="$PWD/build" DESTDIR="$pkgdir" install
+  done
 }
 
 # vim:set ts=2 sw=2 et:
