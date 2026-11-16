@@ -74,6 +74,10 @@ struct pa_context {
 	int n_streams, cap_streams;
 	uint32_t next_stream_index;
 	struct shim_mixer *mixers;	/* the cards' mixers, opened on first use */
+	/* subscription events, delivered from the main loop as a server's are */
+	struct { pa_subscription_event_type_t t; uint32_t idx; } *sub_q;
+	int sub_n, sub_cap;
+	pa_defer_event *sub_defer;
 };
 
 /* a device's index, the same for as long as the process runs */
@@ -366,7 +370,54 @@ static void scan_devices(pa_context *c, struct shim_device *out, int *n_out)
 	*n_out = n;
 }
 
+static pa_subscription_mask_t sub_mask_of(pa_subscription_event_type_t t);
+
+/* the queued subscription events, to the callback (it may queue more, or
+ * disconnect the context) */
+static void on_sub_events(pa_mainloop_api *a, pa_defer_event *e, void *userdata)
+{
+	pa_context *c = userdata;
+	a->defer_enable(e, 0);
+	int n = c->sub_n;
+	__typeof__(c->sub_q) q = c->sub_q;
+	c->sub_q = NULL;
+	c->sub_n = c->sub_cap = 0;
+	pa_context_ref(c);
+	for (int i = 0; i < n; i++)
+		if (c->state == PA_CONTEXT_READY && c->sub_cb && (c->sub_mask & sub_mask_of(q[i].t)))
+			c->sub_cb(c, q[i].t, q[i].idx, c->sub_userdata);
+	free(q);
+	pa_context_unref(c);
+}
+
+/* An event for the subscriber: queued, delivered from the main loop, never
+ * inside the call that caused it (a PulseAudio server's come that way, and
+ * applications rely on it: libcanberra disconnects a stream in a callback
+ * holding a lock its subscription callback takes) */
 static void notify_sub(pa_context *c, pa_subscription_event_type_t t, uint32_t idx)
+{
+	if (!c->sub_cb || !(c->sub_mask & sub_mask_of(t)) || c->state != PA_CONTEXT_READY)
+		return;
+	if (c->sub_n == c->sub_cap) {
+		int cap = c->sub_cap ? c->sub_cap * 2 : 16;
+		if (cap > 4096)
+			return;			/* a subscriber that never runs its loop */
+		__typeof__(c->sub_q) q = realloc(c->sub_q, (size_t)cap * sizeof(*q));
+		if (q == NULL)
+			return;
+		c->sub_q = q;
+		c->sub_cap = cap;
+	}
+	c->sub_q[c->sub_n].t = t;
+	c->sub_q[c->sub_n].idx = idx;
+	c->sub_n++;
+	if (c->sub_defer)
+		c->api->defer_enable(c->sub_defer, 1);
+	else
+		c->sub_defer = c->api->defer_new(c->api, on_sub_events, c);
+}
+
+static pa_subscription_mask_t sub_mask_of(pa_subscription_event_type_t t)
 {
 	static const pa_subscription_mask_t masks[] = {
 		[PA_SUBSCRIPTION_EVENT_SINK] = PA_SUBSCRIPTION_MASK_SINK,
@@ -375,10 +426,8 @@ static void notify_sub(pa_context *c, pa_subscription_event_type_t t, uint32_t i
 		[PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT] = PA_SUBSCRIPTION_MASK_SOURCE_OUTPUT,
 	};
 	unsigned f = t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK;
-	pa_subscription_mask_t m = f == PA_SUBSCRIPTION_EVENT_SERVER ? PA_SUBSCRIPTION_MASK_SERVER :
+	return f == PA_SUBSCRIPTION_EVENT_SERVER ? PA_SUBSCRIPTION_MASK_SERVER :
 		f < sizeof(masks) / sizeof(masks[0]) ? masks[f] : 0;
-	if (c->sub_cb && (c->sub_mask & m))
-		c->sub_cb(c, t, idx, c->sub_userdata);
 }
 
 static void rescan(pa_context *c, bool notify)
@@ -560,6 +609,13 @@ static void teardown(pa_context *c)
 {
 	shim_operation_cancel_all(c, NULL);
 	shim_mixer_close_all(c);
+	if (c->sub_defer) {
+		c->api->defer_free(c->sub_defer);
+		c->sub_defer = NULL;
+	}
+	free(c->sub_q);
+	c->sub_q = NULL;
+	c->sub_n = c->sub_cap = 0;
 	if (c->connect_defer) {
 		c->api->defer_free(c->connect_defer);
 		c->connect_defer = NULL;

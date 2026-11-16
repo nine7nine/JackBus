@@ -67,7 +67,13 @@ $(IMPL): $(SRCS) $(OBJS) shim.h pa.map ../compat/compat_conf.h ../compat/server.
 
 # test helpers: a dlsym interposer (as teams-sdl-cef's audio probe has); a
 # second card; a card's mixer (an ALSA control plugin, never a real card)
-test-apps: $(OUT)/dlsym-hook.so $(OUT)/pa-dlsym-client $(OUT)/fake-card $(OUT)/libasound_module_ctl_jbtest.so
+test-apps: $(OUT)/dlsym-hook.so $(OUT)/pa-dlsym-client $(OUT)/fake-card $(OUT)/libasound_module_ctl_jbtest.so \
+	$(OUT)/ca-play
+
+# libcanberra's PulseAudio driver, as the desktop's event sounds use it
+$(OUT)/ca-play: test/ca-play.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -o $@ $< -lcanberra -lpthread
 
 $(OUT)/libasound_module_ctl_jbtest.so: test/fake-mixer.c
 	@mkdir -p $(@D)

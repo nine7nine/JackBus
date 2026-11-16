@@ -665,6 +665,15 @@ static void autoconnect(pa_stream *s, const struct shim_device *d)
 		connect_to(s, d);
 }
 
+static void on_moved(pa_mainloop_api *a, pa_defer_event *e, void *userdata)
+{
+	pa_stream *s = userdata;
+	a->defer_free(e);
+	if (s->state == PA_STREAM_READY && s->moved_cb)
+		s->moved_cb(s, s->moved_ud);
+	pa_stream_unref(s);
+}
+
 /* a move (a volume control's): the stream's ports from wherever they are
  * connected to device d's, whatever the autoconnect setting (it is asked for) */
 int shim_stream_move(pa_stream *s, const struct shim_device *d)
@@ -679,8 +688,10 @@ int shim_stream_move(pa_stream *s, const struct shim_device *d)
 	free(s->device_name);
 	s->device_name = strdup(d->name);
 	shim_log("%s: moved to %s", s->name ? s->name : "stream", d->name);
-	if (s->moved_cb)
-		s->moved_cb(s, s->moved_ud);
+	/* the application hears of it from its main loop, as from a server */
+	pa_mainloop_api *api = shim_context_api(s->context);
+	if (s->moved_cb && api->defer_new(api, on_moved, pa_stream_ref(s)) == NULL)
+		pa_stream_unref(s);
 	return 0;
 }
 
@@ -919,6 +930,20 @@ static void stream_close(pa_stream *s)
 		shim_log("%s: %u underflows, %u overflows", s->name, u, o);
 }
 
+/* a disconnected stream's state callback: from the main loop */
+static void on_terminated(pa_mainloop_api *a, pa_defer_event *e, void *userdata)
+{
+	pa_stream *s = userdata;
+	a->defer_free(e);
+	if (s->state == PA_STREAM_TERMINATED && s->state_cb)
+		s->state_cb(s, s->state_ud);
+	pa_stream_unref(s);
+}
+
+/* The stream stops at once; its state is TERMINATED from here, and the state
+ * callback hears of it from the main loop, as PulseAudio's server answers
+ * (never inside this call: libcanberra disconnects from a callback holding
+ * its own lock). The stream is kept until then. */
 SHIM_EXPORT int pa_stream_disconnect(pa_stream *s)
 {
 	if (s->state != PA_STREAM_READY && s->state != PA_STREAM_CREATING) {
@@ -928,8 +953,10 @@ SHIM_EXPORT int pa_stream_disconnect(pa_stream *s)
 	pa_stream_ref(s);
 	stream_close(s);
 	shim_context_stream_remove(s->context, s);
-	set_state(s, PA_STREAM_TERMINATED);
-	pa_stream_unref(s);
+	s->state = PA_STREAM_TERMINATED;
+	pa_mainloop_api *api = shim_context_api(s->context);
+	if (api->defer_new(api, on_terminated, s) == NULL)
+		pa_stream_unref(s);
 	return 0;
 }
 
