@@ -10,10 +10,10 @@
 #    at it;
 #  - pactl's introspection; every installed libpulse user finds all of its
 #    functions in the shim;
-#  - without the launcher (session-wide): JackBus while it runs, PulseAudio's
-#    own libpulse while it doesn't;
-#  - Chrome and Firefox (headless, their sandboxes on): a Web Audio 440 Hz
-#    tone;
+#  - without the launcher (session-wide): PulseAudio's own libpulse with the
+#    setting off; with it on, JackBus while it runs, PulseAudio's while not;
+#  - Chrome and Firefox (headless, their sandboxes on, no launcher: the
+#    switch on in their ~/.config): a Web Audio 440 Hz tone;
 #  - the realtime thread of a stream (paplay): no system call but futex.
 # Audio is recorded from each application's port and checked as a continuous
 # 440 Hz sine. A missing program is skipped.
@@ -31,8 +31,9 @@ check=$tree/nspa/tests/tools/sine_check.py
 logs=$(mktemp -d /tmp/jbpa-real.XXXXXX)
 [ -e "$out/lib/libpulse.so.0" ] && [ -e "$out/lib/libjackbus-pa.so" ] || { echo "missing the shim: make -C nspa/pa-shim"; exit 2; }
 
-PULSE_SERVER=unix:/jackbus-pa-test/no-server JACK_DEFAULT_SERVER=jbpa
-export PULSE_SERVER JACK_DEFAULT_SERVER
+# settings of the test's own (not the user's ~/.config/jackbus/compat.conf)
+PULSE_SERVER=unix:/jackbus-pa-test/no-server JACK_DEFAULT_SERVER=jbpa JACKBUS_COMPAT_CONF=$logs/compat.conf
+export PULSE_SERVER JACK_DEFAULT_SERVER JACKBUS_COMPAT_CONF
 fail=0
 pass() { echo "PASS $1"; }
 flunk() { echo "FAIL $1"; shift; for l in "$@"; do [ -f "$l" ] && grep -v '^jackbus-pa: Jack' "$l" | tail -8 | sed 's/^/    /'; done; fail=1; }
@@ -154,22 +155,31 @@ if have pactl; then
     fi
 fi
 
-# 6. the session-wide way (no launcher, the directory on the library path):
-#    an application goes to JackBus while it runs, to PulseAudio's own
-#    libpulse (PipeWire's server) while it doesn't; PipeWire's own daemons
-#    always to PulseAudio's
+# 6. the session-wide way: the package puts the dispatcher on the dynamic
+#    linker's path (here: the library path), so every program loading
+#    libpulse gets it. Setting off (the default): PulseAudio's libpulse, as
+#    without it. "pulse = yes" (PatchBox's switch): JackBus while it runs,
+#    PulseAudio's while it doesn't. PipeWire's daemons: PulseAudio's. The
+#    launcher's JACKBUS_PA_MODE=jackbus reaches a program whose library
+#    path was replaced (as teams-sdl-cef does for its media host)
 if have pactl; then
     auto() { env LD_LIBRARY_PATH="$out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" JACKBUS_PA_VERBOSE=1 "$@" 2>&1; }
+    off=$(auto pactl info)
+    echo "pulse = yes" >"$logs/compat.conf"
     up=$(auto pactl info)
     down=$(JACK_DEFAULT_SERVER=jbpa-none auto pactl info)
     pwd_=$(auto bash -c 'exec -a pipewire pactl info')
-    if echo "$up" | grep -q 'jackbus-pa: JackBus (JackBus runs)' && echo "$up" | grep -q 'Server Name: PulseAudio (on JackBus)' &&
+    rm -f "$logs/compat.conf"
+    forced=$(auto env LD_LIBRARY_PATH="$out/lib:$JACK_BUILD/common" JACKBUS_PA_MODE=jackbus pactl info)
+    if echo "$off" | grep -q "jackbus-pa: PulseAudio's libpulse (the setting is off)" && ! echo "$off" | grep -q 'on JackBus' &&
+       echo "$up" | grep -q 'jackbus-pa: JackBus (JackBus runs)' && echo "$up" | grep -q 'Server Name: PulseAudio (on JackBus)' &&
        echo "$down" | grep -q "jackbus-pa: PulseAudio's libpulse (JackBus isn't running)" &&
        echo "$down" | grep -q 'Connection failure: Connection refused' && ! echo "$down" | grep -q 'on JackBus' &&
-       echo "$pwd_" | grep -q "jackbus-pa: PulseAudio's libpulse (a PipeWire daemon)"; then
-        pass "session-wide: JackBus while it runs, PulseAudio's libpulse while it doesn't, and in PipeWire's daemons"
+       echo "$pwd_" | grep -q "jackbus-pa: PulseAudio's libpulse (a PipeWire daemon)" &&
+       echo "$forced" | grep -q 'Server Name: PulseAudio (on JackBus)'; then
+        pass "session-wide: setting off PulseAudio's; on: JackBus while it runs, PulseAudio's while not; PipeWire daemons PulseAudio's; JACKBUS_PA_MODE=jackbus wins"
     else
-        printf '%s\n--\n' "$up" "$down" "$pwd_" >"$logs/auto.log"
+        printf '%s\n--\n' "$off" "$up" "$down" "$pwd_" "$forced" >"$logs/auto.log"
         flunk "session-wide dispatch" "$logs/auto.log"
     fi
 fi
@@ -201,16 +211,22 @@ fi
 cat >"$logs/tone.html" <<'EOH'
 <html><body><script>var c=new AudioContext();var o=c.createOscillator();o.frequency.value=440;var g=c.createGain();g.gain.value=0.5;o.connect(g);g.connect(c.destination);o.start();</script></body></html>
 EOH
+# the session-wide way, as a desktop has it: no launcher, the dispatcher on
+# the library path, the switch on in ~/.config of their HOME
+bhome=$logs/home
+mkdir -p "$bhome/.config/jackbus"
+echo "pulse = yes" >"$bhome/.config/jackbus/compat.conf"
 browser() {  # label profile-dir command...
     label=$1; prof=$2; shift 2
-    env "$@" >"$logs/$label.log" 2>&1 &
+    env -u JACKBUS_COMPAT_CONF HOME="$bhome" JACKBUS_PA_VERBOSE=1 \
+        LD_LIBRARY_PATH="$out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$@" >"$logs/$label.log" 2>&1 &
     p=$!
     port=$(app_port 300)
     if [ -n "$port" ]; then sine_of "$port" "$label"; r=$?; else r=1; fi
     kill -TERM $p 2>/dev/null; sleep 1.5
     pkill -KILL -f "$prof" 2>/dev/null; wait $p 2>/dev/null
     if [ $r -eq 0 ] && ! grep -q resampled "$logs/$label.log"; then
-        pass "$label: a Web Audio tone, client \"${port%%:*}\", direct: $(cut -d' ' -f2- "$logs/$label.check")"
+        pass "$label (no launcher: the switch on, sandboxed): a Web Audio tone, client \"${port%%:*}\", direct: $(cut -d' ' -f2- "$logs/$label.check")"
     else
         flunk "$label (port '$port')" "$logs/$label.check" "$logs/$label.log"
     fi
@@ -221,7 +237,7 @@ if [ -n "$chrome" ]; then
     # Chrome won't run as root with its sandbox: an ordinary user (a nested
     # user namespace), the sandbox on
     browser Chrome "$logs/chrome-profile" unshare --user --map-user=1000 --map-group=1000 -- \
-        "$L" -v "$chrome" --headless=new --no-first-run \
+        "$chrome" --headless=new --no-first-run \
         --disable-gpu --user-data-dir="$logs/chrome-profile" --autoplay-policy=no-user-gesture-required "file://$logs/tone.html"
 else
     echo "SKIP Chrome (not installed)"
@@ -232,7 +248,7 @@ if [ -n "$firefox" ]; then
     printf '%s\n' 'user_pref("media.autoplay.default", 0);' 'user_pref("media.autoplay.blocking_policy", 0);' \
         'user_pref("browser.shell.checkDefaultBrowser", false);' 'user_pref("app.update.enabled", false);' \
         'user_pref("datareporting.policy.dataSubmissionEnabled", false);' >"$logs/ff-profile/user.js"
-    browser Firefox "$logs/ff-profile" "$L" -v "$firefox" --headless --no-remote --profile "$logs/ff-profile" \
+    browser Firefox "$logs/ff-profile" "$firefox" --headless --no-remote --profile "$logs/ff-profile" \
         "file://$logs/tone.html"
 else
     echo "SKIP Firefox (not installed)"

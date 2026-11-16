@@ -8,10 +8,13 @@
  *   resample = yes      a stream at a rate other than JackBus's is resampled
  *                       (after the direct route was looked for); no: refused
  *   autoconnect = yes   new streams connect to the default device
+ *   pulse = no          yes: PulseAudio applications (every program loading
+ *                       libpulse) use JackBus while it runs
  *
  * An environment variable given by the caller overrides the file (per layer,
- * e.g. JACKBUS_PW_RESAMPLE=0). Read when a stream is set up, never in a
- * realtime thread.
+ * e.g. JACKBUS_PW_RESAMPLE=0). JACKBUS_COMPAT_CONF names the one file to read
+ * instead of both (the tests: settings of their own). Read when a stream is
+ * set up, never in a realtime thread.
  */
 #ifndef JACKBUS_COMPAT_CONF_H
 #define JACKBUS_COMPAT_CONF_H
@@ -75,6 +78,9 @@ static inline bool jackbus_compat_bool(const char *key, const char *env, bool de
 		return b;
 	char path[512];
 	const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+	const char *only = getenv("JACKBUS_COMPAT_CONF");
+	if (only && only[0])
+		return (b = jackbus_compat_file_bool(only, key)) >= 0 ? b : def;
 	if (xdg && xdg[0])
 		snprintf(path, sizeof(path), "%s/jackbus/compat.conf", xdg);
 	else if (home && home[0])

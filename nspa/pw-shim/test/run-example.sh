@@ -28,6 +28,8 @@ PIPEWIRE_REMOTE=jackbus-pw-test-no-daemon
 JACK_DEFAULT_SERVER=jbpw
 export XDG_RUNTIME_DIR PIPEWIRE_REMOTE JACK_DEFAULT_SERVER
 
+# settings of the test's own (not the user's ~/.config/jackbus/compat.conf)
+export JACKBUS_COMPAT_CONF=/nonexistent/jackbus-test-compat.conf
 fail=0
 server_pid=
 

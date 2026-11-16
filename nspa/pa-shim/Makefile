@@ -1,7 +1,8 @@
 # jackbus-pa: a libpulse.so.0 on JackBus.
 #
 #   make              the libraries, in $(OUT)/lib
-#   make install      into /usr/lib/jackbus-pa and /usr/bin (DESTDIR for packaging)
+#   make install      into /usr/lib/jackbus-pa, /usr/bin, and that directory into
+#                     /etc/ld.so.conf.d (DESTDIR for packaging)
 #
 # libpulse.so.0, the library applications load, is a dispatcher (dispatch.c):
 # each libpulse function a jump to JackBus's implementation, libjackbus-pa.so,
@@ -41,7 +42,7 @@ all: $(SHIM) $(IMPL)
 $(GEN)/trampolines.S $(GEN)/names.h &: gen-trampolines.sh $(PULSE_REAL)
 	sh gen-trampolines.sh $(PULSE_REAL) $(GEN)
 
-$(SHIM): dispatch.c $(GEN)/trampolines.S $(GEN)/names.h pa.map ../compat/server.h Makefile
+$(SHIM): dispatch.c $(GEN)/trampolines.S $(GEN)/names.h pa.map ../compat/server.h ../compat/compat_conf.h Makefile
 	@mkdir -p $(@D)
 	$(CC) -I$(GEN) $(CFLAGS) -DPULSE_REAL_LIB='"$(PULSE_REAL)"' -fPIC -fvisibility=hidden -shared $(LDFLAGS) \
 		-Wl,-soname,libpulse.so.0 -Wl,--version-script=pa.map -Wl,--no-undefined \
@@ -67,6 +68,8 @@ install: $(SHIM) $(IMPL)
 	install -Dm755 $(SHIM) $(DESTDIR)$(LIBDIR)/libpulse.so.0
 	install -Dm755 $(IMPL) $(DESTDIR)$(LIBDIR)/libjackbus-pa.so
 	install -Dm755 jackbus-pa $(DESTDIR)$(PREFIX)/bin/jackbus-pa
+	install -d $(DESTDIR)/etc/ld.so.conf.d
+	echo "$(LIBDIR)" >$(DESTDIR)/etc/ld.so.conf.d/jackbus-pa.conf
 
 clean:
 	rm -rf $(OUT)

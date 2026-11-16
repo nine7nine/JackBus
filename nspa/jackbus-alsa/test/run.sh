@@ -42,6 +42,8 @@ pcm.jbdefault { type jackbus fallback "null" }
 pcm.jbloop { type jackbus fallback "jbloop" }
 EOC
 export ALSA_CONFIG_PATH=$logs/asound.conf
+# settings of the test's own (not the user's ~/.config/jackbus/compat.conf)
+export JACKBUS_COMPAT_CONF=/nonexistent/jackbus-test-compat.conf
 fail=0
 pass() { echo "PASS $1"; }
 flunk() { echo "FAIL $1"; shift; for l in "$@"; do [ -f "$l" ] && tail -8 "$l" | sed 's/^/    /'; done; fail=1; }

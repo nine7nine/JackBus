@@ -25,6 +25,8 @@ check=$tree/nspa/tests/tools/sine_check.py
 XDG_RUNTIME_DIR=$logs/run; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 PIPEWIRE_REMOTE=jackbus-pw-test-no-daemon JACK_DEFAULT_SERVER=jbreal
 export XDG_RUNTIME_DIR PIPEWIRE_REMOTE JACK_DEFAULT_SERVER
+# settings of the test's own (not the user's ~/.config/jackbus/compat.conf)
+export JACKBUS_COMPAT_CONF=/nonexistent/jackbus-test-compat.conf
 fail=0
 pass() { echo "PASS $1"; }
 flunk() { echo "FAIL $1"; shift; for l in "$@"; do [ -f "$l" ] && grep -v '^jackbus-pw: Jack' "$l" | tail -10 | sed 's/^/    /'; done; fail=1; }

@@ -6,17 +6,19 @@
  * library loads, before the application calls any of it, with one
  * implementation's functions for the life of the process:
  *
- *  - JackBus's (libjackbus-pa.so, beside this library) when JackBus runs
- *    (its socket is there), and always with JACKBUS_PA_MODE=jackbus (the
- *    jackbus-pa launcher);
+ *  - JackBus's (libjackbus-pa.so, beside this library): with
+ *    JACKBUS_PA_MODE=jackbus (the jackbus-pa launcher), or when the user's
+ *    setting says so ("pulse = yes" in ~/.config/jackbus/compat.conf,
+ *    PatchBox's switch) and JackBus runs (its socket is there);
  *  - PulseAudio's own libpulse otherwise: PipeWire's PulseAudio server (or
- *    PulseAudio's) plays it. Always with JACKBUS_PA_MODE=pulse, in
- *    PipeWire's own daemons (a PulseAudio tunnel there is PipeWire's), and
- *    when JackBus's library can't load.
+ *    PulseAudio's) plays it, as without this library. Always with
+ *    JACKBUS_PA_MODE=pulse, in PipeWire's own daemons (a PulseAudio tunnel
+ *    there is PipeWire's), and when JackBus's library can't load.
  *
- * So with this directory first on the session's library path, a PulseAudio
- * application goes to JackBus while it runs and to PipeWire while it
- * doesn't, decided as the application starts.
+ * The package puts this directory in the dynamic linker's configuration
+ * (/etc/ld.so.conf.d/jackbus-pa.conf), so every program loading libpulse
+ * gets this library, whatever library path its launcher gave it; with the
+ * setting off (the default) each one uses PulseAudio's libpulse as before.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -28,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../compat/compat_conf.h"
 #include "../compat/server.h"
 #include "names.h"
 
@@ -124,6 +127,9 @@ __attribute__((constructor)) static void choose(void)
 	} else if (pipewire_daemon()) {
 		jackbus = false;
 		why = "a PipeWire daemon";
+	} else if (!jackbus_compat_bool("pulse", NULL, false)) {
+		jackbus = false;
+		why = "the setting is off";
 	} else {
 		jackbus = jackbus_server_present();
 		why = jackbus ? "JackBus runs" : "JackBus isn't running";
