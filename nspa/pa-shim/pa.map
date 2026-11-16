@@ -1,0 +1,7 @@
+/* the client API this library implements, as libpulse's own version */
+PULSE_0 {
+	global:
+		pa_*;
+	local:
+		*;
+};

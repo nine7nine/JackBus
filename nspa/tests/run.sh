@@ -531,6 +531,13 @@ else
     else
         echo "SKIP jackbus-pw (the shim and PipeWire's examples are not built)"
     fi
+    # PulseAudio applications through jackbus-pa (make -C nspa/pa-shim; SDL3 also
+    # needs make -C nspa/pw-shim test-apps)
+    if [ -e "$JACK_BUILD/pa-shim/lib/libpulse.so.0" ]; then
+        "$root/nspa/pa-shim/test/real-apps.sh" || fail=1
+    else
+        echo "SKIP jackbus-pa (the shim is not built)"
+    fi
     # ALSA applications through JackBus's own ALSA plugin (make -C nspa/jackbus-alsa
     # all test-apps)
     if [ -e "$JACK_BUILD/jackbus-alsa/libasound_module_pcm_jackbus.so" ]; then

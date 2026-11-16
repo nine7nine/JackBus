@@ -1,0 +1,46 @@
+#!/bin/sh
+# jackbus-pa: run a PulseAudio application on JackBus.
+#
+# The application's libpulse.so.0 is swapped for JackBus's (the way pw-jack
+# swaps libjack): its streams become ports of one JACK client, named after
+# it, at JackBus's rate and period; no PulseAudio or PipeWire server is
+# involved. Settings: ~/.config/jackbus/compat.conf (resample, autoconnect).
+usage() {
+    cat <<USAGE
+Usage: jackbus-pa [options] <program> [args...]
+  -n NAME   JACK client name (default: the application's name)
+  -s NAME   JACK server name (default: \$JACK_DEFAULT_SERVER, else "default")
+  -R        no resampling: a stream at another rate is refused
+  -v        log what the shim does
+  -h        show this help
+USAGE
+}
+
+libdir=${JACKBUS_PA_LIBDIR:-}
+if [ -z "$libdir" ]; then
+    here=$(dirname "$(readlink -f "$0")")
+    for d in "$here/../../build/pa-shim/lib" /usr/lib/jackbus-pa; do
+        if [ -e "$d/libpulse.so.0" ]; then libdir=$(cd "$d" && pwd); break; fi
+    done
+fi
+if [ -z "$libdir" ] || [ ! -e "$libdir/libpulse.so.0" ]; then
+    echo "jackbus-pa: the shim library was not found (set JACKBUS_PA_LIBDIR)" >&2
+    exit 1
+fi
+
+while getopts n:s:Rvh opt; do
+    case $opt in
+        n) JACKBUS_PA_CLIENT_NAME=$OPTARG; export JACKBUS_PA_CLIENT_NAME ;;
+        s) JACK_DEFAULT_SERVER=$OPTARG; export JACK_DEFAULT_SERVER ;;
+        R) JACKBUS_PA_RESAMPLE=0; export JACKBUS_PA_RESAMPLE ;;
+        v) JACKBUS_PA_VERBOSE=1; export JACKBUS_PA_VERBOSE ;;
+        h) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+shift $((OPTIND - 1))
+[ $# -gt 0 ] || { usage >&2; exit 2; }
+
+LD_LIBRARY_PATH="$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH
+exec "$@"
