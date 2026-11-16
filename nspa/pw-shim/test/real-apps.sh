@@ -52,16 +52,24 @@ python3 -I "$here/mkwav.py" "$logs/s441.wav" 44100 4
 python3 -I "$here/mkwav.py" "$logs/s48.wav" 48000 4
 python3 -I "$here/mkmid.py" "$logs/notes.mid"
 
-# 1. pw-play (an async stream: no RT_PROCESS), resampled and direct
+# 1. pw-play (an async stream: no RT_PROCESS): a 48000 Hz file direct; a
+#    44100 Hz one refused by default with the reason, resampled with -r
 if have pw-play; then
+    timeout 10 "$L" -v pw-play "$logs/s441.wav" >"$logs/play-refused.log" 2>&1; rc=$?
+    if [ $rc -ne 0 ] && grep -q 'rate 44100 Hz asked, JackBus runs at 48000 Hz (resampling is a fallback' "$logs/play-refused.log"; then
+        pass "pw-play s441.wav: refused by default (resampling is a fallback), with the reason, exit $rc"
+    else
+        flunk "pw-play s441.wav not refused by default (rc $rc)" "$logs/play-refused.log"
+    fi
     for f in s441 s48; do
-        env "$L" -v pw-play "$logs/$f.wav" >"$logs/play-$f.log" 2>&1 &
+        r=; [ $f = s441 ] && r=-r
+        env "$L" -v $r pw-play "$logs/$f.wav" >"$logs/play-$f.log" 2>&1 &
         p=$!
         port=$(wait_port '^pw-play:FL$')
         conn=$(jack_lsp -c pw-play:FL 2>/dev/null | sed -n 2p | tr -d ' ')
         sine_of "$port" "play-$f"; r=$?
         wait $p; rc=$?
-        how=direct; grep -q 'resampled' "$logs/play-$f.log" && how=resampled
+        how=direct; grep -q 'resampled' "$logs/play-$f.log" && how="resampled (-r)"
         if [ $r -eq 0 ] && [ $rc -eq 0 ] && grep -q 'process on its loop (async)' "$logs/play-$f.log" &&
            grep -q 'streaming -> unconnected' "$logs/play-$f.log"; then
             pass "pw-play $f.wav: async, $how, to $conn, drained, exit 0: $(cut -d' ' -f2- "$logs/play-$f.check")"
@@ -134,15 +142,15 @@ if have jack_midiseq && have jack_midi_dump; then
     fi
 fi
 
-# 5. mpv (an RT stream; a 44100 Hz file, resampled)
+# 5. mpv (an RT stream; a 48000 Hz file: the direct route)
 if have mpv; then
-    "$L" -v mpv --no-config --no-video --ao=pipewire --length=2.5 "$logs/s441.wav" >"$logs/mpv.log" 2>&1 &
+    "$L" -v mpv --no-config --no-video --ao=pipewire --length=2.5 "$logs/s48.wav" >"$logs/mpv.log" 2>&1 &
     p=$!
     port=$(wait_port '^mpv:FL$')
     sine_of "$port" mpv; r=$?
     wait $p; rc=$?
-    if [ $r -eq 0 ] && [ $rc -eq 0 ] && ! grep -q 'Could not wait' "$logs/mpv.log"; then
-        pass "mpv: $(grep -o 'process in the JACK thread' "$logs/mpv.log" | head -1), exit 0: $(cut -d' ' -f2- "$logs/mpv.check")"
+    if [ $r -eq 0 ] && [ $rc -eq 0 ] && ! grep -q 'Could not wait' "$logs/mpv.log" && ! grep -q 'resampled' "$logs/mpv.log"; then
+        pass "mpv: $(grep -o 'process in the JACK thread' "$logs/mpv.log" | head -1), direct, exit 0: $(cut -d' ' -f2- "$logs/mpv.check")"
     else
         flunk "mpv (rc $rc)" "$logs/mpv.check" "$logs/mpv.log"
     fi
@@ -156,8 +164,8 @@ if [ -x "$out/sdl3-tone" ]; then
     sine_of "$port" sdl; r=$?
     wait $p; rc=$?
     if [ $r -eq 0 ] && [ $rc -eq 0 ] && grep -q '^driver: pipewire' "$logs/sdl.log" &&
-       grep -q 'playback device: system playback (JackBus) (48000 Hz' "$logs/sdl.log"; then
-        pass "SDL3: driver pipewire, device \"system playback (JackBus)\" at 48000 Hz: $(cut -d' ' -f2- "$logs/sdl.check")"
+       grep -q 'playback device: system playback (JackBus) (48000 Hz' "$logs/sdl.log" && ! grep -q 'resampled' "$logs/sdl.log"; then
+        pass "SDL3: driver pipewire, device \"system playback (JackBus)\" at 48000 Hz, opened at it (direct): $(cut -d' ' -f2- "$logs/sdl.check")"
     else
         flunk "SDL3 (rc $rc)" "$logs/sdl.check" "$logs/sdl.log"
     fi
@@ -262,8 +270,8 @@ if command -v strace >/dev/null; then
     timeout 30 strace -f -qq -o "$logs/rt-play.strace" "$L" pw-play "$logs/s48.wav" >/dev/null 2>&1
     rt_check "pw-play (async)" "$logs/rt-play.strace"
     if [ -x "$out/audio-src" ]; then
-        timeout 30 strace -f -qq -o "$logs/rt-src.strace" "$L" timeout -s INT 3 "$out/audio-src" >/dev/null 2>&1
-        rt_check "audio-src (RT, resampled 44100 -> 48000)" "$logs/rt-src.strace"
+        timeout 30 strace -f -qq -o "$logs/rt-src.strace" "$L" -r timeout -s INT 3 "$out/audio-src" >/dev/null 2>&1
+        rt_check "audio-src (RT, resampled 44100 -> 48000 with -r)" "$logs/rt-src.strace"
     fi
     if have jack_midiseq; then
         jack_midiseq seq 24000 0 60 6000 12000 63 6000 >/dev/null 2>&1 &

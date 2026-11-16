@@ -9,6 +9,8 @@ usage() {
     cat <<EOF
 Usage: jackbus-pw [options] <program> [args...]
   -n NAME   JACK client name (default: the application's node.name)
+  -r        allow resampling (a fallback): a stream that offers only a rate
+            other than JackBus's is resampled instead of refused
   -s NAME   JACK server name (default: \$JACK_DEFAULT_SERVER, else "default")
   -v        log what the shim does, including the settings it forced
   -h        show this help
@@ -27,8 +29,9 @@ if [ -z "$libdir" ] || [ ! -e "$libdir/libpipewire-0.3.so.0" ]; then
     exit 1
 fi
 
-while getopts n:s:vh opt; do
+while getopts n:s:rvh opt; do
     case $opt in
+        r) JACKBUS_PW_RESAMPLE=1; export JACKBUS_PW_RESAMPLE ;;
         n) JACKBUS_PW_CLIENT_NAME=$OPTARG; export JACKBUS_PW_CLIENT_NAME ;;
         s) JACK_DEFAULT_SERVER=$OPTARG; export JACK_DEFAULT_SERVER ;;
         v) JACKBUS_PW_VERBOSE=1; export JACKBUS_PW_VERBOSE ;;

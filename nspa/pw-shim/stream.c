@@ -14,9 +14,10 @@
  * S24_32, F64), the channel count is the application's, and the rate is
  * JackBus's whenever any format the application offers allows it (the
  * direct route: no conversion of rate, no added latency). An application
- * that offers only another rate is resampled, by JackBus's bridge resampler, at a fixed
- * ratio: it runs on JackBus's clock, so nothing drifts
- * (JACKBUS_PW_RESAMPLE=0: refused instead, with the reason). Conversion
+ * that offers only another rate is refused, with the reason; resampling is a
+ * fallback, opted into with JACKBUS_PW_RESAMPLE=1 (jackbus-pw -r): JackBus's
+ * bridge resampler then converts at a fixed ratio (the application runs on
+ * JackBus's clock, so nothing drifts). Conversion
  * happens at the boundary, with the stream's volume, mute and channel volumes
  * (pw_stream_set_control).
  *
@@ -271,10 +272,11 @@ static bool int_allows(const struct spa_pod *value, int32_t v, int32_t *def)
 	}
 }
 
+/* resampling is a fallback, only when asked for */
 static bool resampling_allowed(void)
 {
 	const char *env = getenv("JACKBUS_PW_RESAMPLE");
-	return env == NULL || strcmp(env, "0") != 0;
+	return env != NULL && strcmp(env, "1") == 0;
 }
 
 /* one EnumFormat pod: what JackBus can take of it; resample: may it take
@@ -330,7 +332,8 @@ static bool try_format(struct pw_stream *s, const struct spa_pod *param, uint32_
 	if ((prop = spa_pod_object_find_prop(obj, NULL, SPA_FORMAT_AUDIO_rate)) != NULL &&
 	    !int_allows(&prop->value, (int32_t)rate, &def)) {
 		if (!resample || !resampling_allowed()) {
-			snprintf(why, len, "rate %d Hz asked, JackBus runs at %u Hz (resampling is off)", def, rate);
+			snprintf(why, len, "rate %d Hz asked, JackBus runs at %u Hz (resampling is a fallback: "
+					"JACKBUS_PW_RESAMPLE=1, jackbus-pw -r)", def, rate);
 			return false;
 		}
 		if (def <= 0 || (double)def / rate < 0.2 || (double)def / rate > 5.0) {
