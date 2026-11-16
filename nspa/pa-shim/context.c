@@ -12,10 +12,12 @@
  * direct route); a sink per JACK client with physical playback ports (the
  * system card, each bridged card) and a source per client with physical
  * capture ports, named "jackbus.<client>.playback|capture"; the first of
- * each the default. Devices have no volume of their own (a request is
- * accepted and logged); a stream's own volume and mute (sink input, source
- * output) are applied to its samples. Device changes reach subscribers as
- * sink and source events; a server going away fails the context.
+ * each the default. A device that is an ALSA card has the card's own
+ * hardware volume and mute (mixer.c); others a fixed volume (a request is
+ * accepted, not applied). A stream's own volume and mute (sink input,
+ * source output) are applied to its samples. Device changes, and volume
+ * changes on a card made anywhere, reach subscribers as sink and source
+ * events; a server going away fails the context.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -71,6 +73,7 @@ struct pa_context {
 	pa_stream **streams;
 	int n_streams, cap_streams;
 	uint32_t next_stream_index;
+	struct shim_mixer *mixers;	/* the cards' mixers, opened on first use */
 };
 
 /* a device's index, the same for as long as the process runs */
@@ -304,6 +307,25 @@ uint32_t shim_context_new_stream_index(pa_context *c)
 
 /* ---------------------------------------------------------------- devices */
 
+/* the ALSA card a port is on, by its alias ("alsa_pcm:hw:PCH:in1", as the
+ * ALSA driver and the bridges name their ports) */
+static void card_of(jack_client_t *client, const char *port, char *ctl, size_t len)
+{
+	jack_port_t *p = jack_port_by_name(client, port);
+	int size = jack_port_name_size();
+	char *a = malloc(2 * (size_t)size);
+	char *aliases[2] = { a, a ? a + size : NULL };
+	ctl[0] = '\0';
+	if (p == NULL || a == NULL) {
+		free(a);
+		return;
+	}
+	int n = jack_port_get_aliases(p, aliases);
+	for (int i = 0; i < n && ctl[0] == '\0'; i++)
+		shim_mixer_ctl_of(aliases[i], ctl, len);
+	free(a);
+}
+
 static void scan_devices(pa_context *c, struct shim_device *out, int *n_out)
 {
 	jack_client_t *client = shim_node_client();
@@ -335,6 +357,7 @@ static void scan_devices(pa_context *c, struct shim_device *out, int *n_out)
 				snprintf(d->name, sizeof(d->name), "jackbus.%s.%s", who, playback ? "playback" : "capture");
 				snprintf(d->desc, sizeof(d->desc), "%s %s (JackBus)", who, playback ? "playback" : "capture");
 				d->index = index_of(d->name, playback);
+				card_of(client, ports[i], d->ctl, sizeof(d->ctl));
 			}
 			out[k].channels++;
 		}
@@ -384,6 +407,9 @@ static void rescan(pa_context *c, bool notify)
 	memcpy(old, c->devices, sizeof(old));
 	memcpy(c->devices, now, sizeof(now));
 	c->n_devices = n;
+	shim_mixer_rescan(c, c->devices, c->n_devices);
+	if (c->sub_mask & (PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE))
+		shim_mixer_watch(c, c->devices, c->n_devices);
 	if (!notify)
 		return;
 	for (int k = 0; k < n; k++) {
@@ -418,6 +444,19 @@ const struct shim_device *shim_context_default_device(pa_context *c, bool playba
 			first = d;
 	}
 	return first;
+}
+
+struct shim_mixer **shim_context_mixers(pa_context *c)
+{
+	return &c->mixers;
+}
+
+void shim_context_mixer_changed(pa_context *c, const char *ctl)
+{
+	for (int i = 0; i < c->n_devices; i++)
+		if (strcmp(c->devices[i].ctl, ctl) == 0)
+			notify_sub(c, (c->devices[i].playback ? PA_SUBSCRIPTION_EVENT_SINK : PA_SUBSCRIPTION_EVENT_SOURCE) |
+					PA_SUBSCRIPTION_EVENT_CHANGE, c->devices[i].index);
 }
 
 const struct shim_device *shim_context_device(pa_context *c, bool playback, const char *name, uint32_t index)
@@ -520,6 +559,7 @@ SHIM_EXPORT pa_context *pa_context_new(pa_mainloop_api *api, const char *name)
 static void teardown(pa_context *c)
 {
 	shim_operation_cancel_all(c, NULL);
+	shim_mixer_close_all(c);
 	if (c->connect_defer) {
 		c->api->defer_free(c->connect_defer);
 		c->connect_defer = NULL;
@@ -857,13 +897,18 @@ static void emit_device(pa_operation *o, const struct shim_device *d)
 	pa_sample_spec ss;
 	pa_channel_map map;
 	pa_cvolume vol;
+	int mute = 0;
 	device_spec(d, &ss, &map);
-	pa_cvolume_set(&vol, ss.channels, PA_VOLUME_NORM);
+	int hw = shim_mixer_volume(c, d, ss.channels, &vol, &mute);
+	if (!hw)
+		pa_cvolume_set(&vol, ss.channels, PA_VOLUME_NORM);
 	pa_proplist *p = pa_proplist_new();
 	pa_proplist_sets(p, PA_PROP_DEVICE_DESCRIPTION, d->desc);
 	pa_proplist_sets(p, PA_PROP_DEVICE_CLASS, "sound");
 	pa_proplist_sets(p, PA_PROP_DEVICE_API, "jackbus");
 	pa_proplist_sets(p, "jack.client-name", d->client);
+	if (d->ctl[0])
+		pa_proplist_sets(p, "alsa.mixer_device", d->ctl);
 	pa_format_info *f = pa_format_info_from_sample_spec(&ss, &map);
 	pa_format_info *formats[1] = { f };
 	pa_usec_t lat = device_latency(d);
@@ -881,7 +926,9 @@ static void emit_device(pa_operation *o, const struct shim_device *d)
 		i.monitor_source = PA_INVALID_INDEX;
 		i.latency = lat;
 		i.driver = "jackbus";
-		i.flags = PA_SINK_HARDWARE | PA_SINK_LATENCY;
+		i.mute = mute;
+		i.flags = PA_SINK_HARDWARE | PA_SINK_LATENCY | ((hw & SHIM_MIXER_VOLUME) ? PA_SINK_HW_VOLUME_CTRL : 0) |
+			((hw & SHIM_MIXER_MUTE) ? PA_SINK_HW_MUTE_CTRL : 0);
 		i.proplist = p;
 		i.configured_latency = lat;
 		i.base_volume = PA_VOLUME_NORM;
@@ -904,7 +951,9 @@ static void emit_device(pa_operation *o, const struct shim_device *d)
 		i.monitor_of_sink = PA_INVALID_INDEX;
 		i.latency = lat;
 		i.driver = "jackbus";
-		i.flags = PA_SOURCE_HARDWARE | PA_SOURCE_LATENCY;
+		i.mute = mute;
+		i.flags = PA_SOURCE_HARDWARE | PA_SOURCE_LATENCY | ((hw & SHIM_MIXER_VOLUME) ? PA_SOURCE_HW_VOLUME_CTRL : 0) |
+			((hw & SHIM_MIXER_MUTE) ? PA_SOURCE_HW_MUTE_CTRL : 0);
 		i.proplist = p;
 		i.configured_latency = lat;
 		i.base_volume = PA_VOLUME_NORM;
@@ -1006,62 +1055,71 @@ SHIM_EXPORT pa_operation *pa_context_get_source_info_by_index(pa_context *c, uin
 	return devices_op(c, false, SEL_INDEX, NULL, idx, (void *)cb, userdata);
 }
 
-/* device volumes: JackBus's devices have none of their own */
-static pa_operation *device_volume_op(pa_context *c, pa_context_success_cb_t cb, void *userdata, const char *what)
+/* device volumes: the card's own (mixer.c) */
+static pa_operation *device_volume_op(pa_context *c, bool playback, bool by_name, const char *name, uint32_t idx,
+		const pa_cvolume *v, int mute, pa_context_success_cb_t cb, void *userdata)
 {
-	static bool logged;
-	if (!logged)
-		shim_log("%s: JackBus's devices have no volume of their own (accepted, not applied)", what);
-	logged = true;
-	return success_op(c, cb, userdata, 1);
+	if ((by_name && name == NULL) || (v && !pa_cvolume_valid(v)))
+		return shim_context_success_op(c, cb, userdata, 0, PA_ERR_INVALID);
+	const struct shim_device *d = shim_context_device(c, playback, by_name ? name : NULL, idx);
+	if (d == NULL)
+		return shim_context_success_op(c, cb, userdata, 0, PA_ERR_NOENTITY);
+	int r = v ? shim_mixer_set_volume(c, d, v) : shim_mixer_set_mute(c, d, mute);
+	if (r == -PA_ERR_NOTSUPPORTED) {
+		/* no such control on the device: a fixed volume, as before */
+		shim_log("%s %s: %s has no %s control (accepted, not applied)", playback ? "sink" : "source",
+				v ? "volume" : "mute", d->name, v ? "volume" : "mute");
+		r = 0;
+	}
+	return shim_context_success_op(c, cb, userdata, r == 0, -r);
 }
 
 SHIM_EXPORT pa_operation *pa_context_set_sink_volume_by_index(pa_context *c, uint32_t idx,
 		const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
-	return device_volume_op(c, cb, userdata, "sink volume");
+	return device_volume_op(c, true, false, NULL, idx, volume, 0, cb, userdata);
 }
 
 SHIM_EXPORT pa_operation *pa_context_set_sink_volume_by_name(pa_context *c, const char *name,
 		const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
-	return device_volume_op(c, cb, userdata, "sink volume");
+	return device_volume_op(c, true, true, name, 0, volume, 0, cb, userdata);
 }
 
 SHIM_EXPORT pa_operation *pa_context_set_sink_mute_by_index(pa_context *c, uint32_t idx, int mute,
 		pa_context_success_cb_t cb, void *userdata)
 {
-	return device_volume_op(c, cb, userdata, "sink mute");
+	return device_volume_op(c, true, false, NULL, idx, NULL, mute, cb, userdata);
 }
 
 SHIM_EXPORT pa_operation *pa_context_set_sink_mute_by_name(pa_context *c, const char *name, int mute,
 		pa_context_success_cb_t cb, void *userdata)
 {
-	return device_volume_op(c, cb, userdata, "sink mute");
+	return device_volume_op(c, true, true, name, 0, NULL, mute, cb, userdata);
 }
 
 SHIM_EXPORT pa_operation *pa_context_set_source_volume_by_index(pa_context *c, uint32_t idx,
 		const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
-	return device_volume_op(c, cb, userdata, "source volume");
+	return device_volume_op(c, false, false, NULL, idx, volume, 0, cb, userdata);
 }
 
 SHIM_EXPORT pa_operation *pa_context_set_source_volume_by_name(pa_context *c, const char *name,
 		const pa_cvolume *volume, pa_context_success_cb_t cb, void *userdata)
 {
-	return device_volume_op(c, cb, userdata, "source volume");
+	return device_volume_op(c, false, true, name, 0, volume, 0, cb, userdata);
 }
 
 SHIM_EXPORT pa_operation *pa_context_set_source_mute_by_index(pa_context *c, uint32_t idx, int mute,
 		pa_context_success_cb_t cb, void *userdata)
 {
-	return device_volume_op(c, cb, userdata, "source mute");
+	return device_volume_op(c, false, false, NULL, idx, NULL, mute, cb, userdata);
 }
 
 SHIM_EXPORT pa_operation *pa_context_set_source_mute_by_name(pa_context *c, const char *name, int mute,
 		pa_context_success_cb_t cb, void *userdata)
 {
-	return device_volume_op(c, cb, userdata, "source mute");
+	return device_volume_op(c, false, true, name, 0, NULL, mute, cb, userdata);
 }
 
 /* this application's own streams: sink inputs and source outputs */
@@ -1379,6 +1437,8 @@ SHIM_EXPORT pa_operation *pa_context_subscribe(pa_context *c, pa_subscription_ma
 		pa_context_success_cb_t cb, void *userdata)
 {
 	c->sub_mask = m;
+	if (m & (PA_SUBSCRIPTION_MASK_SINK | PA_SUBSCRIPTION_MASK_SOURCE))
+		shim_mixer_watch(c, c->devices, c->n_devices);
 	return success_op(c, cb, userdata, 1);
 }
 

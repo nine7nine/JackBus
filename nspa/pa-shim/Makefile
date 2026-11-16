@@ -10,13 +10,14 @@
 # libjackbus-pa.so implements libpulse's client API (main loops, context,
 # streams, introspection) and links PulseAudio's own libpulsecommon, where the
 # rest of libpulse's API (sample specs, channel maps, volumes, property lists,
-# formats, ...) comes from.
+# formats, ...) comes from; and alsa-lib, for the cards' own volume (mixer.c).
 
 JACK_TREE  ?= $(abspath ../..)
 JACK_BUILD ?= $(JACK_TREE)/build
 OUT        ?= $(JACK_BUILD)/pa-shim
 
 PULSE_CFLAGS  := $(shell pkg-config --cflags libpulse)
+ALSA_LIBS     := $(shell pkg-config --libs alsa)
 PULSE_LIBDIR  := $(shell pkg-config --variable=libdir libpulse)
 PULSE_REAL    := $(PULSE_LIBDIR)/libpulse.so.0
 PULSE_PRIVDIR := $(PULSE_LIBDIR)/pulseaudio
@@ -28,7 +29,7 @@ CXXFLAGS ?= -O2 -g
 CXXFLAGS += -DJACKBUS_COMPAT_LAYER='"pa"' -std=c++11 -Wall -fno-exceptions -fno-rtti
 CPPFLAGS += $(PULSE_CFLAGS) -I$(JACK_TREE)/common
 
-SRCS = mainloop.c node.c context.c stream.c server.c
+SRCS = mainloop.c node.c context.c stream.c server.c mixer.c
 OBJS = $(OUT)/obj/resample.o $(OUT)/obj/JackBridgeResampler.o
 IMPL = $(OUT)/lib/libjackbus-pa.so
 SHIM = $(OUT)/lib/libpulse.so.0
@@ -62,10 +63,15 @@ $(IMPL): $(SRCS) $(OBJS) shim.h pa.map ../compat/compat_conf.h ../compat/server.
 	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -fvisibility=hidden -shared $(LDFLAGS) \
 		-Wl,-soname,libjackbus-pa.so -Wl,--version-script=pa.map -Wl,--no-undefined \
 		-Wl,-rpath,$(PULSE_PRIVDIR) \
-		-o $@ $(SRCS) $(OBJS) $(PULSE_COMMON) -L$(JACK_BUILD)/common -ljack -lpthread -lm
+		-o $@ $(SRCS) $(OBJS) $(PULSE_COMMON) -L$(JACK_BUILD)/common -ljack $(ALSA_LIBS) -lpthread -lm
 
-# test helpers: a dlsym interposer (as teams-sdl-cef's audio probe has)
-test-apps: $(OUT)/dlsym-hook.so $(OUT)/pa-dlsym-client $(OUT)/fake-card
+# test helpers: a dlsym interposer (as teams-sdl-cef's audio probe has); a
+# second card; a card's mixer (an ALSA control plugin, never a real card)
+test-apps: $(OUT)/dlsym-hook.so $(OUT)/pa-dlsym-client $(OUT)/fake-card $(OUT)/libasound_module_ctl_jbtest.so
+
+$(OUT)/libasound_module_ctl_jbtest.so: test/fake-mixer.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -DPIC -fPIC -shared -o $@ $< $(ALSA_LIBS)
 
 $(OUT)/fake-card: test/fake-card.c
 	@mkdir -p $(@D)

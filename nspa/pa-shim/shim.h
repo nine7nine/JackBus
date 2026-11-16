@@ -57,6 +57,7 @@ struct shim_device {
 	char desc[300];
 	char client[128];
 	uint32_t channels;
+	char ctl[64];			/* its ALSA card's control device ("hw:PCH"), "" none */
 };
 pa_operation *shim_operation_new(pa_context *c, pa_stream *s, void (*run)(pa_operation *o),
 		void *cb, void *userdata);
@@ -86,6 +87,19 @@ const struct shim_device *shim_context_default_device(pa_context *c, bool playba
 void shim_context_stream_add(pa_context *c, pa_stream *s);
 void shim_context_stream_remove(pa_context *c, pa_stream *s);
 pa_stream *shim_context_find_stream(pa_context *c, bool playback, uint32_t index);
+struct shim_mixer **shim_context_mixers(pa_context *c);
+void shim_context_mixer_changed(pa_context *c, const char *ctl);	/* subscribers hear of it */
+
+/* mixer.c: a device's volume is its card's own mixer */
+enum { SHIM_MIXER_VOLUME = 1, SHIM_MIXER_MUTE = 2 };
+void shim_mixer_ctl_of(const char *alias, char *ctl, size_t len);	/* "alsa_pcm:hw:PCH:in1": "hw:PCH" */
+/* the device's volume and mute: SHIM_MIXER_* it has (0: none, a fixed volume) */
+int shim_mixer_volume(pa_context *c, const struct shim_device *d, uint8_t channels, pa_cvolume *v, int *mute);
+int shim_mixer_set_volume(pa_context *c, const struct shim_device *d, const pa_cvolume *v);	/* 0 or -PA_ERR_* */
+int shim_mixer_set_mute(pa_context *c, const struct shim_device *d, int mute);
+void shim_mixer_rescan(pa_context *c, const struct shim_device *devices, int n);
+void shim_mixer_watch(pa_context *c, const struct shim_device *devices, int n);
+void shim_mixer_close_all(pa_context *c);
 
 /* stream.c */
 void shim_stream_fail(pa_stream *s, int error);
