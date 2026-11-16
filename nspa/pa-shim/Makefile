@@ -64,6 +64,17 @@ $(IMPL): $(SRCS) $(OBJS) shim.h pa.map ../compat/compat_conf.h ../compat/server.
 		-Wl,-rpath,$(PULSE_PRIVDIR) \
 		-o $@ $(SRCS) $(OBJS) $(PULSE_COMMON) -L$(JACK_BUILD)/common -ljack -lpthread -lm
 
+# test helpers: a dlsym interposer (as teams-sdl-cef's audio probe has)
+test-apps: $(OUT)/dlsym-hook.so $(OUT)/pa-dlsym-client
+
+$(OUT)/pa-dlsym-client: test/pa-dlsym-client.c
+	@mkdir -p $(@D)
+	$(CC) $(PULSE_CFLAGS) $(CFLAGS) -o $@ $< -lpulse
+
+$(OUT)/dlsym-hook.so: test/dlsym-hook.c
+	@mkdir -p $(@D)
+	$(CC) $(PULSE_CFLAGS) $(CFLAGS) -fPIC -shared -o $@ $<
+
 install: $(SHIM) $(IMPL)
 	install -Dm755 $(SHIM) $(DESTDIR)$(LIBDIR)/libpulse.so.0
 	install -Dm755 $(IMPL) $(DESTDIR)$(LIBDIR)/libjackbus-pa.so
@@ -74,4 +85,4 @@ install: $(SHIM) $(IMPL)
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all install clean
+.PHONY: all install test-apps clean

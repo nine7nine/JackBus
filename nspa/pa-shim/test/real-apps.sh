@@ -12,6 +12,7 @@
 #    functions in the shim;
 #  - without the launcher (session-wide): PulseAudio's own libpulse with the
 #    setting off; with it on, JackBus while it runs, PulseAudio's while not;
+#  - a dlsym interposer in front (as teams-sdl-cef's): no loop;
 #  - Chrome and Firefox (headless, their sandboxes on, no launcher: the
 #    switch on in their ~/.config): a Web Audio 440 Hz tone;
 #  - the realtime thread of a stream (paplay): no system call but futex.
@@ -182,6 +183,27 @@ if have pactl; then
         printf '%s\n--\n' "$off" "$up" "$down" "$pwd_" "$forced" >"$logs/auto.log"
         flunk "session-wide dispatch" "$logs/auto.log"
     fi
+fi
+
+# 6b. a dlsym interposer in front (teams-sdl-cef's audio probe: dlsym of a pa_
+#    function hands back its wrapper, which calls the real one through
+#    libpulse.so.0): no loop, the context ready on JackBus, both for a client
+#    getting pa_context_new by dlsym (as slimcore) and one linked to it (pactl)
+hook=$out/dlsym-hook.so
+if [ -e "$hook" ] && [ -x "$out/pa-dlsym-client" ] && have pactl; then
+    hooked() { timeout 10 env LD_PRELOAD="$hook" JACKBUS_PA_MODE=jackbus \
+        LD_LIBRARY_PATH="$out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$@" 2>&1; }
+    r1=$(hooked "$out/pa-dlsym-client"); rc1=$?
+    r2=$(hooked pactl info); rc2=$?
+    if [ $rc1 -eq 0 ] && echo "$r1" | grep -q 'dlsym-hook: pa_context_new wrapped' && echo "$r1" | grep -q '^ready: jackbus' &&
+       [ $rc2 -eq 0 ] && echo "$r2" | grep -q 'Server Name: PulseAudio (on JackBus)'; then
+        pass "a dlsym interposer in front (as teams-sdl-cef's): its wrapper reaches JackBus, no loop; pactl too"
+    else
+        printf '%s\n--\n' "$r1 (rc $rc1)" "$r2 (rc $rc2)" >"$logs/hook.log"
+        flunk "a dlsym interposer in front" "$logs/hook.log"
+    fi
+else
+    echo "SKIP the dlsym interposer (make -C nspa/pa-shim test-apps)"
 fi
 
 # 7. every installed program and library that links libpulse finds each of

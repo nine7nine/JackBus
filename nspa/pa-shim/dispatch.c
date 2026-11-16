@@ -15,6 +15,12 @@
  *    JACKBUS_PA_MODE=pulse, in PipeWire's own daemons (a PulseAudio tunnel
  *    there is PipeWire's), and when JackBus's library can't load.
  *
+ * The functions are found in the chosen library's own symbol table (and in
+ * libpulsecommon's, where libpulse's utility functions are for JackBus's),
+ * not with dlsym: a program may interpose dlsym (teams-sdl-cef's audio
+ * probe hands back its own wrappers for pa_ functions, which call "the real
+ * one" through libpulse.so.0, this library: dlsym here made that a loop).
+ *
  * The package puts this directory in the dynamic linker's configuration
  * (/etc/ld.so.conf.d/jackbus-pa.conf), so every program loading libpulse
  * gets this library, whatever library path its launcher gave it; with the
@@ -22,8 +28,10 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <elf.h>
 #include <errno.h>
 #include <limits.h>
+#include <link.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -59,6 +67,101 @@ static void say(bool always, const char *fmt, ...)
  * every installed libpulse user): what a call gets is 0 */
 static long missing(void)
 {
+	return 0;
+}
+
+/* ------------------------------------------- symbols, without dlsym */
+
+struct obj {
+	ElfW(Addr) base;
+	const ElfW(Sym) *sym;
+	const char *str;
+	const uint32_t *gnu;		/* DT_GNU_HASH */
+	const ElfW(Word) *hash;		/* DT_HASH */
+	const ElfW(Half) *versym;
+};
+
+static const void *dyn_ptr(ElfW(Addr) base, ElfW(Addr) p)
+{
+	/* the dynamic linker relocates these in place; if not, they are offsets */
+	return (const void *)(p < base ? p + base : p);
+}
+
+static bool obj_init(struct obj *o, ElfW(Addr) base, const ElfW(Dyn) *dyn)
+{
+	memset(o, 0, sizeof(*o));
+	o->base = base;
+	for (const ElfW(Dyn) *d = dyn; d && d->d_tag != DT_NULL; d++) {
+		switch (d->d_tag) {
+		case DT_SYMTAB: o->sym = dyn_ptr(base, d->d_un.d_ptr); break;
+		case DT_STRTAB: o->str = dyn_ptr(base, d->d_un.d_ptr); break;
+		case DT_GNU_HASH: o->gnu = dyn_ptr(base, d->d_un.d_ptr); break;
+		case DT_HASH: o->hash = dyn_ptr(base, d->d_un.d_ptr); break;
+		case DT_VERSYM: o->versym = dyn_ptr(base, d->d_un.d_ptr); break;
+		}
+	}
+	return o->sym && o->str && (o->gnu || o->hash);
+}
+
+/* a function this object defines (its default version) */
+static void *obj_match(const struct obj *o, uint32_t i, const char *name)
+{
+	const ElfW(Sym) *s = &o->sym[i];
+	if (s->st_shndx == SHN_UNDEF || s->st_value == 0 ||
+	    (ELF64_ST_TYPE(s->st_info) != STT_FUNC && ELF64_ST_TYPE(s->st_info) != STT_GNU_IFUNC))
+		return NULL;
+	if (o->versym && (o->versym[i] & 0x8000))
+		return NULL;			/* a hidden (older) version */
+	if (strcmp(o->str + s->st_name, name) != 0)
+		return NULL;
+	return ELF64_ST_TYPE(s->st_info) == STT_GNU_IFUNC ? NULL : (void *)(o->base + s->st_value);
+}
+
+static void *obj_lookup(const struct obj *o, const char *name)
+{
+	if (o->gnu) {
+		const uint32_t *g = o->gnu;
+		uint32_t nbuckets = g[0], symoffset = g[1], bloom_size = g[2];
+		const uint32_t *buckets = (const uint32_t *)((const ElfW(Addr) *)&g[4] + bloom_size);
+		const uint32_t *chain = buckets + nbuckets;
+		uint32_t h = 5381;
+		for (const unsigned char *c = (const unsigned char *)name; *c; c++)
+			h = h * 33 + *c;
+		if (nbuckets == 0)
+			return NULL;
+		uint32_t i = buckets[h % nbuckets];
+		if (i < symoffset)
+			return NULL;
+		for (;; i++) {
+			uint32_t h2 = chain[i - symoffset];
+			if ((h | 1) == (h2 | 1)) {
+				void *f = obj_match(o, i, name);
+				if (f)
+					return f;
+			}
+			if (h2 & 1)
+				return NULL;
+		}
+	}
+	for (uint32_t i = 0; i < o->hash[1]; i++) {	/* nchain: the number of symbols */
+		void *f = obj_match(o, i, name);
+		if (f)
+			return f;
+	}
+	return NULL;
+}
+
+/* libpulsecommon, loaded with JackBus's library: where libpulse's utility
+ * functions are */
+static int find_common(struct dl_phdr_info *info, size_t size, void *data)
+{
+	struct obj *o = data;
+	if (info->dlpi_name == NULL || strstr(info->dlpi_name, "/libpulsecommon-") == NULL)
+		return 0;
+	for (int i = 0; i < info->dlpi_phnum; i++)
+		if (info->dlpi_phdr[i].p_type == PT_DYNAMIC)
+			return obj_init(o, info->dlpi_addr,
+					(const ElfW(Dyn) *)(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr)) ? 1 : 0;
 	return 0;
 }
 
@@ -150,9 +253,18 @@ __attribute__((constructor)) static void choose(void)
 	}
 	free(self);
 
+	struct obj objs[2];
+	int n_objs = 0;
+	struct link_map *lm = NULL;
+	if (h && dlinfo(h, RTLD_DI_LINKMAP, &lm) == 0 && lm && obj_init(&objs[n_objs], lm->l_addr, lm->l_ld))
+		n_objs++;
+	if (h && dl_iterate_phdr(find_common, &objs[n_objs]) > 0)
+		n_objs++;
 	unsigned int lacking = 0;
 	for (unsigned int i = 0; i < JB_PA_COUNT; i++) {
-		void *f = h ? dlsym(h, names[i]) : NULL;
+		void *f = NULL;
+		for (int k = 0; k < n_objs && f == NULL; k++)
+			f = obj_lookup(&objs[k], names[i]);
 		if (f == NULL)
 			lacking++;
 		jb_pa_table[i] = f ? f : (void *)missing;
