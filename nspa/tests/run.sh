@@ -526,6 +526,8 @@ else
     # PW_EXAMPLES=<pipewire tree>/src/examples)
     if [ -x "$JACK_BUILD/pw-shim/audio-src" ] && [ -e "$JACK_BUILD/pw-shim/lib/libpipewire-0.3.so.0" ]; then
         "$root/nspa/pw-shim/test/run-example.sh" || fail=1
+        # the system's PipeWire clients (pw-play, mpv, fluidsynth, SDL3, OpenAL, ...)
+        "$root/nspa/pw-shim/test/real-apps.sh" || fail=1
     else
         echo "SKIP jackbus-pw (the shim and PipeWire's examples are not built)"
     fi

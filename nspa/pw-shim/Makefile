@@ -46,7 +46,9 @@ $(SHIM): $(SRCS) $(OBJS) shim.h resample.h Makefile
 		-Wl,-soname,libpipewire-0.3.so.0 -Wl,--no-undefined -Wl,-z,defs \
 		-o $@ $(SRCS) $(OBJS) -L$(JACK_BUILD)/common -ljack -ldl -lpthread -lm
 
-TEST_APPS = $(OUT)/pw-probe $(OUT)/pw-twofilter $(OUT)/jbpw-check \
+TEST_APPS = $(OUT)/pw-probe $(OUT)/pw-twofilter $(OUT)/pw-midifilter $(OUT)/jbpw-check \
+	$(if $(shell pkg-config --exists sdl3 && echo y),$(OUT)/sdl3-tone) \
+	$(if $(shell pkg-config --exists openal && echo y),$(OUT)/openal-tone) \
 	$(if $(PW_EXAMPLES),$(OUT)/audio-dsp-filter $(OUT)/audio-src $(OUT)/audio-capture)
 
 test-apps: $(TEST_APPS)
@@ -60,9 +62,22 @@ $(OUT)/pw-twofilter: test/pw-twofilter.c
 	@mkdir -p $(@D)
 	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
 
+$(OUT)/pw-midifilter: test/pw-midifilter.c
+	@mkdir -p $(@D)
+	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
+
 $(OUT)/audio-dsp-filter $(OUT)/audio-src $(OUT)/audio-capture: $(OUT)/%: $(PW_EXAMPLES)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
+
+# libraries that load libpipewire themselves (SDL3, OpenAL Soft)
+$(OUT)/sdl3-tone: test/sdl3-tone.c
+	@mkdir -p $(@D)
+	$(CC) $(shell pkg-config --cflags sdl3) $(CFLAGS) -o $@ $< $(shell pkg-config --libs sdl3) -lm
+
+$(OUT)/openal-tone: test/openal-tone.c
+	@mkdir -p $(@D)
+	$(CC) $(shell pkg-config --cflags openal) $(CFLAGS) -o $@ $< $(shell pkg-config --libs openal) -lm
 
 # a plain JACK client that feeds and checks the filter
 $(OUT)/jbpw-check: test/jbpw-check.c
