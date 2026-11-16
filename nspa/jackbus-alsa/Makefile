@@ -18,10 +18,23 @@ PLUGIN = $(OUT)/libasound_module_pcm_jackbus.so
 
 all: $(PLUGIN)
 
-$(PLUGIN): pcm_jackbus.c Makefile
+CXXFLAGS ?= -O2 -g
+CXXFLAGS += -std=c++11 -Wall -fno-exceptions -fno-rtti
+# JackBus's bridge resampler, for the resampling fallback (built in, not copied)
+OBJS = $(OUT)/obj/resample.o $(OUT)/obj/JackBridgeResampler.o
+
+$(OUT)/obj/resample.o: ../pw-shim/resample.cpp ../pw-shim/resample.h
+	@mkdir -p $(@D)
+	$(CXX) -I$(JACK_TREE)/common $(CXXFLAGS) -fPIC -fvisibility=hidden -c -o $@ $<
+
+$(OUT)/obj/JackBridgeResampler.o: $(JACK_TREE)/common/JackBridgeResampler.cpp $(JACK_TREE)/common/JackBridgeResampler.h
+	@mkdir -p $(@D)
+	$(CXX) -I$(JACK_TREE)/common $(CXXFLAGS) -fPIC -fvisibility=hidden -c -o $@ $<
+
+$(PLUGIN): pcm_jackbus.c $(OBJS) ../compat/compat_conf.h Makefile
 	@mkdir -p $(@D)
 	$(CC) -DPIC -I$(JACK_TREE)/common $(ALSA_CFLAGS) $(CFLAGS) -fPIC -shared -Wl,--no-undefined \
-		-o $@ $< -L$(JACK_BUILD)/common -ljack $(ALSA_LIBS) -lm
+		-o $@ $< $(OBJS) -L$(JACK_BUILD)/common -ljack $(ALSA_LIBS) -lm
 
 install: $(PLUGIN)
 	install -Dm755 $(PLUGIN) $(DESTDIR)$(ALSA_PLUGIN_DIR)/libasound_module_pcm_jackbus.so

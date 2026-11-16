@@ -20,9 +20,12 @@
  * fill plus the ports' JACK latency, and a cycle the ring couldn't fill (or
  * empty) is an xrun, reported as ALSA reports one (EPIPE).
  *
- * The rate is JackBus's: an application that can't run at it fails to set
- * its parameters, as on a card at a fixed rate (plug:jackbus converts in the
- * application's own process, if it is wanted).
+ * The rate: JackBus's for an application that asks for it (the direct
+ * route). Another rate (a fifth of JackBus's to five times it) is resampled
+ * in the realtime thread by JackBus's bridge resampler, a fallback, unless
+ * the settings say no (~/.config/jackbus/compat.conf "resample = no", or
+ * JACKBUS_ALSA_RESAMPLE=0): then the rate is JackBus's only, as on a card at
+ * a fixed rate.
  *
  * Options: name "<client name>" (default: the program's name, or
  * JACKBUS_ALSA_NAME), server "<JACK server>", autoconnect <bool> (default
@@ -41,6 +44,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/timerfd.h>
 
 #include <alsa/asoundlib.h>
@@ -48,6 +52,9 @@
 
 #include <jack/jack.h>
 #include <jack/jackbus.h>
+
+#include "../compat/compat_conf.h"
+#include "../pw-shim/resample.h"
 
 #define MAX_CHANNELS 64
 #define MIN_U(a, b) ((a) < (b) ? (a) : (b))
@@ -79,6 +86,15 @@ struct jb {
 	_Atomic uint64_t hw;		/* the realtime side's position, modulo boundary */
 	_Atomic uint64_t next_ns, period_ns;
 	_Atomic uint64_t xruns;
+
+	/* the fallback: the application's rate isn't JackBus's (set up in
+	 * hw_params, used by the realtime side) */
+	bool resample;			/* allowed: settings */
+	struct shim_resampler *rs;
+	float *tmp[MAX_CHANNELS];
+	void *tmp_mem;
+	size_t tmp_size;
+	uint32_t tmp_frames;
 };
 
 /* ------------------------------------------------------- realtime side */
@@ -174,6 +190,47 @@ static void move(struct jb *p, snd_pcm_uframes_t hw, uint32_t off, uint32_t n)
 	}
 }
 
+/* resampling: one cycle of JackBus's frames from (or to) the ring at the
+ * application's rate; returns the application frames the ring moved by, and
+ * *whole says whether the cycle was served whole */
+static uint32_t move_resampled(struct jb *p, snd_pcm_uframes_t hw, uint32_t n, bool *whole)
+{
+	snd_pcm_uframes_t avail = snd_pcm_ioplug_hw_avail(&p->io, hw, p->io.appl_ptr);
+	snd_pcm_uframes_t pos = hw % p->buffer_size;
+	float *port[MAX_CHANNELS];
+	for (unsigned int ch = 0; ch < p->channels; ch++)
+		port[ch] = jackbus_port_audio(p->ports[ch]);
+
+	if (p->playback) {
+		uint32_t need = (uint32_t)shim_resampler_needed(p->rs, (int)n);
+		uint32_t take = (uint32_t)MIN_U(MIN_U((snd_pcm_uframes_t)need, avail), (snd_pcm_uframes_t)p->tmp_frames);
+		if (take) {
+			uint32_t first = (uint32_t)MIN_U((snd_pcm_uframes_t)take, p->buffer_size - pos);
+			for (unsigned int ch = 0; ch < p->channels; ch++) {
+				ring_to_float(p, ch, pos, p->tmp[ch], first);
+				if (take > first)
+					ring_to_float(p, ch, 0, p->tmp[ch] + first, take - first);
+			}
+			shim_resampler_push(p->rs, (const float *const *)p->tmp, (int)take);
+		}
+		*whole = shim_resampler_pull(p->rs, port, (int)n) == (int)n;
+		return take;
+	}
+	shim_resampler_push(p->rs, (const float *const *)port, (int)n);
+	int got = shim_resampler_pull_available(p->rs, p->tmp, (int)p->tmp_frames);
+	uint32_t put = got > 0 ? (uint32_t)MIN_U((snd_pcm_uframes_t)got, avail) : 0;
+	if (put) {
+		uint32_t first = (uint32_t)MIN_U((snd_pcm_uframes_t)put, p->buffer_size - pos);
+		for (unsigned int ch = 0; ch < p->channels; ch++) {
+			float_to_ring(p, ch, pos, p->tmp[ch], first);
+			if (put > first)
+				float_to_ring(p, ch, 0, p->tmp[ch] + first, put - first);
+		}
+	}
+	*whole = got >= 0 && (uint32_t)got == put;
+	return put;
+}
+
 static int jb_process(jackbus_node_t *node, const jackbus_cycle_t *c, void *arg)
 {
 	struct jb *p = arg;
@@ -188,19 +245,28 @@ static int jb_process(jackbus_node_t *node, const jackbus_cycle_t *c, void *arg)
 	uint32_t moved = 0;
 	if (atomic_load_explicit(&p->running, memory_order_acquire)) {
 		snd_pcm_uframes_t hw = atomic_load_explicit(&p->hw, memory_order_relaxed);
-		/* playback: the frames written and not played; capture: the room left */
-		snd_pcm_uframes_t avail = snd_pcm_ioplug_hw_avail(&p->io, hw, p->io.appl_ptr);
-		moved = (uint32_t)MIN_U(avail, (snd_pcm_uframes_t)n);
-		if (moved)
-			move(p, hw, 0, moved);
-		if (moved < n && p->io.state != SND_PCM_STATE_DRAINING) {
+		bool whole;
+		uint32_t advance;
+		if (p->rs) {
+			advance = move_resampled(p, hw, n, &whole);
+			moved = whole ? n : 0;		/* the ports: a whole cycle, or silence */
+		} else {
+			/* playback: the frames written and not played; capture: the room left */
+			snd_pcm_uframes_t avail = snd_pcm_ioplug_hw_avail(&p->io, hw, p->io.appl_ptr);
+			moved = (uint32_t)MIN_U(avail, (snd_pcm_uframes_t)n);
+			if (moved)
+				move(p, hw, 0, moved);
+			advance = moved;
+			whole = moved == n;
+		}
+		if (!whole && p->io.state != SND_PCM_STATE_DRAINING) {
 			/* the ring couldn't give (or take) a whole cycle: an xrun, and
 			 * the positions stay where they are until the application prepares */
 			atomic_store_explicit(&p->running, false, memory_order_relaxed);
 			atomic_store_explicit(&p->xrun, true, memory_order_release);
 			atomic_fetch_add_explicit(&p->xruns, 1, memory_order_relaxed);
 		}
-		atomic_store_explicit(&p->hw, (hw + moved) % p->boundary, memory_order_release);
+		atomic_store_explicit(&p->hw, (hw + advance) % p->boundary, memory_order_release);
 	}
 	if (p->playback && moved < n) {
 		for (unsigned int ch = 0; ch < p->channels; ch++) {
@@ -318,6 +384,19 @@ static snd_pcm_sframes_t jb_pointer(snd_pcm_ioplug_t *io)
 	return (snd_pcm_sframes_t)atomic_load_explicit(&p->hw, memory_order_acquire);
 }
 
+static void free_resampler(struct jb *p)
+{
+	shim_resampler_free(p->rs);
+	p->rs = NULL;
+	if (p->tmp_mem) {
+		munlock(p->tmp_mem, p->tmp_size);
+		free(p->tmp_mem);
+	}
+	p->tmp_mem = NULL;
+	p->tmp_size = 0;
+	memset(p->tmp, 0, sizeof(p->tmp));
+}
+
 static int jb_hw_params(snd_pcm_ioplug_t *io, snd_pcm_hw_params_t *params)
 {
 	struct jb *p = io->private_data;
@@ -341,6 +420,31 @@ static int jb_hw_params(snd_pcm_ioplug_t *io, snd_pcm_hw_params_t *params)
 	p->channels = io->channels;
 	p->format = io->format;
 	p->buffer_size = io->buffer_size;
+	free_resampler(p);
+	if (io->rate != p->rate) {
+		/* the fallback: resampled at a fixed ratio (the application runs on
+		 * JackBus's clock) */
+		double ratio = p->playback ? (double)io->rate / p->rate : (double)p->rate / io->rate;
+		double most = ratio > 1.0 ? ratio : 1.0 / ratio;
+		p->tmp_frames = (uint32_t)(8192 * most) + 256;
+		p->tmp_size = (size_t)p->channels * p->tmp_frames * sizeof(float);
+		if (posix_memalign(&p->tmp_mem, 64, p->tmp_size) != 0) {
+			p->tmp_mem = NULL;
+			return -ENOMEM;
+		}
+		memset(p->tmp_mem, 0, p->tmp_size);
+		mlock(p->tmp_mem, p->tmp_size);
+		for (unsigned int ch = 0; ch < p->channels; ch++)
+			p->tmp[ch] = (float *)p->tmp_mem + (size_t)ch * p->tmp_frames;
+		p->rs = shim_resampler_new((int)p->channels, ratio, p->playback ? (int)p->tmp_frames : 8192,
+				p->playback ? 8192 : (int)p->tmp_frames);
+		if (p->rs == NULL) {
+			free_resampler(p);
+			return -ENOMEM;
+		}
+		if (getenv("JACKBUS_ALSA_VERBOSE"))
+			fprintf(stderr, "jackbus-alsa: resampled %u Hz <-> %u Hz (JackBus's)\n", io->rate, p->rate);
+	}
 	/* the ring is buffering the JACK graph sees */
 	jackbus_node_set_process_latency(p->node, (jack_nframes_t)io->buffer_size);
 	return 0;
@@ -372,6 +476,8 @@ static int jb_prepare(snd_pcm_ioplug_t *io)
 	if (p->boundary == 0)
 		p->boundary = io->buffer_size;
 	p->areas = snd_pcm_ioplug_mmap_areas(io);
+	if (p->rs)
+		shim_resampler_reset(p->rs);	/* the stream starts again */
 	atomic_store(&p->hw, 0);
 	atomic_store(&p->xrun, false);
 	if (p->areas == NULL || p->n_ports == 0)
@@ -444,7 +550,11 @@ static int jb_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delayp)
 	/* playback: written, not yet played; capture: captured, not yet read */
 	snd_pcm_uframes_t queued = p->playback ? snd_pcm_ioplug_hw_avail(io, hw, io->appl_ptr) :
 		snd_pcm_ioplug_avail(io, hw, io->appl_ptr);
-	*delayp = (snd_pcm_sframes_t)(queued + range.max);
+	/* resampling: the frames the resampler holds, and the ports' latency at
+	 * the application's rate */
+	double held = p->rs ? shim_resampler_delay(p->rs) : 0.0;
+	double lat = p->rs ? (double)range.max * io->rate / p->rate : (double)range.max;
+	*delayp = (snd_pcm_sframes_t)(queued + (held > 0 ? held : 0) + lat);
 	return 0;
 }
 
@@ -457,6 +567,7 @@ static int jb_close(snd_pcm_ioplug_t *io)
 	jackbus_node_close(p->node);	/* deactivates: no cycle runs process after this */
 	if (p->timer_fd >= 0)
 		close(p->timer_fd);
+	free_resampler(p);
 	free(p);
 	return 0;
 }
@@ -492,8 +603,10 @@ static int set_constraints(struct jb *p)
 	    (err = snd_pcm_ioplug_set_param_list(&p->io, SND_PCM_IOPLUG_HW_FORMAT,
 			N_ELEMENTS(formats), formats)) < 0 ||
 	    (err = snd_pcm_ioplug_set_param_minmax(&p->io, SND_PCM_IOPLUG_HW_CHANNELS, 1, MAX_CHANNELS)) < 0 ||
-	    /* JackBus's rate only: no resampling */
-	    (err = snd_pcm_ioplug_set_param_minmax(&p->io, SND_PCM_IOPLUG_HW_RATE, p->rate, p->rate)) < 0 ||
+	    /* JackBus's rate; with the resampling fallback, any rate a fifth of it to
+	     * five times it (an application asking for JackBus's gets the direct route) */
+	    (err = snd_pcm_ioplug_set_param_minmax(&p->io, SND_PCM_IOPLUG_HW_RATE,
+			p->resample ? (p->rate + 4) / 5 : p->rate, p->resample ? p->rate * 5 : p->rate)) < 0 ||
 	    (err = snd_pcm_ioplug_set_param_minmax(&p->io, SND_PCM_IOPLUG_HW_PERIOD_BYTES,
 			64, 4 * 1024 * 1024)) < 0 ||
 	    /* at least two of JackBus's cycles of stereo S16 */
@@ -508,7 +621,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(jackbus)
 {
 	snd_config_iterator_t i, next;
 	const char *cname = NULL, *server = NULL;
-	int connect = 1, err;
+	int connect = -1, err;		/* autoconnect: -1, the settings' */
 	jack_status_t status = 0;
 
 	snd_config_for_each(i, next, conf) {
@@ -541,7 +654,9 @@ SND_PCM_PLUGIN_DEFINE_FUNC(jackbus)
 	if (p == NULL)
 		return -ENOMEM;
 	p->playback = stream == SND_PCM_STREAM_PLAYBACK;
-	p->autoconnect = connect;
+	p->autoconnect = connect >= 0 ? connect :
+		jackbus_compat_bool("autoconnect", "JACKBUS_ALSA_AUTOCONNECT", true);
+	p->resample = jackbus_compat_bool("resample", "JACKBUS_ALSA_RESAMPLE", true);
 	p->timer_fd = -1;
 
 	const char *env = getenv("JACKBUS_ALSA_NAME");

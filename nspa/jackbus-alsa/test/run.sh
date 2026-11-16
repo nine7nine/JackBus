@@ -4,9 +4,9 @@
 # Hz, 256 frames):
 #  - aplay of S16, S32 and float: a continuous 440 Hz sine on its ports, which
 #    went to system:playback by themselves; drained, exit 0;
-#  - a 44100 Hz file: not resampled (aplay warns that it got 48000 Hz);
-#    plug:jackbus, alsa-lib converting in the application, plays it right;
-#  - arecord of a JackBus node's tone (S16 and float);
+#  - a 44100 Hz file: resampled (the fallback) at the right pitch; with
+#    resampling off, JackBus's rate only;
+#  - arecord of a JackBus node's tone (S16 and float, and at 44100 Hz);
 #  - sample-accurate timing (alsa-sync): frames played by the application's
 #    own account (written - delay) against JACK's frame clock, constant within
 #    a cycle over 4 s;
@@ -89,29 +89,36 @@ play S16 "$logs/s48.wav"
 play S32 -t raw -f S32_LE -r 48000 -c 2 "$logs/s48.s32"
 play FLOAT -t raw -f FLOAT_LE -r 48000 -c 2 "$logs/s48.f32"
 
-# 2. a 44100 Hz file: JackBus's rate only, never resampled by the plugin
-timeout 10 aplay -D jackbus "$logs/s441.wav" >"$logs/aplay-441.log" 2>&1
-if grep -q 'rate is not accurate (requested = 44100Hz, got = 48000Hz)' "$logs/aplay-441.log"; then
-    pass "aplay of 44100 Hz: the plugin offers 48000 only (aplay: 'rate is not accurate'), nothing resampled"
-else
-    flunk "aplay of 44100 Hz" "$logs/aplay-441.log"
-fi
-aplay -D plug:jackbus "$logs/s441.wav" >"$logs/aplay-plug.log" 2>&1 &
+# 2. a 44100 Hz file: resampled (the fallback) to a continuous sine at the
+#    right pitch; with resampling off, the rate is JackBus's only (aplay warns
+#    it got 48000 Hz)
+aplay -D jackbus "$logs/s441.wav" >"$logs/aplay-441.log" 2>&1 &
 p=$!
 wait_port '^aplay:out_1$' >/dev/null
 sleep 0.3
-timeout 10 jack_rec -f "$logs/rec-plug.wav" -d 1.5 aplay:out_1 >/dev/null 2>&1
-python3 -I "$check" "$logs/rec-plug.wav" 440 >"$logs/rec-plug.check" 2>&1 && r=0 || r=1
-wait $p
-[ $r -eq 0 ] && pass "plug:jackbus (alsa-lib converting in the application) plays 44100 Hz right: $(cut -d' ' -f2- "$logs/rec-plug.check")" \
-    || flunk "plug:jackbus" "$logs/rec-plug.check" "$logs/aplay-plug.log"
+timeout 10 jack_rec -f "$logs/rec-441.wav" -d 1.5 aplay:out_1 >/dev/null 2>&1
+python3 -I "$check" "$logs/rec-441.wav" 440 >"$logs/rec-441.check" 2>&1 && r=0 || r=1
+wait $p; rc=$?
+if [ $r -eq 0 ] && [ $rc -eq 0 ] && ! grep -q 'rate is not accurate' "$logs/aplay-441.log"; then
+    pass "aplay of 44100 Hz: resampled at its rate (no 'rate is not accurate'), exit 0: $(cut -d' ' -f2- "$logs/rec-441.check")"
+else
+    flunk "aplay of 44100 Hz, resampled (rc $rc)" "$logs/rec-441.check" "$logs/aplay-441.log"
+fi
+JACKBUS_ALSA_RESAMPLE=0 timeout 10 aplay -D jackbus "$logs/s441.wav" >"$logs/aplay-441-nors.log" 2>&1
+if grep -q 'rate is not accurate (requested = 44100Hz, got = 48000Hz)' "$logs/aplay-441-nors.log"; then
+    pass "resampling off: JackBus's rate only (aplay: 'rate is not accurate')"
+else
+    flunk "resampling off" "$logs/aplay-441-nors.log"
+fi
 
 # 3. arecord of a node's tone, S16 and float
 "$JACK_BUILD/example-clients/jackbus_tone" -n tone -f 440 >"$logs/tone.log" 2>&1 &
 tp=$!
 wait_port '^tone:out$' >/dev/null
-for f in S16_LE FLOAT_LE; do
-    JACKBUS_ALSA_AUTOCONNECT=0 arecord -D jackbus -f $f -r 48000 -c 2 -d 2 "$logs/arec-$f.wav" >"$logs/arecord-$f.log" 2>&1 &
+for f in S16_LE FLOAT_LE S16_LE@44100; do
+    rate=48000
+    case $f in *@*) rate=${f#*@}; f=${f%@*} ;; esac
+    JACKBUS_ALSA_AUTOCONNECT=0 arecord -D jackbus -f $f -r $rate -c 2 -d 2 "$logs/arec-$f.wav" >"$logs/arecord-$f.log" 2>&1 &
     p=$!
     wait_port '^arecord:in_2$' >/dev/null
     jack_connect tone:out arecord:in_1; jack_connect tone:out arecord:in_2
@@ -131,7 +138,7 @@ EOP
         file=$logs/arec-$f.wav
     fi
     if [ $rc -eq 0 ] && python3 -I "$check" "$file" 440 >"$logs/arec-$f.check" 2>&1; then
-        pass "arecord $f of a node's tone: $(cut -d' ' -f2- "$logs/arec-$f.check")"
+        pass "arecord $f at $rate of a node's tone: $(cut -d' ' -f2- "$logs/arec-$f.check")"
     else
         flunk "arecord $f (rc $rc)" "$logs/arec-$f.check" "$logs/arecord-$f.log"
     fi
