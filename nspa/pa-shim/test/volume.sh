@@ -8,7 +8,7 @@
 #  - the sink's volume is Master's, as alsamixer shows it (its mapping);
 #  - setting it sets Master; +5 % / -5 % steps always move it; balance;
 #    over 100 %: 100 %; mute is the switch;
-#  - the source's volume is Capture's;
+#  - the source's volume is Capture's, 100 % its 0 dB (unity), gain beyond;
 #  - a change made by another process (amixer, another client) reaches a
 #    subscriber as a sink change;
 #  - a device of no card keeps a fixed volume, a request accepted.
@@ -116,14 +116,20 @@ else
     flunk "mute: '$s1' '$m1', '$s2' '$m2'" "$logs/pactl.log"
 fi
 
-# 6. the source's volume is Capture's
-v0=$(pct source $C); pa set-source-volume $C 30%; v=$(pct source $C)
+# 6. the source's volume is Capture's: 100 % is 0 dB (unity), its gain
+# above (to +30 dB) beyond 100 %
+v0=$(pct source $C); pa set-source-volume $C 30%; v=$(pct source $C); r30=$(st 5)
+pa set-source-volume $C 100%; r100=$(st 5); v100=$(pct source $C)
+pa set-source-volume $C 150%; r150=$(st 5); v150=$(pct source $C)
 pa set-source-mute $C 1; cm="$(st 7) $(st 8)"; pa set-source-mute $C 0
-if [ "$v0" = "$(expect 40 -1725 75 3000) $(expect 40 -1725 75 3000)" ] && [ "${v% *}" -ge 29 ] && [ "${v% *}" -le 31 ] &&
-   [ "$(st 5)" -lt 40 ] && [ "$cm" = "0 0" ]; then
-    pass "source $C: Capture's volume ($v0 %, set to $v %: raw $(st 5)), mute its switch"
+# raw 40 is +12.75 dB: 163 %; raw 23 is 0 dB; 150 % is +10.6 dB (raw 37 or 38);
+# 30 %: within a step (0.75 dB, about 4 % here), rounded the way it moves
+if [ "$v0" = "163 163" ] && [ "${v% *}" -ge 25 ] && [ "${v% *}" -le 31 ] && [ "$r30" -lt 23 ] &&
+   [ "$r100" = 23 ] && [ "$v100" = "100 100" ] && [ "$r150" -ge 37 ] && [ "$r150" -le 38 ] &&
+   [ "${v150% *}" -ge 149 ] && [ "${v150% *}" -le 155 ] && [ "$cm" = "0 0" ]; then
+    pass "source $C: Capture's volume, 100 % = 0 dB (raw 23); +12.75 dB reads $v0 %; 30 %: raw $r30; 150 %: raw $r150 ($v150 %); mute its switch"
 else
-    flunk "source: '$v0' then '$v' (raw $(st 5)), mute '$cm'" "$logs/pactl.log"
+    flunk "source: '$v0'; 30%: '$v' raw $r30; 100%: raw $r100 '$v100'; 150%: raw $r150 '$v150'; mute '$cm'" "$logs/pactl.log"
 fi
 
 # 7. changes made elsewhere reach a subscriber

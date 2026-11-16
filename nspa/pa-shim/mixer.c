@@ -8,8 +8,11 @@
  * The card holds the value, so every process sees the same one (alsamixer
  * too): a desktop's volume control and its volume keys set it through this
  * library, and a change made anywhere reaches subscribers as a sink (source)
- * change. The percentages are alsamixer's: perceptual over the control's dB
- * range (PulseAudio's cubic curve), its minimum 0 %, its maximum 100 %.
+ * change. The percentages are alsamixer's (perceptual over the control's dB
+ * range, PulseAudio's cubic curve), its minimum 0 %, 100 % its maximum or,
+ * for a control with gain above 0 dB (a capture control's), 0 dB: unity,
+ * the gain above it beyond 100 % (as PulseAudio's amplification). Neither a
+ * slider nor an application's automatic gain control reaches it by accident.
  *
  * A card's mixer is opened on first use (a device's information, a volume
  * set, a subscription to devices), on the application's main loop, never in
@@ -126,7 +129,16 @@ static int set_raw(snd_mixer_elem_t *e, bool pb, int ch, long v)
 	return pb ? snd_mixer_selem_set_playback_volume(e, ch, v) : snd_mixer_selem_set_capture_volume(e, ch, v);
 }
 
-/* alsamixer's mapping: 0..1 */
+/* The scale's 100 %: 0 dB where a control goes above it (a capture control's
+ * gain: +30 dB on an HDA card, whose hiss no 100 % should mean), else the
+ * control's maximum (a playback control's, 0 dB as a rule). */
+static long db_top(long min, long max)
+{
+	return min < 0 && max > 0 ? 0 : max;
+}
+
+/* alsamixer's mapping up to the scale's 100 % (1.0); above it, gain in
+ * PulseAudio's terms (its cubic curve: 150 % is about +10.6 dB) */
 static double get_norm(snd_mixer_elem_t *e, bool pb, int ch)
 {
 	long min, max, v;
@@ -137,11 +149,14 @@ static double get_norm(snd_mixer_elem_t *e, bool pb, int ch)
 	}
 	if (get_db(e, pb, ch, &v) < 0)
 		return 1.0;
-	if (max - min <= LINEAR_DB)
-		return (double)(v - min) / (double)(max - min);
-	double n = exp10((double)(v - max) / 6000.0);
+	long top = db_top(min, max);
+	if (v > top)
+		return exp10((double)(v - top) / 6000.0);
+	if (top - min <= LINEAR_DB)
+		return (double)(v - min) / (double)(top - min);
+	double n = exp10((double)(v - top) / 6000.0);
 	if (min != SND_CTL_TLV_DB_GAIN_MUTE) {
-		double nmin = exp10((double)(min - max) / 6000.0);
+		double nmin = exp10((double)(min - top) / 6000.0);
 		n = (n - nmin) / (1.0 - nmin);
 	}
 	return n < 0.0 ? 0.0 : n > 1.0 ? 1.0 : n;
@@ -156,20 +171,28 @@ static long round_dir(double x, int dir)
 static int set_norm(snd_mixer_elem_t *e, bool pb, int ch, double n, int dir)
 {
 	long min, max, rmin, rmax;
-	n = n < 0.0 ? 0.0 : n > 1.0 ? 1.0 : n;
+	if (n < 0.0)
+		n = 0.0;
 	if (raw_range(e, pb, &rmin, &rmax) < 0 || rmin >= rmax)
 		return -1;
 	if (db_range(e, pb, &min, &max) < 0 || min >= max)
-		return set_raw(e, pb, ch, round_dir(n * (double)(rmax - rmin), dir) + rmin);
-	if (max - min <= LINEAR_DB)
-		return set_db(e, pb, ch, round_dir(n * (double)(max - min), dir) + min, dir);
+		return set_raw(e, pb, ch, round_dir((n > 1.0 ? 1.0 : n) * (double)(rmax - rmin), dir) + rmin);
+	long top = db_top(min, max);
+	if (n > 1.0) {
+		if (top >= max)
+			n = 1.0;
+		else
+			return set_db(e, pb, ch, SHIM_MIN(round_dir(6000.0 * log10(n), dir) + top, max), dir);
+	}
+	if (top - min <= LINEAR_DB)
+		return set_db(e, pb, ch, round_dir(n * (double)(top - min), dir) + min, dir);
 	if (min != SND_CTL_TLV_DB_GAIN_MUTE) {
-		double nmin = exp10((double)(min - max) / 6000.0);
+		double nmin = exp10((double)(min - top) / 6000.0);
 		n = n * (1.0 - nmin) + nmin;
 	}
 	if (n <= 0.0)
 		return set_raw(e, pb, ch, rmin);
-	return set_db(e, pb, ch, round_dir(6000.0 * log10(n), dir) + max, dir);
+	return set_db(e, pb, ch, round_dir(6000.0 * log10(n), dir) + top, dir);
 }
 
 /* the control's channel for the device's channel i */
@@ -290,7 +313,8 @@ int shim_mixer_volume(pa_context *c, const struct shim_device *d, uint8_t channe
 		return 0;
 	v->channels = channels;
 	for (int i = 0; i < channels; i++)
-		v->values[i] = (pa_volume_t)lrint(get_norm(e, pb, channel_for(e, pb, i)) * PA_VOLUME_NORM);
+		v->values[i] = (pa_volume_t)SHIM_MIN(lrint(get_norm(e, pb, channel_for(e, pb, i)) * PA_VOLUME_NORM),
+				(long)PA_VOLUME_MAX);
 	if (!has_switch(e, pb))
 		return SHIM_MIXER_VOLUME;
 	int on = 1;
@@ -303,7 +327,7 @@ int shim_mixer_volume(pa_context *c, const struct shim_device *d, uint8_t channe
 
 static int set_channel(snd_mixer_elem_t *e, bool pb, int ch, pa_volume_t pv)
 {
-	double want = (double)SHIM_MIN(pv, PA_VOLUME_NORM) / PA_VOLUME_NORM;
+	double want = (double)pv / PA_VOLUME_NORM;
 	double now = get_norm(e, pb, ch);
 	if (fabs(want - now) < 1e-6)
 		return 0;
