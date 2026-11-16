@@ -1,0 +1,36 @@
+# JackBus at login, before the desktop.
+#
+# The server is started through jackdbus (org.jackaudio.service, activated
+# on the session bus as ever) with its saved settings, PatchBox's and
+# jack_control's: both keep managing it, stop and start it as before. Unlike
+# jack@.service (a plain jackd none of them can drive).
+#
+# Before the desktop: a program decides as it starts whether its PulseAudio
+# side goes to JackBus (jackbus-pa: while JackBus runs) or to PipeWire, and
+# the desktop's own (Plasma's volume control and volume keys, its sounds)
+# start with the session. Started from an autostart entry instead, JackBus
+# comes after them: they stay on PipeWire for the session.
+#
+# A card PipeWire's session manager holds is handed over through its device
+# reservation; a few tries cover one still starting. If JackBus can't start,
+# the desktop starts anyway (on PipeWire), a few seconds later.
+#
+#   systemctl --user enable jackbus.service
+# (in place of any other start at login, an autostart entry running
+# jack_control start for one)
+
+[Unit]
+Description=JackBus (started through jackdbus, before the desktop)
+Documentation=https://github.com/nine7nine/JackBus
+After=dbus.socket sound.target pipewire.service wireplumber.service
+Before=graphical-session-pre.target xdg-desktop-autostart.target
+Before=plasma-kded6.service plasma-plasmashell.service plasma-powerdevil.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for i in 1 2 3 4 5; do busctl --user --timeout=20 call org.jackaudio.service /org/jackaudio/Controller org.jackaudio.JackControl StartServer && exit 0; sleep 1; done; exit 1'
+TimeoutStartSec=60
+
+[Install]
+WantedBy=graphical-session-pre.target

@@ -34,3 +34,5 @@ def build(bld):
                 target='jack@.service',
                 install_path=bld.env.SYSTEMD_USER_UNIT_DIR,
                 PREFIX=bld.env.PREFIX)
+        # JackBus at login, before the desktop, through jackdbus
+        bld.install_files(bld.env.SYSTEMD_USER_UNIT_DIR, 'jackbus.service')
