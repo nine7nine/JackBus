@@ -16,7 +16,7 @@
 #   NSPA_REPO=/path/to/jack2 [NSPA_BRANCH=nspa] makepkg
 
 pkgname=jackbus
-pkgver=1.9.22.r190.g71f24328
+pkgver=1.9.22.r191.g54cdc21d
 pkgrel=1
 pkgdesc="Real-time JACK audio server for Linux: a drop-in JACK2 with Modern Features & Improvements."
 arch=(x86_64)
@@ -33,7 +33,7 @@ depends=(
   libsamplerate libsamplerate.so
   libstdc++
   opus libopus.so
-
+  python-dbus
   systemd-libs libsystemd.so
 )
 makedepends=(alsa-lib db5.3 dbus expat git libffado libpipewire libpulse libsamplerate opus python systemd)
@@ -42,7 +42,6 @@ optdepends=(
   'libffado: for firewire support using FFADO'
   'jack-example-tools: for official JACK example-clients and tools'
   'realtime-privileges: for realtime privileges'
-  'python-dbus: for jack_control'
 )
 # jack2 1.9.22 provides; the version keeps dependents such as lib32-jack2
 # (depends on jack2=1.9.22) installable

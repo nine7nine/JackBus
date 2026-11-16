@@ -3,7 +3,9 @@
 JackBus is JACK2 1.9.22 reworked for real-time audio on Linux. It stays
 real-time safe under load, keeps the graph running when a client dies or stalls
 or a card misbehaves, does less work per cycle, and joins any number of sound
-cards to the graph. It installs in place of a distribution's `jack2` +
+cards to the graph. Desktop applications written for PipeWire, PulseAudio or
+ALSA run on it directly, each one a JACK client in the graph, with no sound
+server in between. It installs in place of a distribution's `jack2` +
 `jack2-dbus`, and every JACK application keeps working.
 
 JACK2's last release, 1.9.22, came out in February 2023, and the fixes on
@@ -19,13 +21,15 @@ page and session manager
 
 | | |
 |---|---|
-| **Compatible** | Same client API/ABI, shared memory layout and wire protocol as 1.9.22 (protocol 9). A stock libjack, 64- or 32-bit, works with this server, and this libjack works with a stock server. The one addition, a side file for detecting dead clients, is optional: a stock libjack never opens it. |
+| **Compatible** | Same client API/ABI, shared memory layout and wire protocol as 1.9.22 (protocol 9). A stock libjack, 64- or 32-bit, works with this server, and this libjack works with a stock server. The additions (a side file for detecting dead clients, the JackBus socket, the node API) are optional: a stock libjack never uses them. |
 | **Real-time safe** | No system calls on the driver thread's side channels, priority-inheriting locks, all memory locked, RT helper threads that never sleep in the API. |
 | **Survives clients** | A client that dies is out of the graph in ~9 ms with no xrun; one that stalls lags alone instead of holding up the server. |
 | **Interrupt or timer** | The ALSA driver wakes on the card's period interrupt, on a timer that reads the card's position, or both. By default it trusts the interrupt and adds the timer once it sees interrupts come late. JACK only ever waited for the interrupt. |
 | **Survives hardware** | Under jackdbus, an unplugged master card hands over to the dummy driver and takes over again when it is back; bridged cards come back by themselves when replugged. |
 | **Several sound cards** | Sound card bridges join cards on their own clocks to the graph, resampled in the master's cycle, with each card's delay measured on the card. Unplug and replug survive. |
 | **Lighter engine** | Per-cycle work follows the clients in use, not compile-time maxima: 3.4× fewer instructions per cycle, 6.7× faster connects. |
+| **Desktop apps on JackBus** | Shims for PipeWire (`jackbus-pw`), PulseAudio (`jackbus-pa`) and ALSA (`jackbus-alsa`): browsers, players, conferencing clients and games become JACK clients at JackBus's rate and period. PulseAudio and ALSA applications go to PipeWire while JackBus isn't running. |
+| **Native API** | `jack/jackbus.h`: nodes over the JackBus socket, which hands the client the server's objects as file descriptors; a cycle record with exact timing; graph events on a file descriptor. |
 | **jackdbus for tools** | Bridges, buffer size and CPU wake-up latency changed live, detach-before-stop for session managers, per-client timings, device lists that follow hotplug, a bounded log. |
 
 ## What's fixed
@@ -117,6 +121,40 @@ through a lock-free FIFO and a resampler follows the two clocks.
 | **Unplugged** | Ports and connections stay; the card is reopened when it returns (under a new index too), its reservation held meanwhile. A new master buffer size or rate is followed. |
 | **Set up** | `jackd -B U44 -B Headset/64/3@timer` (`card[/period[/nperiods]][@auto\|timer\|irq]`), jackdbus's `bridges` parameter (live, saved, bridged when plugged in), or PatchBox's Devices tab. |
 
+### Applications on JackBus: the shims
+
+An application's own work (decoding, mixing, effects) stays in its own threads,
+as with any sound server; in JackBus's cycle a shim only moves one cycle of
+frames between the application's buffer and its ports, with no system call but
+JACK's futex. Each application is one JACK client, named after it, routed and
+saved like any other. The application's rate is JackBus's when it can use it
+(the direct route); one that insists on another rate is resampled, a fallback
+that can be switched off.
+
+| Shim | For | How |
+|---|---|---|
+| `jackbus-pw` | PipeWire applications: ossia score, mpv, SDL3, OpenAL, fluidsynth | `jackbus-pw <program>`: its own `libpipewire-0.3`. Filters run in JackBus's cycle, sample-accurate; the JACK graph is the registry; links are JACK connections. |
+| `jackbus-pa` | PulseAudio applications: Firefox, Chrome, Teams, mpv, games | Every program loading libpulse gets JackBus's dispatcher (`/etc/ld.so.conf.d`). With the setting on (`pulse = yes`, PatchBox's Shims tab) it uses JackBus while JackBus runs and PulseAudio's own libpulse otherwise; off by default. `jackbus-pa <program>` forces JackBus. |
+| `jackbus-alsa` | ALSA applications | The `jackbus` device (`aplay -D jackbus`), or ALSA's default device with a `fallback` used while JackBus isn't running. |
+
+Settings live in `~/.config/jackbus/compat.conf`, a section per shim
+(`pa.output = U44`, `alsa.resample = no`): resampling and its quality, connecting
+new streams, the output and input device (`system` or a bridged card), and a cap
+on how much a PulseAudio stream buffers. With PatchBox's "PipeWire leaves audio
+to JackBus", PipeWire's JACK bridge isn't loaded: while JackBus runs PipeWire
+has no audio work, and video and screen sharing are untouched.
+
+### The native API
+
+`jack/jackbus.h` is a client API beside libjack's, in the same library. A
+**node** is a JACK client opened over the **JackBus socket**
+(`$XDG_RUNTIME_DIR/jackbus/<server>`), which hands it the server's shared
+objects as file descriptors. Its process callback gets a cycle record (frame,
+time in ns, the next cycle's time, the period, the rate), its ports are added
+and removed at any time, and graph changes (clients, ports, connections,
+renames, buffer size, the server going away) arrive on an event file
+descriptor for the application's own loop. The shims are built on it.
+
 ### jackdbus calls
 
 ```text
@@ -155,11 +193,18 @@ Older jackdbus versions answer `UnknownMethod`, and tools carry on as before.
 
 ## Validation
 
-- **Isolated suite** (`nspa/tests`): 97 checks in a private
-  user/mount/IPC/network namespace with its own `/dev/shm`, never near a running
-  server. It covers fork↔stock interoperability both ways with 32-bit libjack,
-  clients killed and stalled every way the tests can, the jackdbus calls and
-  bridges on snd-aloop.
+- **Isolated suite** (`nspa/tests`): checks in a private
+  user/mount/IPC/network namespace with its own `/dev/shm` and runtime
+  directory, never near a running server. It covers fork↔stock interoperability
+  both ways with 32-bit libjack, clients killed and stalled every way the tests
+  can, the jackdbus calls, bridges on snd-aloop, the JackBus socket and nodes.
+- **Shims with real applications** (`nspa/pw-shim/test`, `nspa/pa-shim/test`,
+  `nspa/jackbus-alsa/test`): PipeWire's tools, mpv, SDL3, OpenAL, fluidsynth,
+  ossia score, paplay/parecord, Chrome and Firefox with their sandboxes on,
+  aplay/arecord; each application's ports recorded and checked as a continuous
+  sine; every realtime thread traced (no system call but futex).
+- **Engine measurements:** an opt-in cycle trace (the master's cycle in ns) and
+  an A/B harness that runs two builds in turn, isolated and muted.
 - **Bridge tests** (`nspa/tests/bridge`): simulated cards (drift, jitter, xruns,
   a card gone), the resampler, snd-aloop in real time, and real cards through
   jackd or jackdbus.
@@ -188,6 +233,10 @@ jack_control exit           # end the old jackdbus; D-Bus starts the new one
 
 `jack_control stop` is not enough after an upgrade: it stops the server but
 leaves the old daemon running.
+
+The package also installs the shims. Nothing changes for an application until
+it is run through one (`jackbus-pw`, `jackbus-pa`, `aplay -D jackbus`) or the
+switches in PatchBox's Shims tab are on.
 
 Elsewhere, build with waf as for upstream JACK2:
 

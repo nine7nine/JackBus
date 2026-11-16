@@ -319,6 +319,10 @@ pre.code .s { color: var(--amber); }
 .pkt.alive { fill: #fecdd3; }
 .legend .l-alive { color: #fb7185; }
 .tag-x.k { background: var(--pink); }
+/* ---- fourth edition: the JackBus socket and nodes ---- */
+.flow.fd { stroke: var(--teal); }
+.pkt.fd { fill: #99f6e4; }
+.legend .l-fd { color: var(--teal); }
 </style>
 </head>
 <body>
@@ -336,19 +340,22 @@ pre.code .s { color: var(--amber); }
     <li><a href="#s8">The ALSA driver</a></li>
     <li><a href="#s9">MIDI through -X seq</a></li>
     <li><a href="#s10">libjack: the client side</a></li>
-    <li><a href="#s11">jackdbus, PipeWire and the card</a></li>
-    <li><a href="#s12">Sound card bridges</a></li>
-    <li><a href="#s13">When a client dies</a></li>
-    <li><a href="#s14">Late clients: catch up, report, count</a></li>
-    <li><a href="#s15">Slow notification clients</a></li>
-    <li><a href="#s16">Failure modes fixed</a></li>
-    <li><a href="#s17">Performance, measured in the engine</a></li>
-    <li><a href="#s18">Compatibility envelope</a></li>
-    <li><a href="#s19">Validation harness</a></li>
-    <li><a href="#s20">Evaluated and rejected</a></li>
-    <li><a href="#s21">Open items</a></li>
-    <li><a href="#s22">Packaging and deployment</a></li>
-    <li><a href="#s23">Source map</a></li>
+    <li><a href="#s11">The JackBus socket</a></li>
+    <li><a href="#s12">Nodes: the native JackBus API</a></li>
+    <li><a href="#s13">The shims: PipeWire, PulseAudio and ALSA applications</a></li>
+    <li><a href="#s14">jackdbus, PipeWire and the card</a></li>
+    <li><a href="#s15">Sound card bridges</a></li>
+    <li><a href="#s16">When a client dies</a></li>
+    <li><a href="#s17">Late clients: catch up, report, count</a></li>
+    <li><a href="#s18">Slow notification clients</a></li>
+    <li><a href="#s19">Failure modes fixed</a></li>
+    <li><a href="#s20">Performance, measured in the engine</a></li>
+    <li><a href="#s21">Compatibility envelope</a></li>
+    <li><a href="#s22">Validation harness</a></li>
+    <li><a href="#s23">Evaluated and rejected</a></li>
+    <li><a href="#s24">Open items</a></li>
+    <li><a href="#s25">Packaging and deployment</a></li>
+    <li><a href="#s26">Source map</a></li>
   </ol>
 </nav>
 <main class="content">
@@ -366,34 +373,41 @@ pre.code .s { color: var(--amber); }
     The constraint behind every change: <b>no client API/ABI change and no wire-protocol change</b>. The shared-memory
     layout, the futex protocol, the request encoding and the time base are exactly 1.9.22's, so an application
     carrying a stock libjack (64- or 32-bit) works against this server, and this libjack works against a stock
-    server. The one addition is optional &mdash; a small side file in which each client's realtime thread holds a
-    robust mutex, so the server learns the moment it ends (§13) &mdash; and either side does without it when the
-    other lacks it. Everything here happens behind those interfaces &mdash; on the RT driver thread, in the engine's
-    per-cycle work, in the server's control threads, in libjack's own locking &mdash; and every change was measured
-    on the engine itself, not on a microbenchmark.
+    server. What JackBus adds sits beside those interfaces, never in them: a small side file in which each client's
+    realtime thread holds a robust mutex, so the server learns the moment it ends (§16), which either side does
+    without when the other lacks it; and a second socket through which a client receives the server's objects as
+    file descriptors (§11), with JackBus's own client API on top of it, nodes (§12) &mdash; new libjack functions
+    beside the old ones, which no existing application calls. Everything else happens behind those interfaces
+    &mdash; on the RT driver thread, in the engine's per-cycle work, in the server's control threads, in libjack's
+    own locking &mdash; and every change was measured on the engine itself, not on a microbenchmark.
   </p>
   <p class="lede" style="margin-top:12px">
-    It also does what stock JACK never did: <b>sound card bridges</b> (§12) join cards that run on their own clocks to
+    It also does what stock JACK never did: <b>sound card bridges</b> (§15) join cards that run on their own clocks to
     the graph, each resampled in the master's own cycle, with the delay each card needs measured on the card instead of
-    a fixed margin; the master's own card can be unplugged and plugged back without a client noticing (§11); and
-    jackdbus grew the calls a session manager and a settings page need.
+    a fixed margin; the master's own card can be unplugged and plugged back without a client noticing (§14);
+    jackdbus grew the calls a session manager and a settings page need; and desktop applications written for
+    PipeWire, PulseAudio or ALSA run on it directly through its shims (§13), each a JACK client of its own in the
+    cycle, with no sound server in between and PipeWire left to video.
     <a href="https://github.com/nine7nine/PatchBox" style="color:var(--teal)"><b>PatchBox</b></a>, built alongside it, is
     its patchbay, settings page and session manager (<a href="https://nine7nine.github.io/PatchBox/" style="color:var(--teal)">its
-    architecture</a>): a card bridged with a switch, sessions whose applications leave the graph before they stop, and
-    settings changed on the running server.
+    architecture</a>): a card bridged with a switch, sessions whose applications leave the graph before they stop,
+    settings changed on the running server, and the shims set up from its Shims tab.
   </p>
   <ul class="stats">
     <li><b>1.9.22</b><span>base tag · Arch jack2 1.9.22-2</span></li>
-    <li><b>150</b><span>commits · 19 cherry-picked from develop</span></li>
-    <li><b>0</b><span>API · ABI · protocol changes</span></li>
+    <li><b>3</b><span>shims · PipeWire, PulseAudio and ALSA applications as JACK clients (§13)</span></li>
+    <li><b>192</b><span>commits · 19 cherry-picked from develop</span></li>
+    <li><b>0</b><span>changes to the existing API · ABI · protocol</span></li>
     <li><b>0</b><span>xruns when a 1 GB client is killed · was 346–402 / 6</span></li>
     <li><b>0.4 ms</b><span>others' wait behind a slow client · was 2.9 s</span></li>
     <li><b>2 833</b><span>server instr./cycle · was 9 553 (2 clients)</span></li>
     <li><b>0</b><span>write() calls on the RT driver thread · was 1 945</span></li>
     <li><b>182 µs</b><span>connect round trip · was <i style="text-transform:none;font-style:normal">1 221 µs</i></span></li>
-    <li><b>97</b><span>isolated suite checks · + hardware harness</span></li>
+    <li><b>97 + 28</b><span>isolated suite checks · engine + JackBus socket, nodes</span></li>
+    <li><b>futex</b><span>the only system call in a node's cycles · traced</span></li>
     <li><b>8.1 ms</b><span>a USB card bridged, capture · 32 × 3, 256-frame master</span></li>
     <li><b>0</b><span>frames a USB bridge drops · was 23 % of playback</span></li>
+    <li><b>5.4–14.5 µs</b><span>first client's start, a card bridged · was 18–71</span></li>
     <li><b>6</b><span>validated builds · regular · LTO · lib32 · ASan · TSan · package</span></li>
     <li><b>Linux-NSPA 7.3</b><span>PREEMPT_RT · i7-1065G7 · HDA ALC274</span></li>
   </ul>
@@ -409,14 +423,16 @@ pre.code .s { color: var(--amber); }
       <tr><td style="border-left:3px solid #8b8ff5">ALSA driver</td><td>poll timeout in the wrong unit; full driver restart on the RT thread per xrun; stale capture on connect</td><td>correct timeout; lightweight recovery; fresh capture in the connecting cycle; optional PM QoS hold; a wake timer for late period interrupts (§8)</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5"><code>-X seq</code></td><td>asserts abort the server past 63–127 port events; 2 ioctls every idle cycle</td><td>bounded drop-and-count; ioctl only when an event needs the queue time; real ALSA port names</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">libjack internals</td><td>unserialized requests; activate races init; port-list and callback races; pthread keys</td><td>channel lock; init handshake; snapshots; <code>__thread</code> with TLS descriptors</td></tr>
+      <tr><td style="border-left:3px solid #8b8ff5">How a client reaches the server</td><td>names in <code>/dev/shm</code>: the shm registry, the segments, a futex file per client, a socket the server connects back to</td><td>protocol 9 as before, and the JackBus socket in <code>$XDG_RUNTIME_DIR</code>: the same objects as fds, the user's processes only (§11); nodes, a native API on it: a cycle record, events on an fd (§12)</td></tr>
+      <tr><td style="border-left:3px solid #8b8ff5">Desktop applications</td><td>through a sound server and its JACK bridge (PipeWire's, PulseAudio's module): the server's graph run inside every JACK cycle</td><td>JackBus's shims: PipeWire, PulseAudio and ALSA applications each a JACK client in the cycle, a copy per cycle in its realtime thread; PulseAudio and ALSA applications on PipeWire while JackBus isn't running (§13)</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">jackdbus</td><td>ignores SIGTERM; unsafe crash handler; patchbay and reservation races</td><td>clean SIGTERM exit; safe trace; locked patchbay; bounded reservation slots and log; calls for session managers and monitors</td></tr>
-      <tr><td style="border-left:3px solid #8b8ff5">Other sound cards</td><td>a slave driver (the card clocked by the master's) or a resampling client with a fixed margin</td><td>sound card bridges in the master's cycle, each card's margin measured, added and removed live, unplugged and back with ports and connections kept (§12)</td></tr>
-      <tr><td style="border-left:3px solid #8b8ff5">The master's card unplugged</td><td>the server stops; every client is told it shut down</td><td>under jackdbus the dummy stands in, then the card again (§11)</td></tr>
+      <tr><td style="border-left:3px solid #8b8ff5">Other sound cards</td><td>a slave driver (the card clocked by the master's) or a resampling client with a fixed margin</td><td>sound card bridges in the master's cycle, each card's margin measured, added and removed live, unplugged and back with ports and connections kept (§15)</td></tr>
+      <tr><td style="border-left:3px solid #8b8ff5">The master's card unplugged</td><td>the server stops; every client is told it shut down</td><td>under jackdbus the dummy stands in, then the card again (§14)</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Dying clients</td><td>noticed when the sockets close, after the kernel has torn down the process's memory; every cycle waits until then; ports announced gone twice</td><td>robust-mutex slot + <code>futex_waitv</code>: noticed when the realtime thread ends; <code>/proc</code> when the graph waits; out of the graph in one step</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Late clients · xruns</td><td>one xrun per unfinished client; stale delay value</td><td>one xrun per failing cycle naming the culprit; per-client late cycles over D-Bus; catch-up kept</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Notifications</td><td>a slow client holds the request thread up to 2&nbsp;s per notification; one that stops reading blocks it for good</td><td>the slow client lags alone: per-client queue, 500&nbsp;ms latency budget, never blocks on a socket</td></tr>
-      <tr style="background:rgba(251,191,36,0.05)"><td style="border-left:3px solid #fbbf24">Shared memory · futexes · requests · time base</td><td>protocol 9</td><td>protocol 9 &mdash; byte-identical layout, untouched; one optional side file added (§13)</td></tr>
-      <tr style="background:rgba(251,191,36,0.05)"><td style="border-left:3px solid #fbbf24">Client API / ABI</td><td><code>libjack.so.0</code></td><td>the same <code>libjack.so.0</code> symbols and semantics</td></tr>
+      <tr style="background:rgba(251,191,36,0.05)"><td style="border-left:3px solid #fbbf24">Shared memory · futexes · requests · time base</td><td>protocol 9</td><td>protocol 9 &mdash; byte-identical layout, untouched; one optional side file added (§16); a second socket beside it (§11)</td></tr>
+      <tr style="background:rgba(251,191,36,0.05)"><td style="border-left:3px solid #fbbf24">Client API / ABI</td><td><code>libjack.so.0</code></td><td>the same <code>libjack.so.0</code> symbols and semantics; <code>jackbus_*</code> functions added beside them (§11, §12)</td></tr>
     </table>
   </div>
   <p class="caption" style="margin-top:12px">
@@ -528,15 +544,16 @@ pre.code .s { color: var(--amber); }
       <g>
         <title>PipeWire's JACK bridge: JACK Sink / Source; PulseAudio and ALSA desktop applications sit behind it</title>
         <rect x="40" y="438" width="308" height="112" rx="14" fill="url(#g-ms)" stroke="#fbbf24" stroke-width="1.5"/>
-        <text x="56" y="462" class="t-title">PipeWire JACK bridge</text>
-        <text x="56" y="482" class="t-sub">JACK Sink / Source · desktop audio</text>
+        <text x="56" y="462" class="t-title">Desktop applications</text>
+        <text x="56" y="482" class="t-sub">the shims (§13) · or PipeWire's bridge</text>
         <rect x="52" y="512" width="284" height="26" rx="8" fill="rgba(139,143,245,0.14)" stroke="#8b8ff5" stroke-dasharray="4 3"/>
-        <text x="194" y="529" text-anchor="middle" class="t-tiny">LIBJACK · DATA LOOP FIFO 88</text>
+        <text x="194" y="529" text-anchor="middle" class="t-tiny">A NODE EACH · OR THE BRIDGE · FIFO 88</text>
       </g>
       <text x="190" y="590" text-anchor="middle" class="t-sub">a stock or fork libjack, 64- or 32-bit,</text>
       <text x="190" y="608" text-anchor="middle" class="t-sub">talks protocol 9 to the same server;</text>
-      <text x="190" y="626" text-anchor="middle" class="t-sub">a fork libjack's RT thread also</text>
-      <text x="190" y="644" text-anchor="middle" class="t-sub">holds its alive slot (§13)</text>
+      <text x="190" y="626" text-anchor="middle" class="t-sub">a fork libjack also over the JackBus</text>
+      <text x="190" y="644" text-anchor="middle" class="t-sub">socket (§11), its RT thread holding</text>
+      <text x="190" y="662" text-anchor="middle" class="t-sub">its alive slot (§16)</text>
 
       <!-- ===== /dev/shm column ===== -->
       <rect x="404" y="20" width="376" height="670" rx="20" fill="rgba(251,191,36,0.03)" stroke="#4a3d1a"/>
@@ -592,13 +609,18 @@ pre.code .s { color: var(--amber); }
         <text x="436" y="549" class="t-sub">metadata · shared by every process</text>
       </g>
       <g>
-        <title>JackBus addition, optional on both sides: one 64-byte slot per client, in which the client's realtime thread holds a process-shared robust mutex for as long as it lives. A libjack that doesn't know the file never opens it; a fork libjack facing a server without it does without (§13)</title>
+        <title>JackBus addition, optional on both sides: one 64-byte slot per client, in which the client's realtime thread holds a process-shared robust mutex for as long as it lives. A libjack that doesn't know the file never opens it; a fork libjack facing a server without it does without (§16)</title>
         <rect x="420" y="570" width="340" height="46" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4" stroke-dasharray="5 3"/>
         <text x="436" y="590" class="t-mono">jack_alive.1000_default · new, optional</text>
         <text x="436" y="607" class="t-sub">one robust mutex per client · its RT thread holds it</text>
       </g>
-      <text x="592" y="646" text-anchor="middle" class="t-sub">the existing layouts, futex protocol, requests and</text>
-      <text x="592" y="664" text-anchor="middle" class="t-sub">time base: byte-identical to 1.9.22</text>
+      <g>
+        <title>JackBus addition, outside /dev/shm: a second socket beside protocol 9's, in the user's runtime directory (mode 0700), served by the same request thread. Its clients receive the segments, their futex files and the alive table above as file descriptors instead of opening them by name (§11)</title>
+        <rect x="420" y="624" width="340" height="42" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4" stroke-dasharray="5 3"/>
+        <text x="436" y="642" class="t-mono">$XDG_RUNTIME_DIR/jackbus/default</text>
+        <text x="436" y="659" class="t-sub">outside /dev/shm · the objects above, as fds (§11)</text>
+      </g>
+      <text x="592" y="681" text-anchor="middle" class="t-sub">every layout above byte-identical to 1.9.22</text>
 
       <!-- ===== jackdbus ===== -->
       <rect x="824" y="24" width="352" height="662" rx="22" fill="#8b8ff5" fill-opacity="0.1" filter="url(#soft)" class="pulse"/>
@@ -606,19 +628,19 @@ pre.code .s { color: var(--amber); }
       <text x="840" y="50" class="t-proc">jackdbus</text>
       <text x="940" y="50" class="t-sub">server + D-Bus controller · one process</text>
       <g>
-        <title>The D-Bus controller (JackControlAPI): engine and driver parameters, start/stop, patchbay; handles SIGTERM (C11); DetachClient/DetachProcess for session managers, GetClientTimings for monitors, a bounded log (§11)</title>
+        <title>The D-Bus controller (JackControlAPI): engine and driver parameters, start/stop, patchbay; handles SIGTERM (C11); DetachClient/DetachProcess for session managers, GetClientTimings for monitors, a bounded log (§14)</title>
         <rect x="840" y="64" width="320" height="50" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
         <text x="856" y="85" class="t-title">D-Bus controller</text>
         <text x="856" y="104" class="t-sub">params · patchbay · detach · client timings</text>
       </g>
       <g>
-        <title>The request thread: client open/close, activate, connect, port registration; takes the engine lock (never the RT thread). Also removes clients whose process died (§13), and queues notifications for a client that falls behind instead of waiting on it (§15)</title>
+        <title>The request thread: client open/close, activate, connect, port registration; takes the engine lock (never the RT thread). Also removes clients whose process died (§16), and queues notifications for a client that falls behind instead of waiting on it (§18)</title>
         <rect x="840" y="124" width="320" height="50" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
         <text x="856" y="145" class="t-title">Request thread</text>
         <text x="856" y="164" class="t-sub">open · close · activate · connect · ports</text>
       </g>
       <g>
-        <title>The engine: client table, graph switching, CPU load, xrun checks (one per failing cycle, §14). Per-cycle loops stop at the highest refnum in use (server-private)</title>
+        <title>The engine: client table, graph switching, CPU load, xrun checks (one per failing cycle, §17). Per-cycle loops stop at the highest refnum in use (server-private)</title>
         <rect x="840" y="184" width="320" height="120" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.6"/>
         <text x="856" y="206" class="t-title">JackLockedEngine</text>
         <text x="856" y="228" class="t-sub">client table · refnum bound (server heap)</text>
@@ -627,7 +649,7 @@ pre.code .s { color: var(--amber); }
         <text x="856" y="290" class="t-accent">runs on the RT thread, per cycle</text>
       </g>
       <g>
-        <title>JackEngineNotifier: RT notifications go into a bounded lock-free queue; this thread drains it every 20 ms into the notify channel. Its wait is a futex_waitv on its own wake word and every active client's alive slot, so a client's realtime thread ending wakes it at once (§13)</title>
+        <title>JackEngineNotifier: RT notifications go into a bounded lock-free queue; this thread drains it every 20 ms into the notify channel. Its wait is a futex_waitv on its own wake word and every active client's alive slot, so a client's realtime thread ending wakes it at once (§16)</title>
         <rect x="840" y="314" width="320" height="46" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
         <text x="856" y="334" class="t-title">JackEngineNotifier</text>
         <text x="856" y="351" class="t-sub">queue → sockets · futex_waitv on alive slots</text>
@@ -750,8 +772,10 @@ pre.code .s { color: var(--amber); }
       violet boxes: the RT driver thread no longer issues socket writes or condvar signals (the two bounded queues and
       the futex event count), the engine's per-cycle loops stop at the highest live refnum, and libjack serializes and
       snapshots what it used to race on. Since the first edition the server also learns at once when a client's
-      realtime thread ends: the dashed violet box is the fork's one addition to <code>/dev/shm</code>, optional on
-      both sides, and the rose line is the kernel waking the notifier through it (§13).
+      realtime thread ends: the first dashed violet box is the fork's one addition to <code>/dev/shm</code>, optional
+      on both sides, and the rose line is the kernel waking the notifier through it (§16). The second is not in
+      <code>/dev/shm</code> at all: the JackBus socket, through which a client receives those same objects as file
+      descriptors (§11).
     </p>
   </div>
 </section>
@@ -775,17 +799,17 @@ pre.code .s { color: var(--amber); }
           <code>~/.config/jack/conf.xml</code>), start/stop, the patchbay interface. <em>Fork:</em> SIGTERM/INT/HUP are
           consumed and end the process cleanly (C11); the crash handler only writes and re-raises (C17); control
           operations are serialized with the request thread (C20); a failed master switch can't wedge it (C19).</li>
-        <li><b>Request thread.</b> Polls the request socket and every client socket; client open/close, activate,
+        <li><b>Request thread.</b> Polls the request socket, the JackBus socket (§11) and every client socket; client open/close, activate,
           connect, port registration. Takes the engine lock &mdash; never the RT thread. <em>Fork:</em> also
-          removes clients whose process died (§13), and queues notifications for a client that falls behind instead
-          of waiting on it (§15).</li>
+          removes clients whose process died (§16), and queues notifications for a client that falls behind instead
+          of waiting on it (§18).</li>
         <li><b>ALSA driver thread</b>, <code>SCHED_FIFO</code> 89. Waits on the PCM, converts samples, runs the engine's
           per-cycle step and wakes the first clients. <em>Fork:</em> no syscalls besides <code>poll</code> and
           activation futexes; memory locked (R1); per-cycle loops bounded (§5).</li>
         <li><b>Engine notifier</b> and <b>message buffer</b> threads. <em>New in the fork.</em> They drain the RT
           thread's lock-free queues every 20 ms and 50 ms and do the socket writes and log I/O the RT thread used to
           do (§6). The notifier's wait is a <code>futex_waitv</code> on its own wake word and the alive slot of every
-          active client, so a client's realtime thread ending wakes it within microseconds (§13).</li>
+          active client, so a client's realtime thread ending wakes it within microseconds (§16).</li>
         <li><b>alsa_seqmidi port thread</b> (<code>-X seq</code>). Subscribes and unsubscribes sequencer ports as they
           appear and hands them to the RT side through bounded rings (C22).</li>
       </ul>
@@ -805,7 +829,7 @@ pre.code .s { color: var(--amber); }
           <code>jack_activate</code>; sleeps on the client's futex, runs the process callback, signals the clients
           downstream. <em>Fork:</em> <code>jack_activate</code> returns only after this thread's init callbacks ran
           (C10); its stack is prefaulted and the shared segments prefaulted if mlock is refused (R12). It locks its
-          client's alive slot when it starts and holds it for life (§13).</li>
+          client's alive slot when it starts and holds it for life (§16).</li>
         <li><b>Notification thread.</b> Reads the client's notification socket and runs the non-RT callbacks: graph
           order, port registration, client registration, xrun, latency. <em>Fork:</em> the port list it walks is a
           snapshot taken under a lock (C14); transport callback pairs are published atomically (C15).</li>
@@ -817,9 +841,11 @@ pre.code .s { color: var(--amber); }
         <li><b>Per-thread state</b> is three <code>__thread</code> pointers read through TLS descriptors, instead of
           pthread keys; <code>jack_client_close</code> cancels the client's threads, and a cancel arriving inside a lock
           guard no longer aborts the application.</li>
+        <li><b>Over the JackBus socket</b> (§11) a client has the same threads in the same loops; a node's
+          notification thread turns the callbacks into events for the application's own threads (§12).</li>
       </ul>
       <div class="chips">
-        <span class="chip">libjack.so.0</span><span class="chip">same API · same ABI</span><span class="chip">__thread · TLSDESC</span>
+        <span class="chip">libjack.so.0</span><span class="chip">same API · same ABI</span><span class="chip">+ jackbus_*</span><span class="chip">__thread · TLSDESC</span>
         <span class="chip">request-channel lock</span><span class="chip">JackNoCancelScope</span><span class="chip">robust mutex</span>
         <span class="chip up">protocol 9</span><span class="chip up">64- and 32-bit</span>
       </div>
@@ -844,8 +870,9 @@ pre.code .s { color: var(--amber); }
 <section id="s3">
   <h2><span class="num">3</span>Shared memory and the wire protocol</h2>
   <p class="sub">
-    The server creates the shared objects; clients map them by name. Their layouts, together with the futex-word
-    protocol and the request encoding, are what protocol 9 freezes. The fork never changes a byte of them.
+    The server creates the shared objects; clients map them by name (or, over the JackBus socket, from the file
+    descriptors it hands them, §11). Their layouts, together with the futex-word protocol and the request encoding,
+    are what protocol 9 freezes. The fork never changes a byte of them.
   </p>
   <div class="figure">
     <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 600" role="img" aria-label="Shared memory layout">
@@ -945,7 +972,7 @@ pre.code .s { color: var(--amber); }
       <text x="856" y="482" class="t-sub">server reopened them: a hung old client shared</text>
       <text x="856" y="499" class="t-sub">the futex word and took every other wakeup.</text>
       <text x="856" y="524" class="t-ok">now: removed at close, created O_EXCL</text>
-      <text x="856" y="544" class="t-sub">375/750 → 750/750 cycles (§16)</text>
+      <text x="856" y="544" class="t-sub">375/750 → 750/750 cycles (§19)</text>
     </svg>
     <p class="caption">
       <b>Why the layout is frozen.</b> The server and every libjack compute addresses in these segments independently:
@@ -959,7 +986,7 @@ pre.code .s { color: var(--amber); }
       notifier and message threads, the dirty-row bookkeeping and the PM QoS file descriptor are all in the server's
       private heap. The only shared-memory behaviour that changed is <i>who writes when</i>: fewer writes per cycle
       (bounded resets), smaller copies per graph edit. The one new shared object, the alive-slot file, is separate
-      from all of these and optional on both sides (§13).
+      from all of these and optional on both sides (§16).
     </p>
   </div>
 
@@ -973,7 +1000,8 @@ pre.code .s { color: var(--amber); }
       <tr><td>Time base (<code>CLOCK_MONOTONIC_RAW</code>, µs)</td><td>shared by frame timer and every client</td><td><span class="same">unchanged</span></td></tr>
       <tr><td><code>--clients=256</code>, <code>--ports-per-application=2048</code></td><td>compiled into both sides' array sizes</td><td><span class="same">unchanged</span> (Arch's values)</td></tr>
       <tr><td>Metadata DB format</td><td>one Berkeley DB environment shared by all processes</td><td><span class="better">fixed</span> &mdash; the fork now links db5.3, like Arch</td></tr>
-      <tr><td><code>jack_alive.&lt;uid&gt;_&lt;server&gt;</code></td><td>new: one 64-byte slot per client, a robust mutex in the client's own glibc layout; the server touches only the futex word</td><td><span class="better">added, optional</span> &mdash; a stock libjack never opens it; a fork libjack without it does without</td></tr>
+      <tr><td><code>jack_alive.&lt;uid&gt;_&lt;server&gt;</code></td><td>new: one 64-byte slot per client, a robust mutex in the client's own glibc layout; the server touches only the futex word</td><td><span class="better">added, optional</span> &mdash; a stock libjack never opens it; a fork libjack without it does without (a client of the JackBus socket requires it)</td></tr>
+      <tr><td>The JackBus socket, <code>$XDG_RUNTIME_DIR/jackbus/&lt;server&gt;</code></td><td>new: a second socket, not a change to the first; its own requests (<code>kBusHello</code>, <code>kBusClientOpen</code>: types 100 and 101, never accepted on protocol 9's socket), then protocol 9's; the same objects above, as fds</td><td><span class="better">added, optional</span> &mdash; a stock libjack never knows of it; without it (a stock server, no runtime directory) only JackBus clients fail to open (§11)</td></tr>
     </table>
   </div>
 </section>
@@ -1156,7 +1184,7 @@ pre.code .s { color: var(--amber); }
       <b>Async vs sync.</b> In the default asynchronous mode the driver writes the <i>previous</i> cycle's output, wakes
       the graph and goes straight back to <code>poll()</code>; a late client costs that client's output, not the
       driver's schedule. With <code>-S</code> (sync) the driver waits for the graph's end node with a timeout and writes
-      the <i>current</i> output &mdash; one period less latency, but a stuck client stalls everyone (measured in §21).
+      the <i>current</i> output &mdash; one period less latency, but a stuck client stalls everyone (measured in §24).
       The engine decides at each cycle start whether the previous graph finished
       (<code>IsFinishedGraph</code>); if it didn't within the client timeout, it switches state anyway and reports an
       xrun.
@@ -1485,7 +1513,7 @@ pre.code .s { color: var(--amber); }
       publishes it with a release store of the cell's sequence; head and tail positions sit on separate 64-byte lines.
       A full queue is not an error path that blocks &mdash; the item is dropped and counted, and the count is reported
       when the server stops (the notifier's 20 ms wait has since become a <code>futex_waitv</code> that also
-      watches the clients' alive slots, §13). Notifications are asynchronous by contract (graph order, xrun callbacks), so up to 20 ms of
+      watches the clients' alive slots, §16). Notifications are asynchronous by contract (graph order, xrun callbacks), so up to 20 ms of
       added delivery delay is invisible; ordering and the threads that run the callbacks are unchanged.
     </p>
     <p class="caption">
@@ -2135,14 +2163,991 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 11. jackdbus, PipeWire, the card -->
+<!-- ============================================================ 11. the JackBus socket -->
 <section id="s11">
-  <h2><span class="num">11</span>jackdbus, PipeWire and the card</h2>
+  <h2><span class="num">11</span>The JackBus socket</h2>
+  <p class="sub">
+    Protocol 9 hands a client names: the shm registry, the segments and a futex file per client in
+    <code>/dev/shm</code>, and a socket of the client's own there that the server connects back to. JackBus adds a
+    second socket beside it, <code>$XDG_RUNTIME_DIR/jackbus/&lt;server&gt;</code>, through which a client receives
+    the same objects as file descriptors. It is the same libjack client on the same shared memory, futex words and
+    alive slot, running the same realtime loop in the same graph; only the way it gets hold of them changes.
+    Protocol 9, the shared layouts and every existing symbol stay as they were.
+  </p>
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button> <button class="toggle" type="button" data-replay>Replay</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 780" role="img" aria-label="A client's open over the JackBus socket, message by message, and the file descriptors it receives">
+      <defs>
+        <path id="pbus-1" d="M156,180 L818,180"/>
+        <path id="pbus-2" d="M156,240 L818,240"/>
+        <path id="pbus-2r" d="M818,254 L152,254"/>
+        <path id="pbus-3" d="M156,312 L818,312"/>
+        <path id="pbus-3r" d="M818,326 L152,326"/>
+        <path id="pbus-4" d="M156,426 L818,426"/>
+        <path id="pbus-5" d="M818,484 L382,484"/>
+        <path id="pbus-5r" d="M382,498 L818,498"/>
+        <path id="pbus-6" d="M818,572 L152,572"/>
+        <path id="pbus-7" d="M156,664 L818,664"/>
+      </defs>
+      <rect x="20" y="20" width="1160" height="740" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+      <text x="40" y="44" class="t-band">A CLIENT OPENS OVER THE JACKBUS SOCKET · ONE CONNECTION · TIME RUNS DOWN</text>
+
+      <!-- ===== who talks ===== -->
+      <g>
+        <title>The client process: libjack's JackBusLibClient (a JackLibClient with another channel) and JackBusClientChannel</title>
+        <rect x="40" y="62" width="420" height="56" rx="14" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
+        <text x="56" y="86" class="t-title">client process · libjack.so.0</text>
+        <text x="56" y="105" class="t-sub">JackBusLibClient · JackBusClientChannel</text>
+      </g>
+      <g>
+        <title>The JackBus socket: a SOCK_STREAM unix socket in the user's runtime directory, mode 0700, beside protocol 9's request socket in /dev/shm</title>
+        <rect x="490" y="62" width="220" height="56" rx="14" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4" stroke-dasharray="5 3"/>
+        <text x="600" y="86" text-anchor="middle" class="t-label">the JackBus socket · new</text>
+        <text x="600" y="105" text-anchor="middle" class="t-mono" style="font-size:11px">jackbus/&lt;server&gt;</text>
+      </g>
+      <g>
+        <title>The server: the same request thread that serves protocol 9's socket polls this one too; no new thread</title>
+        <rect x="740" y="62" width="420" height="56" rx="14" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
+        <text x="756" y="86" class="t-title">jackd / jackdbus</text>
+        <text x="756" y="105" class="t-sub">the request thread · JackSocketServerChannel · engine</text>
+      </g>
+      <text x="150" y="138" text-anchor="middle" class="t-tiny">APPLICATION THREAD</text>
+      <text x="380" y="138" text-anchor="middle" class="t-tiny">NOTIFICATION THREAD</text>
+      <text x="820" y="138" text-anchor="middle" class="t-tiny">REQUEST THREAD</text>
+      <line x1="150" y1="146" x2="150" y2="690" stroke="#3d4683" stroke-dasharray="4 5"/>
+      <line x1="380" y1="146" x2="380" y2="690" stroke="#3d4683" stroke-dasharray="4 5"/>
+      <line x1="820" y1="146" x2="820" y2="690" stroke="#3d4683" stroke-dasharray="4 5"/>
+
+      <!-- 1 connect -->
+      <g opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.03;0.042;0.955;0.98;1" dur="18s" repeatCount="indefinite"/>
+        <text x="600" y="170" text-anchor="middle" class="t-chip">connect()</text>
+        <path d="M156,180 H812" class="flow req"/>
+        <path d="M812,174 L820,180 L812,186 Z" fill="#38bdf8"/>
+        <text x="600" y="196" text-anchor="middle" class="t-chipsub">SOCK_STREAM · close-on-exec</text>
+        <rect x="846" y="160" width="314" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+        <text x="860" y="176" class="t-chip">accept · this user's processes only</text>
+        <text x="860" y="192" class="t-chipsub">SO_PEERCRED's uid, else closed · reads time out at 2 s</text>
+      </g>
+      <!-- 2 hello -->
+      <g opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.12;0.132;0.955;0.98;1" dur="18s" repeatCount="indefinite"/>
+        <text x="600" y="230" text-anchor="middle" class="t-chip">kBusHello · version 1</text>
+        <path d="M156,240 H812" class="flow req"/>
+        <path d="M812,234 L820,240 L812,246 Z" fill="#38bdf8"/>
+        <path d="M814,254 H158" class="flow req slow"/>
+        <path d="M158,248 L150,254 L158,260 Z" fill="#38bdf8"/>
+        <text x="600" y="270" text-anchor="middle" class="t-chipsub">version 1, result 0 · another version: −1, and no open</text>
+        <rect x="846" y="226" width="314" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+        <text x="860" y="242" class="t-chip">the first request, or dropped</text>
+        <text x="860" y="258" class="t-chipsub">JACKBUS_API_VERSION 1 · protocol 9 not affected</text>
+      </g>
+      <!-- 3 name check -->
+      <g opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.22;0.232;0.955;0.98;1" dur="18s" repeatCount="indefinite"/>
+        <text x="600" y="302" text-anchor="middle" class="t-chip">kClientCheck · the name, fOpen = 0</text>
+        <path d="M156,312 H812" class="flow req"/>
+        <path d="M812,306 L820,312 L812,318 Z" fill="#38bdf8"/>
+        <path d="M814,326 H158" class="flow req slow"/>
+        <path d="M158,320 L150,326 L158,332 Z" fill="#38bdf8"/>
+        <text x="600" y="342" text-anchor="middle" class="t-chipsub">the name it gets · its status</text>
+        <rect x="846" y="296" width="314" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+        <text x="860" y="312" class="t-chip">protocol 9's name check</text>
+        <text x="860" y="328" class="t-chipsub">fOpen set, or a protocol-9 kClientOpen: dropped</text>
+      </g>
+      <!-- 4 the open -->
+      <g opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.33;0.342;0.955;0.98;1" dur="18s" repeatCount="indefinite"/>
+        <rect x="86" y="358" width="128" height="24" rx="7" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+        <text x="150" y="374" text-anchor="middle" class="t-chipsub">socketpair()</text>
+        <text x="600" y="400" text-anchor="middle" class="t-chip">kBusClientOpen · name, pid, uuid</text>
+        <text x="600" y="415" text-anchor="middle" class="t-chipsub" style="fill:#5eead4">+ an fd trailer: the pair's other end</text>
+        <path d="M156,426 H812" class="flow req"/>
+        <path d="M812,420 L820,426 L812,432 Z" fill="#38bdf8"/>
+        <rect x="846" y="396" width="314" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+        <text x="860" y="412" class="t-chip">the engine opens the client</text>
+        <text x="860" y="428" class="t-chipsub">its pid: SO_PEERCRED's · notifications: that fd</text>
+      </g>
+      <!-- 5 kAddClient per existing client -->
+      <g opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.46;0.472;0.955;0.98;1" dur="18s" repeatCount="indefinite"/>
+        <text x="600" y="458" text-anchor="middle" class="t-chip">kAddClient · one per client in the graph</text>
+        <text x="600" y="473" text-anchor="middle" class="t-chipsub" style="fill:#5eead4">+ an fd trailer: that client's futex file</text>
+        <path d="M814,484 H388" class="flow ntf"/>
+        <path d="M388,478 L380,484 L388,490 Z" fill="#fb923c"/>
+        <path d="M386,498 H812" class="flow ntf slow"/>
+        <path d="M812,492 L820,498 L812,504 Z" fill="#fb923c"/>
+        <text x="600" y="514" text-anchor="middle" class="t-chipsub">its reply: the notification is synchronous</text>
+        <rect x="846" y="454" width="314" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+        <text x="860" y="470" class="t-chip">opened by name as it is sent</text>
+        <text x="860" y="486" class="t-chipsub">as a protocol-9 libjack opens it on receipt</text>
+      </g>
+      <!-- 6 the result and five fds -->
+      <g opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.60;0.612;0.955;0.98;1" dur="18s" repeatCount="indefinite"/>
+        <text x="600" y="546" text-anchor="middle" class="t-chip">result · refnum, the segments' indices</text>
+        <text x="600" y="561" text-anchor="middle" class="t-chipsub" style="fill:#5eead4">+ an fd trailer: five fds</text>
+        <path d="M814,572 H158" class="flow req"/>
+        <path d="M158,566 L150,572 L158,578 Z" fill="#38bdf8"/>
+        <rect x="258" y="582" width="84" height="20" rx="6" fill="rgba(45,212,191,0.14)" stroke="#2dd4bf"/>
+        <text x="300" y="596" text-anchor="middle" class="t-chipsub">engine</text>
+        <rect x="350" y="582" width="84" height="20" rx="6" fill="rgba(45,212,191,0.14)" stroke="#2dd4bf"/>
+        <text x="392" y="596" text-anchor="middle" class="t-chipsub">graph</text>
+        <rect x="442" y="582" width="84" height="20" rx="6" fill="rgba(45,212,191,0.14)" stroke="#2dd4bf"/>
+        <text x="484" y="596" text-anchor="middle" class="t-chipsub">its control</text>
+        <rect x="534" y="582" width="84" height="20" rx="6" fill="rgba(45,212,191,0.14)" stroke="#2dd4bf"/>
+        <text x="576" y="596" text-anchor="middle" class="t-chipsub">its futex</text>
+        <rect x="626" y="582" width="84" height="20" rx="6" fill="rgba(45,212,191,0.14)" stroke="#2dd4bf"/>
+        <text x="668" y="596" text-anchor="middle" class="t-chipsub">alive table</text>
+        <rect x="846" y="542" width="314" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+        <text x="860" y="558" class="t-chip">the server's own objects</text>
+        <text x="860" y="574" class="t-chipsub">shm_open (its own, checked) · a dup · the table</text>
+      </g>
+      <!-- 7 mapped; protocol 9 from here -->
+      <g opacity="0">
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.74;0.752;0.955;0.98;1" dur="18s" repeatCount="indefinite"/>
+        <rect x="40" y="614" width="300" height="24" rx="7" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+        <text x="190" y="630" text-anchor="middle" class="t-chipsub">mmap · ConnectFd · the alive slot, required</text>
+        <text x="600" y="654" text-anchor="middle" class="t-chip">protocol 9's requests · for its own refnum</text>
+        <path d="M156,664 H812" class="flow req"/>
+        <path d="M812,658 L820,664 L812,670 Z" fill="#38bdf8"/>
+        <rect x="846" y="640" width="314" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+        <text x="860" y="656" class="t-chip">then the protocol-9 decoder</text>
+        <text x="860" y="672" class="t-chipsub">another refnum's request, kNotification: refused</text>
+      </g>
+
+      <!-- packets -->
+      <circle r="5" class="pkt req" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.045;0.09;1" calcMode="linear"><mpath xlink:href="#pbus-1"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.042;0.045;0.09;0.093;1" dur="18s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="5" class="pkt req" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.135;0.17;1" calcMode="linear"><mpath xlink:href="#pbus-2"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.132;0.135;0.17;0.173;1" dur="18s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="5" class="pkt req" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.18;0.215;1" calcMode="linear"><mpath xlink:href="#pbus-2r"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.177;0.18;0.215;0.218;1" dur="18s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="5" class="pkt req" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.235;0.27;1" calcMode="linear"><mpath xlink:href="#pbus-3"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.232;0.235;0.27;0.273;1" dur="18s" repeatCount="indefinite"/>
+      </circle>
+      <circle r="5" class="pkt req" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.28;0.315;1" calcMode="linear"><mpath xlink:href="#pbus-3r"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.277;0.28;0.315;0.318;1" dur="18s" repeatCount="indefinite"/>
+      </circle>
+      <rect x="-6" y="-5" width="12" height="10" rx="2" class="pkt fd" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.35;0.40;1" calcMode="linear"><mpath xlink:href="#pbus-4"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.347;0.35;0.40;0.403;1" dur="18s" repeatCount="indefinite"/>
+      </rect>
+      <rect x="-6" y="-5" width="12" height="10" rx="2" class="pkt fd" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.475;0.515;1" calcMode="linear"><mpath xlink:href="#pbus-5"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.472;0.475;0.515;0.518;1" dur="18s" repeatCount="indefinite"/>
+      </rect>
+      <circle r="5" class="pkt ntf" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.525;0.56;1" calcMode="linear"><mpath xlink:href="#pbus-5r"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.522;0.525;0.56;0.563;1" dur="18s" repeatCount="indefinite"/>
+      </circle>
+      <rect x="-6" y="-5" width="12" height="10" rx="2" class="pkt fd" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.615;0.665;1" calcMode="linear"><mpath xlink:href="#pbus-6"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.612;0.615;0.665;0.668;1" dur="18s" repeatCount="indefinite"/>
+      </rect>
+      <circle r="5" class="pkt req" opacity="0">
+        <animateMotion dur="18s" repeatCount="indefinite" keyPoints="0;0;1;1" keyTimes="0;0.76;0.80;1" calcMode="linear"><mpath xlink:href="#pbus-7"/></animateMotion>
+        <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.757;0.76;0.80;0.803;1" dur="18s" repeatCount="indefinite"/>
+      </circle>
+
+      <!-- what each kind of client maps -->
+      <text x="40" y="716" class="t-tiny">WHAT EACH KIND OF CLIENT HAS MAPPED · BUS.SH PROBE, /PROC/SELF/MAPS</text>
+      <rect x="40" y="726" width="550" height="26" rx="8" fill="rgba(251,191,36,0.06)" stroke="#8a6a1c"/>
+      <text x="54" y="743" class="t-chipsub">protocol 9: the shm registry · 3 segments, futex files and the alive table, by name</text>
+      <rect x="610" y="726" width="550" height="26" rx="8" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="624" y="743" class="t-chipsub">JackBus socket: no registry · the same 3 segments, futex files and alive table, from fds</text>
+    </svg>
+    <div class="legend">
+      <span class="l-req">requests and replies (the JackBus socket)</span>
+      <span class="l-ntf">notifications (the socket pair)</span>
+      <span class="l-fd">file descriptors (an SCM_RIGHTS trailer)</span>
+      <span class="l-fork">added by JackBus</span>
+    </div>
+    <p class="caption">
+      <b>The same client, another way in.</b> <code>JackBusLibClient</code> is libjack's own client class with
+      another channel: once the open is through, it maps what it received (<code>SetShmFd</code>,
+      <code>ConnectFd</code>) and runs <code>JackClient</code>'s realtime loop unchanged, so every <code>jack_*</code>
+      function works on it and it runs in one graph with protocol-9 clients &mdash; of this libjack, of a stock one,
+      in other processes or in the same one, which then shares one mapping of each segment. The server serves the
+      socket from the request thread that serves protocol 9's (one more fd in its poll); it opens the objects it
+      created itself (<code>jack_shm_open_fd</code> only for segments it allocated, a dup of the client's futex fd,
+      the alive table) and passes them. A peer's futex file travels with each <code>kAddClient</code>, opened by name
+      when the notification is sent, just as a protocol-9 libjack opens it when the notification arrives: one sent late
+      to a lagging client (§18), whose client is gone by then, carries no fd, and the client's connect fails as a
+      protocol-9 libjack's would.
+    </p>
+    <p class="caption">
+      <b>Stricter than protocol 9.</b> Only the user's own processes: the directory is the user's, mode 0700, and the
+      peer's uid from <code>SO_PEERCRED</code> must match. A version handshake first; then protocol 9's name check
+      without its open flag, then <code>kBusClientOpen</code>, then protocol 9's requests. The pid the engine records
+      is the socket peer's as the kernel sees it, not the one the client reports (a sandboxed client reports one of its
+      own namespace). A request on behalf of another client's refnum is refused, so is the server's own
+      <code>kNotification</code>, and a client that sends anything out of order is dropped. A request that stops
+      half-way is dropped after 2&nbsp;s instead of holding the request thread, and with it every other client; on
+      protocol 9's socket it holds the thread until the rest comes. The alive slot is mandatory: the open fails
+      without one, so a JackBus client's realtime thread always holds its slot (§16).
+    </p>
+    <p class="caption">
+      <b>How fds travel.</b> The socket is a <code>SOCK_STREAM</code> unix socket like protocol 9's, because requests
+      are read field by field. A message that carries fds ends with a trailer: one byte, the number of fds, sent with
+      <code>sendmsg()</code> and <code>SCM_RIGHTS</code> (<code>JackFdPassing</code>). Reads of exact field sizes stop
+      before it, and only <code>recvmsg()</code> reads it, with <code>MSG_CMSG_CLOEXEC</code>: a plain
+      <code>read()</code> of that byte would make the kernel close the fds it carries. Every fd a JackBus client holds
+      is close-on-exec, its sockets included, so a program it starts inherits none.
+    </p>
+    <p class="caption">
+      <b>Where it is, and how to use it.</b> <code>jackd</code> and <code>jackdbus</code> alike bind
+      <code>$XDG_RUNTIME_DIR/jackbus/&lt;server&gt;</code> beside protocol 9's request socket, creating the directory if
+      needed; a socket left there by an earlier server of the same user is replaced, anything else at that path is an
+      error, and the socket is removed when the server stops. Without <code>XDG_RUNTIME_DIR</code>, with a directory
+      that isn't the user's or is open to others, or with <code>JACK_NO_BUS_SOCKET=1</code>, there is simply no JackBus
+      socket and protocol 9 is untouched. An application opens a client with <code>jackbus_client_open()</code>
+      (<code>jack/jackbus.h</code>): the arguments of <code>jack_client_open()</code> plus reserved flags, a
+      <code>jack_client_t</code> back. It never starts a server, and fails cleanly (NULL, <code>JackFailure</code>)
+      where there is no JackBus socket: a stock server, or no runtime directory. <code>JACKBUS_TRANSPORT=1</code> sends
+      every <code>jack_client_open()</code> of the process through it, with no fallback, so that unmodified programs
+      can run over it in tests; <code>jackbus_simple</code> (<code>example-clients/</code>) is
+      <code>jack_simple_client</code> opened this way, with <code>-f</code> to fall back to protocol 9.
+    </p>
+  </div>
+
+  <div class="tablebox" style="margin-top:18px">
+    <table>
+      <tr><th>A client gets hold of</th><th>Protocol 9's socket</th><th>The JackBus socket</th></tr>
+      <tr><td>The server</td><td><code>/dev/shm/jack_&lt;server&gt;_&lt;uid&gt;_0</code></td><td><code>$XDG_RUNTIME_DIR/jackbus/&lt;server&gt;</code>, in a 0700 directory of the user's</td></tr>
+      <tr><td>Engine and graph segments</td><td>by name, through the shm registry and its SysV lock</td><td>fds in the open's trailer; no registry, no lock</td></tr>
+      <tr><td>Its own control segment</td><td>by name, through the registry</td><td>an fd in the open's trailer</td></tr>
+      <tr><td>Futex words</td><td>its own and each peer's file by name, at the open and at each <code>kAddClient</code></td><td>its own in the open's trailer; each peer's with its <code>kAddClient</code></td></tr>
+      <tr><td>The alive slot (§16)</td><td>the table by name, if the server has one; optional</td><td>an fd in the open's trailer; required</td></tr>
+      <tr><td>Its notification socket</td><td>a socket of its own in <code>/dev/shm</code>, which the server connects to</td><td>one end of a socket pair the client passes with the open</td></tr>
+      <tr><td>Who may connect · its pid</td><td>whoever may open the socket file (a group, with <code>JACK_PROMISCUOUS_SERVER</code>) · the pid it reports; <code>SO_PEERCRED</code>'s for the death checks</td><td>the user's processes only · <code>SO_PEERCRED</code>'s, throughout</td></tr>
+      <tr><td>Requests after the open</td><td>protocol 9's, any refnum</td><td>protocol 9's, for its own refnum only</td></tr>
+      <tr><td>Without <code>/dev/shm</code> (a sandbox that hides it)</td><td><span class="worse">no connection at all</span></td><td><span class="better">works: every object comes as an fd</span></td></tr>
+    </table>
+  </div>
+
+  <div class="tablebox" style="margin-top:18px">
+    <table>
+      <tr><th>Tested · <code>nspa/tests/bus.sh</code>, in the suite (28 checks, 24 under a sanitizer)</th><th>Result</th></tr>
+      <tr><td><code>fd_trailer</code>: the SCM_RIGHTS framing on a stream socket</td><td><span class="better">pass</span></td></tr>
+      <tr><td>What each kind of client maps (<code>/proc/self/maps</code>)</td><td>JackBus: no shm registry, 3 segments, the futex files, the alive table · protocol 9: the registry too</td></tr>
+      <tr><td>Chains of three, sample-exact: protocol 9 → JackBus → protocol 9, JackBus → the system's 1.9.22 libjack → JackBus, the system's → JackBus → the system's, JackBus × 3</td><td><span class="better">every sample in place</span></td></tr>
+      <tr><td>A protocol-9 and a JackBus client in one process</td><td><span class="better">both in the chain, one libjack</span></td></tr>
+      <tr><td>A JackBus client with an empty, private <code>/dev/shm</code> (a sandbox without shm access)</td><td><span class="better">runs in the chain</span> · a protocol-9 client fails there, as it must</td></tr>
+      <tr><td>Protocol errors: a protocol-9 open, garbage, a bad version, a missing trailer, half a request</td><td>each connection dropped · the server serves the next open</td></tr>
+      <tr><td>A request for another client's refnum · a connection that says nothing</td><td>refused · the next open takes under 1.5&nbsp;s meanwhile</td></tr>
+      <tr><td>After the server stops · a server with <code>JACK_NO_BUS_SOCKET=1</code></td><td>nothing left in <code>/dev/shm</code>, the socket removed · <code>jackbus_client_open</code> fails cleanly, protocol 9 unaffected</td></tr>
+      <tr><td><code>bus-apps.sh</code>: unmodified programs with <code>JACKBUS_TRANSPORT=1</code> &mdash; jack_simple_client, jack_metro with jack_connect / jack_disconnect / jack_lsp, jack_midiseq into jack_midi_dump and jack_midisine, jack_evmon, jack_bufsize, jack_samplerate, jack_property (set over JackBus, read over protocol 9), jack_freewheel, jack_iodelay through jack_thru_client, jack_rec, fluidsynth, jack_zombie</td><td><span class="better">all pass</span> · the long-running ones confirmed JackBus clients by their maps</td></tr>
+      <tr><td>The whole suite with <code>JACKBUS_TRANSPORT=1</code></td><td>runs over the socket; the cases against the system's server (which has no JackBus socket) are skipped</td></tr>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ 12. nodes -->
+<section id="s12">
+  <h2><span class="num">12</span>Nodes: the native JackBus API</h2>
+  <p class="sub">
+    A node is a client of the JackBus socket with what JACK's API makes applications work around: a process function
+    that gets the whole cycle as a record, port buffers resolved before it runs, notifications as events the
+    application drains from its own threads through a file descriptor, latency as a number it declares, and ports that
+    come and go while it runs without the realtime thread ever waiting. The interface (<code>jackbus_node_*</code>,
+    <code>jackbus_port_*</code> in <code>jack/jackbus.h</code>) is experimental and may still change. Nothing changes
+    for any other client.
+  </p>
+  <div class="figure">
+    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 800" role="img" aria-label="A node: its threads, the server, the cycle record, the zero buffer and the port table">
+      <defs>
+        <path id="pnode-req-up" d="M200,412 L200,344"/>
+        <path id="pnode-req-dn" d="M212,344 L212,412"/>
+        <path id="pnode-ntf" d="M565,412 L565,344"/>
+        <path id="pnode-efd" d="M398,249 L374,249"/>
+        <path id="pnode-act" d="M845,412 L845,344"/>
+        <path id="pnode-sig" d="M885,344 L885,412"/>
+        <path id="pnode-alive" d="M1065,344 L1065,412"/>
+      </defs>
+      <!-- ===== the application process ===== -->
+      <rect x="20" y="20" width="1160" height="336" rx="20" fill="rgba(91,95,199,0.06)" stroke="#5b5fc7"/>
+      <text x="40" y="44" class="t-band" style="fill:#b3b6ff">ONE APPLICATION PROCESS · LIBJACK.SO.0 · A NODE</text>
+      <!-- application threads -->
+      <rect x="40" y="60" width="330" height="280" rx="14" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
+      <text x="56" y="84" class="t-title">application threads</text>
+      <text x="56" y="104" class="t-sub">any of them, never the process function</text>
+      <rect x="56" y="116" width="298" height="48" rx="10" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="70" y="136" class="t-label">open · ports · activate</text>
+      <text x="70" y="154" class="t-sub">jackbus_node_open, jackbus_port_add, …</text>
+      <rect x="56" y="170" width="298" height="48" rx="10" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="70" y="190" class="t-label">poll() on the event fd</text>
+      <text x="70" y="208" class="t-sub">readable while events are queued</text>
+      <rect x="56" y="224" width="298" height="48" rx="10" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="70" y="244" class="t-label">jackbus_node_next_event()</text>
+      <text x="70" y="262" class="t-sub">1: an event · 0: none left, the fd reset</text>
+      <rect x="56" y="278" width="298" height="48" rx="10" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="70" y="298" class="t-label">jackbus_node_client()</text>
+      <text x="70" y="316" class="t-sub">jack_* for the rest: connect, metadata, …</text>
+      <!-- notification thread -->
+      <rect x="400" y="60" width="330" height="280" rx="14" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
+      <text x="416" y="84" class="t-title">libjack's notification thread</text>
+      <text x="416" y="104" class="t-sub">reads the socket pair, runs the callbacks</text>
+      <rect x="416" y="116" width="298" height="48" rx="10" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="430" y="136" class="t-label">every callback, set at open</text>
+      <text x="430" y="154" class="t-sub">each one turns into an event</text>
+      <rect x="416" y="170" width="298" height="48" rx="10" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="430" y="190" class="t-label">the queue · 1 024 events</text>
+      <text x="430" y="208" class="t-sub">a mutex · full: counted, then one LOST</text>
+      <rect x="416" y="224" width="298" height="48" rx="10" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="430" y="244" class="t-label">write() on the eventfd</text>
+      <text x="430" y="262" class="t-sub">non-blocking · never on the RT thread</text>
+      <rect x="416" y="278" width="298" height="48" rx="10" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+      <text x="430" y="298" class="t-label">latency callback</text>
+      <text x="430" y="316" class="t-sub">JACK's default + the declared frames</text>
+      <!-- realtime thread -->
+      <rect x="760" y="60" width="400" height="280" rx="14" fill="url(#g-box)" stroke="#2dd4bf" stroke-width="1.6"/>
+      <text x="776" y="84" class="t-title">realtime thread · SCHED_FIFO 88</text>
+      <text x="776" y="104" class="t-sub">libjack's own process thread, its loop unchanged</text>
+      <text x="776" y="132" class="t-label">wait</text>
+      <text x="856" y="132" class="t-sub">its futex word (protocol 9)</text>
+      <text x="776" y="156" class="t-label">cycle</text>
+      <text x="856" y="156" class="t-sub">the frame timer + two vDSO clock reads</text>
+      <text x="776" y="180" class="t-label">ports</text>
+      <text x="856" y="180" class="t-sub">the table: one atomic load · sequence odd</text>
+      <text x="776" y="204" class="t-label">buffers</text>
+      <text x="856" y="204" class="t-sub">resolved once · unconnected in → zero</text>
+      <text x="776" y="228" class="t-label">process</text>
+      <text x="856" y="228" class="t-sub">process(node, &amp;cycle, arg)</text>
+      <text x="776" y="252" class="t-label">signal</text>
+      <text x="856" y="252" class="t-sub">its successors · sequence even again</text>
+      <text x="776" y="284" class="t-fork">holds its alive slot for life · required on this socket</text>
+      <text x="776" y="310" class="t-ok">traced: no system call but futex in its cycles</text>
+
+      <!-- ===== between process and server ===== -->
+      <use xlink:href="#pnode-req-up" class="flow req slow"/>
+      <use xlink:href="#pnode-req-dn" class="flow req slow"/>
+      <use xlink:href="#pnode-ntf" class="flow ntf"/>
+      <use xlink:href="#pnode-efd" class="flow ntf"/>
+      <path d="M380,243 L372,249 L380,255 Z" fill="#fb923c"/>
+      <use xlink:href="#pnode-act" class="flow act"/>
+      <use xlink:href="#pnode-sig" class="flow act"/>
+      <use xlink:href="#pnode-alive" class="flow alive slow"/>
+      <text x="224" y="372" class="t-tiny" style="fill:#38bdf8">REQUESTS</text>
+      <text x="577" y="372" class="t-tiny" style="fill:#fb923c">NOTIFICATIONS</text>
+      <text x="897" y="372" class="t-tiny" style="fill:#8b8ff5">FUTEX WAKES</text>
+      <text x="1077" y="372" class="t-tiny" style="fill:#fb7185">ALIVE SLOT</text>
+      <circle r="4" class="pkt req"><animateMotion dur="3.4s" repeatCount="indefinite"><mpath xlink:href="#pnode-req-up"/></animateMotion></circle>
+      <circle r="4" class="pkt req"><animateMotion dur="3.4s" begin="-1.7s" repeatCount="indefinite"><mpath xlink:href="#pnode-req-dn"/></animateMotion></circle>
+      <circle r="4" class="pkt ntf"><animateMotion dur="2.6s" repeatCount="indefinite"><mpath xlink:href="#pnode-ntf"/></animateMotion></circle>
+      <circle r="4" class="pkt ntf"><animateMotion dur="1.3s" begin="-0.4s" repeatCount="indefinite"><mpath xlink:href="#pnode-efd"/></animateMotion></circle>
+      <circle r="4.2" class="pkt act"><animateMotion dur="1.4s" repeatCount="indefinite"><mpath xlink:href="#pnode-act"/></animateMotion></circle>
+      <circle r="4.2" class="pkt act"><animateMotion dur="1.4s" begin="-0.7s" repeatCount="indefinite"><mpath xlink:href="#pnode-sig"/></animateMotion></circle>
+      <circle r="4" class="pkt alive"><animateMotion dur="3.2s" repeatCount="indefinite"><mpath xlink:href="#pnode-alive"/></animateMotion></circle>
+
+      <!-- ===== the server ===== -->
+      <rect x="20" y="376" width="1160" height="140" rx="20" fill="url(#g-band)" stroke="#3a3f72"/>
+      <rect x="40" y="414" width="330" height="56" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
+      <text x="56" y="437" class="t-title">request thread</text>
+      <text x="56" y="456" class="t-sub">the JackBus socket: the open, then protocol 9</text>
+      <rect x="400" y="414" width="330" height="56" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
+      <text x="416" y="437" class="t-title">notification channel</text>
+      <text x="416" y="456" class="t-sub">the socket pair: graph, ports, xruns, …</text>
+      <rect x="760" y="414" width="190" height="56" rx="12" fill="url(#g-ms)" stroke="#fbbf24" stroke-width="1.4"/>
+      <text x="776" y="437" class="t-title">activation</text>
+      <text x="776" y="456" class="t-sub">futex words · protocol 9</text>
+      <rect x="970" y="414" width="190" height="56" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.4"/>
+      <text x="986" y="437" class="t-title">engine notifier</text>
+      <text x="986" y="456" class="t-sub">futex_waitv · alive slots</text>
+      <text x="40" y="400" class="t-band">JACKD / JACKDBUS · THE SAME GRAPH AS EVERY OTHER CLIENT</text>
+      <text x="600" y="500" text-anchor="middle" class="t-sub">a node is a client like any other there: a refnum, its ports and connections; its death is found as any fork libjack client's is (§16)</text>
+
+      <!-- ===== what the realtime thread reads ===== -->
+      <rect x="20" y="536" width="1160" height="244" rx="20" fill="url(#g-band)" stroke="#3a3f72"/>
+      <text x="40" y="560" class="t-band">WHAT THE REALTIME THREAD HAS READY BEFORE PROCESS() RUNS · NO LOCK, NO SYSTEM CALL</text>
+      <rect x="40" y="574" width="520" height="190" rx="14" fill="#161a36" stroke="#3d4683"/>
+      <text x="56" y="598" class="t-label">jackbus_cycle_t · the cycle record</text>
+      <g class="t-mono" style="font-size:11px">
+        <text x="56" y="624">frame</text><text x="56" y="646">time_ns</text><text x="56" y="668">raw_ns</text>
+        <text x="56" y="690">next_ns</text><text x="56" y="712">period_ns</text><text x="56" y="740">flags</text>
+        <text x="300" y="624">rate_diff</text><text x="300" y="712">size</text>
+        <text x="300" y="646">nframes · sample_rate</text>
+        <text x="300" y="668">cycle · xruns</text>
+        <text x="300" y="690">transport_state · _frame</text>
+      </g>
+      <g class="t-sub">
+        <text x="134" y="624">64 bits, never wraps</text>
+        <text x="134" y="646">CLOCK_MONOTONIC</text>
+        <text x="134" y="668">CLOCK_MONOTONIC_RAW</text>
+        <text x="134" y="690">the next cycle's start</text>
+        <text x="134" y="712">measured (the DLL)</text>
+        <text x="378" y="624">nominal / measured</text>
+        <text x="378" y="712">for later versions</text>
+        <text x="134" y="740">FIRST · AFTER_XRUN · FREEWHEEL · ROLLING</text>
+      </g>
+      <rect x="580" y="574" width="280" height="190" rx="14" fill="#161a36" stroke="#3d4683"/>
+      <text x="596" y="598" class="t-label">the zero buffer · one per process</text>
+      <text x="596" y="624" class="t-sub">mapped read-only, pre-faulted, locked</text>
+      <text x="596" y="646" class="t-sub">made at the open, never cleared again</text>
+      <text x="596" y="668" class="t-sub">every unconnected audio input gets it</text>
+      <text x="596" y="690" class="t-sub">instead of a buffer cleared per cycle</text>
+      <text x="596" y="722" class="t-red">a write to it: SIGSEGV, in the writer</text>
+      <text x="596" y="742" class="t-sub">alone; never a silent corruption</text>
+      <rect x="880" y="574" width="280" height="190" rx="14" fill="#161a36" stroke="#3d4683"/>
+      <text x="896" y="598" class="t-label">the port table</text>
+      <text x="896" y="624" class="t-sub">published with an atomic pointer</text>
+      <text x="896" y="646" class="t-sub">adding or removing a port builds a</text>
+      <text x="896" y="668" class="t-sub">new one; the old one is freed once no</text>
+      <text x="896" y="690" class="t-sub">cycle can read it (the figure below)</text>
+      <text x="896" y="722" class="t-ok">the realtime thread never waits,</text>
+      <text x="896" y="742" class="t-ok">and never skips a cycle</text>
+    </svg>
+    <div class="legend">
+      <span class="l-req">requests (the JackBus socket)</span>
+      <span class="l-ntf">notifications, then events (eventfd)</span>
+      <span class="l-act">activation (futex wake)</span>
+      <span class="l-alive">alive slot (robust futex → futex_waitv)</span>
+      <span class="l-fork">JackBus code</span>
+      <span class="l-up">upstream protocol, unchanged</span>
+    </div>
+    <p class="caption">
+      <b>A node and its client.</b> <code>jackbus_node_open()</code> opens a client over the JackBus socket (§11) and
+      sets every callback on it: libjack's process callback becomes the node's wrapper, and each notification callback
+      (client and port registration, connections, renames, graph order, buffer size, sample rate, xruns, freewheel,
+      latency, properties, shutdown) appends an event. <code>jackbus_node_client()</code> gives the same client to the
+      <code>jack_*</code> API for everything else &mdash; connections, metadata, transport &mdash; on which no callback
+      may be set. The realtime thread is libjack's own process thread, at the server's priority minus one, in the same
+      loop as any client's: woken by its futex word, signalling its successors, holding its alive slot for as long as
+      it lives. So the server finds a dead node the way it finds any fork libjack client: the kernel marks the slot as
+      the realtime thread ends and wakes the notifier (§16). Under a dying server a node gets a <code>SHUTDOWN</code> event,
+      its process function stops being called, and <code>jackbus_node_close()</code> returns.
+    </p>
+    <p class="caption">
+      <b>The cycle record.</b> The wrapper fills it from the server's frame timer &mdash; the double-buffered DLL state
+      in <code>JackEngineControl</code> that <code>jack_get_cycle_times()</code> reads &mdash; and two vDSO clock reads
+      for the offset between <code>CLOCK_MONOTONIC_RAW</code> (JACK's clock) and <code>CLOCK_MONOTONIC</code>: no system
+      call. <code>frame</code> is JACK's frame time, carried on in 64 bits: it advances by <code>nframes</code> each
+      cycle, jumps at an xrun, and advances once by the new size at a buffer-size change. The times are nanosecond
+      fields, filled from the server's microsecond timer for now; while freewheeling only <code>frame</code> and
+      <code>cycle</code> mean anything. The flags say what a process function otherwise has to work out itself: the
+      first cycle since activation, the first after an xrun, freewheeling, transport rolling.
+    </p>
+    <p class="caption">
+      <b>Buffers once, and a zero buffer.</b> Before the process function runs, the wrapper resolves each port's buffer
+      once &mdash; what <code>jack_port_get_buffer()</code> would return &mdash; except that an unconnected audio input
+      gets one zero buffer shared by every node of the process: made at the open, mapped read-only with its pages
+      populated and locked, never cleared again. A node that writes into it crashes with <code>SIGSEGV</code> instead
+      of silently feeding its own garbage back in. <code>jackbus_port_audio()</code> and
+      <code>jackbus_port_midi()</code> only hand out what was resolved; MIDI keeps JACK's own buffers, for the
+      <code>jack_midi_*</code> functions.
+    </p>
+    <p class="caption">
+      <b>Events, not callbacks.</b> JACK runs its notification callbacks on a library thread that must not call the
+      server. A node's notifications arrive in a bounded queue instead, appended on that thread under a mutex, and an
+      <code>eventfd</code> becomes readable; the application drains them with <code>jackbus_node_next_event()</code>
+      from any thread but the process function, and may call anything while it handles them. The buffer-size call
+      libjack makes on the realtime thread as it starts is not a change and is not queued, so nothing is ever written
+      from the realtime thread. A full queue (1 024 events) drops what follows and counts it: the next event read is a
+      <code>LOST</code> with that count, the sign to read the graph again.
+    </p>
+    <p class="caption">
+      <b>Latency as data.</b> A latency callback replaces JACK's default propagation for its client, so the node's
+      callback does what the default does &mdash; each side's widest range taken to the other side &mdash; and adds the frames the
+      node declared with <code>jackbus_node_set_process_latency()</code>, at any time; a <code>LATENCY</code> event
+      follows.
+    </p>
+  </div>
+
+  <div class="figure" style="margin-top:18px">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 290" role="img" aria-label="A port added while the node runs: the new table published, the old one freed once the cycle that read it has ended">
+      <rect x="20" y="20" width="1160" height="250" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+      <text x="40" y="46" class="t-band">A PORT ADDED WHILE THE NODE RUNS · THE REALTIME THREAD NEVER WAITS FOR IT</text>
+      <text x="40" y="90" class="t-tiny">REALTIME THREAD</text>
+      <rect x="200" y="68" width="960" height="46" rx="10" fill="rgba(45,212,191,0.045)" stroke="#24605b"/>
+      <rect x="220" y="74" width="150" height="34" rx="8" fill="rgba(45,212,191,0.12)" stroke="#2dd4bf"/>
+      <text x="230" y="88" class="t-chip">cycle · seq 5</text><text x="230" y="102" class="t-chipsub">reads table A</text>
+      <rect x="450" y="74" width="150" height="34" rx="8" fill="rgba(45,212,191,0.12)" stroke="#2dd4bf"/>
+      <text x="460" y="88" class="t-chip">cycle · seq 7</text><text x="460" y="102" class="t-chipsub">loaded table A at its start</text>
+      <rect x="680" y="74" width="150" height="34" rx="8" fill="rgba(45,212,191,0.12)" stroke="#2dd4bf"/>
+      <text x="690" y="88" class="t-chip">cycle · seq 9</text><text x="690" y="102" class="t-chipsub">reads table B</text>
+      <rect x="910" y="74" width="150" height="34" rx="8" fill="rgba(45,212,191,0.12)" stroke="#2dd4bf"/>
+      <text x="920" y="88" class="t-chip">cycle · seq 11</text><text x="920" y="102" class="t-chipsub">table B</text>
+      <text x="380" y="96" class="t-sub">even: idle</text>
+      <text x="610" y="96" class="t-sub">even</text>
+      <text x="840" y="96" class="t-sub">even</text>
+      <text x="40" y="160" class="t-tiny">APPLICATION THREAD</text>
+      <rect x="200" y="138" width="960" height="46" rx="10" fill="rgba(139,143,245,0.05)" stroke="#33397a"/>
+      <rect x="220" y="144" width="250" height="34" rx="8" fill="#1b2246" stroke="#8b8ff5"/>
+      <text x="230" y="158" class="t-chip">jackbus_port_add()</text><text x="230" y="172" class="t-chipsub">registers it · builds table B (A + 1)</text>
+      <rect x="486" y="144" width="96" height="34" rx="8" fill="rgba(139,143,245,0.16)" stroke="#8b8ff5"/>
+      <text x="496" y="158" class="t-chip">publish B</text><text x="496" y="172" class="t-chipsub">atomic store</text>
+      <rect x="590" y="144" width="80" height="34" rx="8" fill="rgba(139,143,245,0.06)" stroke="#6b6fbf" stroke-dasharray="4 4"/>
+      <text x="600" y="158" class="t-chip">retire A</text><text x="600" y="172" class="t-chipsub">seq 7: wait</text>
+      <rect x="676" y="144" width="110" height="34" rx="8" fill="rgba(74,222,128,0.12)" stroke="#4ade80"/>
+      <text x="686" y="158" class="t-chip">free A</text><text x="686" y="172" class="t-chipsub">seq has moved on</text>
+      <path d="M534,144 L534,114" stroke="#8b8ff5" stroke-width="1.6" stroke-dasharray="3 3" fill="none"/>
+      <path d="M528,120 L534,112 L540,120 Z" fill="#8b8ff5"/>
+      <path d="M676,130 L602,112" stroke="#4ade80" stroke-width="1.4" stroke-dasharray="3 3" fill="none"/>
+      <text x="40" y="214" class="t-sub">Each cycle adds 1 to a sequence as it starts (odd: in a cycle) and as it ends. Read after the publication: even, no cycle holds the old table, freed at once;</text>
+      <text x="40" y="234" class="t-sub">odd, the cycle in progress may: the application thread looks again every 100 µs, and frees it once the sequence has moved on.</text>
+      <text x="40" y="254" class="t-bad">a process function stuck for 2 s: the old table is kept rather than freed under it, and libjack reports it</text>
+    </svg>
+  </div>
+
+  <pre class="code" style="margin-top:18px"><span class="c"># jack/jackbus.h · in libjack.so.0 · nodes are experimental: the interface may still change</span>
+<span class="k">jackbus_client_open</span>(name, options, &amp;status, flags = 0, …)  → jack_client_t *   <span class="c"># §11</span>
+<span class="k">jackbus_node_open</span>(name, options, &amp;status, …)               → jackbus_node_t *  <span class="c"># NULL without a JackBus socket</span>
+<span class="k">jackbus_node_set_process</span>(node, process, arg)               <span class="c"># before activation</span>
+<span class="k">jackbus_node_set_process_latency</span>(node, frames)            <span class="c"># any time: added to the ports' ranges</span>
+<span class="k">jackbus_node_activate</span>(node) · <span class="k">jackbus_node_deactivate</span>(node) · <span class="k">jackbus_node_close</span>(node)
+<span class="k">jackbus_node_client</span>(node)                                → jack_client_t *   <span class="c"># the jack_* API for the rest; no callbacks</span>
+<span class="k">jackbus_port_add</span>(node, name, JACKBUS_AUDIO | JACKBUS_MIDI, flags) → jackbus_port_t *   <span class="c"># any time, running too</span>
+<span class="k">jackbus_port_remove</span>(port) · <span class="k">jackbus_port_jack</span>(port) → jack_port_t *
+<span class="k">jackbus_port_audio</span>(port) → float * · <span class="k">jackbus_port_midi</span>(port) → void *  <span class="c"># in the process function only</span>
+<span class="k">jackbus_node_event_fd</span>(node)                              → int   <span class="c"># poll it; owned by the node</span>
+<span class="k">jackbus_node_next_event</span>(node, &amp;event)                    → 1 · 0  <span class="c"># any thread but the process function</span>
+<span class="c"># process(node, const jackbus_cycle_t *, arg): non-zero takes the node out of the graph, as with jack_set_process_callback</span></pre>
+
+  <div class="tablebox" style="margin-top:18px">
+    <table>
+      <tr><th>Event</th><th>What it carries</th></tr>
+      <tr><td><code>CLIENT</code> · <code>PORT</code></td><td><code>on</code>: registered or gone · the name · for a port its uuid (<code>id</code>) and <code>jack_port_id_t</code> (<code>value</code>)</td></tr>
+      <tr><td><code>CONNECT</code> · <code>RENAME</code></td><td>connected or disconnected, the two port names · the port, its new name and its old one</td></tr>
+      <tr><td><code>GRAPH</code> · <code>LATENCY</code></td><td>the processing order changed · the capture or playback ranges were updated</td></tr>
+      <tr><td><code>BUFFER_SIZE</code> · <code>SAMPLE_RATE</code> · <code>FREEWHEEL</code></td><td>frames · Hz · started or stopped</td></tr>
+      <tr><td><code>XRUN</code></td><td>how late, in microseconds; the next cycle record carries <code>AFTER_XRUN</code></td></tr>
+      <tr><td><code>PROPERTY</code></td><td>the subject's uuid, the change, the key</td></tr>
+      <tr><td><code>SHUTDOWN</code> · <code>LOST</code></td><td>the server went away, and why · how many events a full queue dropped: read the graph again</td></tr>
+    </table>
+  </div>
+
+  <div class="tablebox" style="margin-top:18px">
+    <table>
+      <tr><th>Tested · <code>bus.sh</code>, <code>bus-apps.sh</code>, <code>bus-ardour.sh</code></th><th>Result</th></tr>
+      <tr><td><code>bus_node</code>: the cycle record every cycle, through a buffer-size change and freewheel; the zero buffer; audio sample-exact and MIDI through a node; every event type with its fields and order; a full queue; 300 ports added and removed while running; the declared process latency</td><td><span class="better">31 checks pass</span></td></tr>
+      <tr><td>A node's realtime thread under <code>strace</code> from its creation, cycle after cycle · a control that makes one system call in a cycle</td><td><span class="better">futex only</span> · the control's call is seen</td></tr>
+      <tr><td>A node writing into the zero buffer</td><td><code>SIGSEGV</code> in that process (exit 139) · the server goes on</td></tr>
+      <tr><td>The server <code>SIGKILL</code>ed (a crash) or <code>SIGTERM</code>ed under a running node</td><td><span class="better">a SHUTDOWN event · the process function stops · the close returns</span></td></tr>
+      <tr><td><code>jackbus_tone</code> recorded through the graph · <code>jackbus_events</code> beside the other examples</td><td>a continuous sine (<code>tools/sine_check.py</code>) · their clients' lives among its events</td></tr>
+      <tr><td>Ardour 9 headless (<code>hardour</code>) over the JackBus socket: its master bus to <code>system:playback</code>, a node's tone fed through it, buffer-size changes</td><td><span class="better">a clean, continuous sine of the same frequency · a clean exit</span> · Ardour's own configuration untouched (a scratch home)</td></tr>
+      <tr><td><code>bus.sh</code> under ASan · under TSan</td><td>24 checks, <span class="better">0 reports</span> · <span class="better">0 reports</span> (its failures are TSan's abort at <code>jack_client_close</code>, §22)</td></tr>
+    </table>
+  </div>
+  <p class="caption" style="margin-top:12px">
+    <b>The examples.</b> <code>example-clients/</code> builds three, installed with the server:
+    <code>jackbus_simple</code> (§11); <code>jackbus_tone</code>, a sine whose phase comes from the record's 64-bit
+    frame, continuous whatever happens, while its main thread prints the node's events and a status line from what the
+    process function published; and <code>jackbus_events</code>, the graph's events read from the event fd &mdash; what
+    <code>jack_evmon</code> shows, without a callback.
+  </p>
+</section>
+
+<!-- ============================================================ 13. the shims -->
+<section id="s13">
+  <h2><span class="num">13</span>The shims: PipeWire, PulseAudio and ALSA applications</h2>
+    <p class="sub">
+    Applications written for PipeWire, PulseAudio or ALSA reach JackBus directly, each one a JACK client in JackBus's
+    cycle, at its rate and period, through three <b>shims</b> built on the node API (§12): <b>jackbus-pw</b> takes
+    the place of <code>libpipewire-0.3</code>, <b>jackbus-pa</b> of <code>libpulse</code>, and <b>jackbus-alsa</b> is
+    an ALSA plugin, the <code>jackbus</code> device. No PipeWire or PulseAudio server is in the audio's way. An
+    application's own work (decoding, mixing, effects) stays in its own threads, as with any sound server; in JackBus's
+    cycle a shim only moves one cycle of frames between the application's buffer and its ports, converting the sample
+    format, and resampling when the application insists on another rate. That realtime side makes no system call but
+    JACK's own futex.
+  </p>
+
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 660" role="img" aria-label="The three shims: PipeWire, PulseAudio and ALSA applications, each a JACK client in JackBus's graph">
+<rect x="20" y="20" width="1160" height="620" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">THREE SHIMS · ONE JACK CLIENT PER APPLICATION · IN JACKBUS'S CYCLE, AT ITS RATE AND PERIOD</text>
+<path class="flow audio" d="M 330 140 H 380"/>
+<path class="flow audio" d="M 330 300 H 380"/>
+<path class="flow audio" d="M 330 460 H 380"/>
+<path class="flow audio" d="M 760 140 H 810"/>
+<path class="flow audio" d="M 760 300 H 810"/>
+<path class="flow audio" d="M 760 460 H 810"/>
+<path class="flow ctrl slow" d="M 570 560 V 528"/>
+<rect x="40" y="76" width="290" height="128" rx="14" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="58" y="102" class="t-band">PIPEWIRE APPLICATIONS</text>
+<text x="58" y="128" class="t-sub">ossia score, mpv, SDL3, OpenAL,</text>
+<text x="58" y="146" class="t-sub">fluidsynth, pw-play, pw_filter tools</text>
+<text x="58" y="176" class="t-mono">jackbus-pw &lt;program&gt;</text>
+<rect x="40" y="236" width="290" height="128" rx="14" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="58" y="262" class="t-band">PULSEAUDIO APPLICATIONS</text>
+<text x="58" y="288" class="t-sub">Firefox, Chrome, Teams, mpv, games:</text>
+<text x="58" y="306" class="t-sub">anything that loads libpulse</text>
+<text x="58" y="336" class="t-mono">libpulse.so.0 (the dispatcher)</text>
+<rect x="40" y="396" width="290" height="128" rx="14" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="58" y="422" class="t-band">ALSA APPLICATIONS</text>
+<text x="58" y="448" class="t-sub">aplay, arecord, games, tools that</text>
+<text x="58" y="466" class="t-sub">open "default" or "jackbus"</text>
+<text x="58" y="496" class="t-mono">pcm.!default { type jackbus }</text>
+<rect x="380" y="76" width="380" height="128" rx="14" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="400" y="102" class="t-band">JACKBUS-PW · libpipewire-0.3.so.0</text>
+<text x="398" y="128" class="t-sub">pw_filter in the JACK thread (sample-accurate),</text>
+<text x="398" y="146" class="t-sub">pw_stream direct or through a ring; the JACK graph</text>
+<text x="398" y="164" class="t-sub">as a registry; links → jack_connect; a data loop</text>
+<text x="398" y="188" class="t-ok">every member one node, named after the app</text>
+<rect x="380" y="236" width="380" height="128" rx="14" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="400" y="262" class="t-band">JACKBUS-PA · libjackbus-pa.so</text>
+<text x="398" y="288" class="t-sub">main loops, context, streams, introspection;</text>
+<text x="398" y="306" class="t-sub">PulseAudio's libpulsecommon for the rest of the API;</text>
+<text x="398" y="324" class="t-sub">devices: a sink / source per card (system, bridges)</text>
+<text x="398" y="348" class="t-ok">a stream: its ports, its ring at JackBus's rate</text>
+<rect x="380" y="396" width="380" height="128" rx="14" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="400" y="422" class="t-band">JACKBUS-ALSA · pcm_jackbus (ioplug)</text>
+<text x="398" y="448" class="t-sub">the application's own buffer is the ring (mmap);</text>
+<text x="398" y="466" class="t-sub">positions in JackBus's frames; xrun → EPIPE;</text>
+<text x="398" y="484" class="t-sub">a fallback device while JackBus isn't running</text>
+<text x="398" y="508" class="t-ok">a node per open PCM, out_N / in_N ports</text>
+<rect x="810" y="76" width="350" height="448" rx="14" fill="rgba(45,212,191,0.07)" stroke="#2dd4bf"/>
+<text x="830" y="102" class="t-band">JACKBUS · THE GRAPH</text>
+<rect x="828" y="118" width="314" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="840" y="137" class="t-chip">ossia score · in · out</text>
+<text x="840" y="153" class="t-chipsub">a node: its process in the cycle</text>
+<rect x="828" y="172" width="314" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="840" y="191" class="t-chip">Firefox · FL FR</text>
+<text x="840" y="207" class="t-chipsub">a node: one cycle from the ring</text>
+<rect x="828" y="226" width="314" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="840" y="245" class="t-chip">aplay · out_1 out_2</text>
+<text x="840" y="261" class="t-chipsub">a node: one cycle from ALSA's buffer</text>
+<rect x="828" y="280" width="314" height="44" rx="9" fill="#1b2246" stroke="#4ade80"/>
+<text x="840" y="299" class="t-chip">system · bridged cards</text>
+<text x="840" y="315" class="t-chipsub">the devices: physical ports</text>
+<text x="830" y="356" class="t-sub">Routed, saved and restored like every</text>
+<text x="830" y="374" class="t-sub">JACK client (PatchBox, sessions)</text>
+<text x="830" y="410" class="t-tiny">EACH NODE'S REALTIME THREAD</text>
+<text x="830" y="430" class="t-sub">ring ↔ ports, format, gain, resampler</text>
+<text x="830" y="448" class="t-sub">no lock, no allocation, no system call</text>
+<text x="830" y="466" class="t-sub">but JACK's futex</text>
+<text x="830" y="500" class="t-ok">removed by JackBus's death detection</text>
+<rect x="40" y="560" width="1120" height="64" rx="14" fill="rgba(255,255,255,0.02)" stroke="#3d4683"/>
+<text x="60" y="586" class="t-band">SETTINGS · ~/.config/jackbus/compat.conf · NOT RT</text>
+<text x="60" y="608" class="t-sub">each shim its own keys (pw. · pa. · alsa.) over shared ones · resampling, quality, autoconnect, output and input device, PulseAudio's buffering cap · PatchBox's Shims tab writes them</text>
+</svg>
+    <p class="caption">
+      <b>An application is a JACK client.</b> Each application gets one node (§12): a JACK client named after it,
+      with a port per channel of each stream, in the graph like any other client, routed and session-saved by
+      PatchBox, removed by JackBus's own death detection if the application dies. A node is in the cycle only while
+      a stream is connected. Where an application processes in the audio cycle (a <code>pw_filter</code>, ossia's
+      engine), its process runs in JackBus's cycle, sample-accurate; where it writes ahead into a buffer (a
+      <code>pw_stream</code> without <code>RT_PROCESS</code>, every PulseAudio and ALSA stream), the node moves one
+      cycle of that buffer.
+    </p>
+  </div>
+
+  <h3 style="margin-top:34px">In the cycle, and beside it</h3>
+  <p>
+    A stream that writes ahead has a ring between the application and its ports: PulseAudio's of 131072 frames, an
+    asynchronous <code>pw_stream</code>'s of 32768, and for ALSA the application's own buffer, which alsa-lib maps
+    (<code>mmap_rw</code>). The node's realtime thread copies one cycle each cycle, converting at the boundary (float,
+    S16, S24 in 32, S32) and applying the stream's volume, cork, prebuffering, flush and drain. A cycle the ring can't
+    serve whole is an underflow (PulseAudio), an xrun reported as <code>EPIPE</code> (ALSA), never a wait. The
+    application's side is woken by a timer phase-locked to the cycle, armed from the node's published cycle record
+    (<code>next_ns</code>, <code>period_ns</code>): a <code>timerfd</code> in ALSA's poll set, a time event on
+    PulseAudio's main loop, half a period for an asynchronous <code>pw_stream</code>. Positions and timing are
+    JackBus's frames, published by the realtime thread in a sequence-locked snapshot and interpolated within the cycle,
+    so <code>snd_pcm_delay()</code>, <code>pa_stream_get_time()</code> and <code>pw_stream_get_time_n()</code> are
+    exact: the ring's fill plus the ports' JACK latency.
+  </p>
+
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 430" role="img" aria-label="A shim's stream: the node's realtime copy in each cycle and the application's thread woken by a timer from the cycle clock">
+<rect x="20" y="20" width="1160" height="390" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">A STREAM THAT WRITES AHEAD · THE NODE COPIES, THE APPLICATION REFILLS, NEITHER WAITS ON THE OTHER</text>
+<text x="40" y="84" class="t-tiny">JACKBUS CYCLE · THE NODE'S RT THREAD</text>
+<rect x="40" y="94" width="330" height="58" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="54" y="116" class="t-chip">cycle k: n frames ring → ports</text>
+<text x="54" y="134" class="t-chipsub">publish frame, time_ns (seqlock)</text>
+<rect x="430" y="94" width="330" height="58" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="444" y="116" class="t-chip">cycle k+1: n frames ring → ports</text>
+<text x="444" y="134" class="t-chipsub">format · gain · resampler if any</text>
+<rect x="820" y="94" width="340" height="58" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="834" y="116" class="t-chip">cycle k+2: the ring short</text>
+<text x="834" y="134" class="t-chipsub">silence, an underflow / EPIPE: no wait</text>
+<path class="flow audio" d="M 205 196 V 156"/>
+<path class="flow audio" d="M 595 196 V 156"/>
+<rect x="40" y="196" width="1120" height="70" rx="12" fill="rgba(45,212,191,0.06)" stroke="#2dd4bf"/>
+<text x="56" y="220" class="t-band">THE RING · AT JACKBUS'S RATE</text>
+<rect x="56" y="232" width="120" height="20" rx="4" fill="rgba(45,212,191,0.28)"/>
+<rect x="180" y="232" width="120" height="20" rx="4" fill="rgba(45,212,191,0.18)"/>
+<rect x="304" y="232" width="120" height="20" rx="4" fill="rgba(45,212,191,0.28)"/>
+<rect x="428" y="232" width="120" height="20" rx="4" fill="rgba(45,212,191,0.18)"/>
+<text x="570" y="248" class="t-sub">fill = what the application queued (tlength, its ALSA buffer), never below two cycles</text>
+<path class="flow audio slow" d="M 300 310 V 270"/>
+<path class="flow ctrl slow" d="M 1110 152 V 310"/>
+<text x="40" y="300" class="t-tiny">THE APPLICATION'S THREAD · NOT RT</text>
+<rect x="40" y="310" width="520" height="80" rx="10" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="56" y="334" class="t-chip">woken, writes what was asked for</text>
+<text x="56" y="354" class="t-sub">PulseAudio: minreq · ALSA: avail ≥ avail_min · pw_stream: a buffer</text>
+<text x="56" y="374" class="t-sub">its own decoding and mixing stay here, outside the graph</text>
+<rect x="640" y="310" width="520" height="80" rx="10" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="656" y="334" class="t-chip">a timer from the cycle clock</text>
+<text x="656" y="354" class="t-sub">next_ns · period_ns from the node's cycle record:</text>
+<text x="656" y="374" class="t-sub">timerfd (ALSA) · a main-loop time event (PulseAudio)</text>
+</svg>
+    <p class="caption">
+      <b>Two sides, one clock.</b> The realtime side never blocks and the application's side never runs in the cycle:
+      it is woken when the ring will have room (or, recording, data), computed from the cycle clock the node publishes,
+      so it wakes once per need, phase-locked to the cycle, not on a free-running timer. A resampler, when one is
+      needed, runs at a fixed ratio: the application runs on JackBus's clock, so nothing drifts.
+    </p>
+  </div>
+
+  <h3 style="margin-top:34px">The direct route first, then resampling</h3>
+  <p>
+    Every shim offers JackBus's own rate first, so an application that can use it takes the <b>direct route</b>: no
+    conversion of rate, no added delay. jackbus-pw negotiates in two passes, any format the stream offers at JackBus's
+    rate before anything else, and provides the <code>RateMatch</code> io area and the <code>Latency</code> parameter
+    applications wait for; jackbus-pa presents JackBus's rate as the server's and every device's, so applications that
+    open at the server's rate (the browsers) take the direct route; jackbus-alsa offers it as the rate. Only an
+    application that insists on another rate (a 44.1 kHz file played as it is, a game with a fixed rate) is
+    <b>resampled</b>, by JackBus's bridge resampler (§15) in the node's realtime thread, realtime-safe, at a fixed
+    ratio: a fallback, on by default, chosen per shim (<code>resample</code>), at the quality chosen
+    (<code>resample-quality</code>: 32, 56 or 96 taps). With resampling off, jackbus-pw and jackbus-pa refuse such a
+    stream with the reason, and jackbus-alsa offers JackBus's rate only, as a card at a fixed rate does.
+  </p>
+
+  <div class="tablebox">
+    <table>
+      <tr><th>Shim</th><th>Takes the place of</th><th>Loaded how</th><th>In the cycle</th><th>While JackBus isn't running</th></tr>
+      <tr><td><b>jackbus-pw</b></td><td><code>libpipewire-0.3.so.0</code>: <code>pw_filter</code>, <code>pw_stream</code>, the core, registry, metadata, link factory, the data loop</td><td><code>jackbus-pw &lt;program&gt;</code> (its library path); one application at a time</td><td>a filter's process (in the JACK thread); a stream's buffer, or one cycle of its ring</td><td>the application can't connect (it was started for JackBus)</td></tr>
+      <tr><td><b>jackbus-pa</b></td><td><code>libpulse.so.0</code>: main loops, context, operations, introspection, streams; all 378 functions exported</td><td>the package's <code>/etc/ld.so.conf.d/jackbus-pa.conf</code>: every program loading libpulse gets the dispatcher; <code>jackbus-pa &lt;program&gt;</code> forces JackBus</td><td>one cycle of each stream's ring</td><td>PulseAudio's own libpulse: PipeWire's PulseAudio server, as without the shim</td></tr>
+      <tr><td><b>jackbus-alsa</b></td><td>an ALSA plugin (<code>libasound_module_pcm_jackbus.so</code>), the <code>jackbus</code> PCM</td><td><code>-D jackbus</code>, or ALSA's default device (PatchBox writes <code>pcm.!default</code>)</td><td>one cycle of the application's mmap buffer</td><td>its <code>fallback</code> PCM (<code>pipewire</code>, the card), else an error</td></tr>
+    </table>
+  </div>
+
+  <h3 style="margin-top:34px">jackbus-pw: PipeWire's client library on JackBus</h3>
+  <p>
+    The library implements the client side of <code>libpipewire-0.3</code> and none of its server: a core whose
+    replies are a deferred, in-order work queue; registry globals for <b>JACK's whole graph</b> (every client a Node,
+    every port a Port, every connection a Link, with stable ids; JackBus's physical clients as the devices
+    <code>jackbus.&lt;client&gt;.playback|capture</code>, the settings' output and input the defaults in the
+    <code>default</code> metadata); the link factory, whose links are <code>jack_connect()</code> calls removed with
+    their proxy unless they linger; and a data loop whose invokes run in the JACK thread at the start of the cycle
+    (64 lock-free slots). All the filters and streams of one application are one node: the first member's ports keep
+    their names, later members with another <code>node.name</code> get <code>&lt;node&gt;/&lt;port&gt;</code>.
+    MIDI ports carry 8-bit raw MIDI or UMP. A stream with <code>target.object</code> connects to that client's
+    ports, otherwise (with autoconnect) to the output or input device.
+  </p>
+
+  <h3 style="margin-top:34px">jackbus-pa: libpulse, and who gets it</h3>
+  <p>
+    The client API is JackBus's own: <code>pa_mainloop</code> and <code>pa_threaded_mainloop</code>, the context's
+    states through to <code>READY</code> on the application's main loop, operations delivered by deferred events,
+    buffer attributes as libpulse defines them (the device's latency subtracted under
+    <code>ADJUST_LATENCY</code>; an optional cap per stream, <code>max-latency</code>), timing info and
+    interpolation, sink-input and source-output volume and mute applied to the samples. The rest of libpulse's API
+    (sample specs, channel maps, volumes, property lists, formats) is PulseAudio's own <code>libpulsecommon</code>,
+    which the library links. The devices are JackBus's cards: a sink per JACK client with physical playback ports, a
+    source per client with capture ports, the settings' output and input the defaults. What a PulseAudio server has
+    and JackBus doesn't answers as a server without it would: no cards or modules, an empty sample cache (playing a
+    cached sample fails, so libcanberra plays the sound as a stream), stream-restore present and empty, device-manager
+    absent. There is no central server: each process knows its own streams, so a volume control lists its own.
+  </p>
+
+  <div class="figure">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" role="img" aria-label="The libpulse dispatcher: how a program loading libpulse is sent to JackBus or to PulseAudio's own library">
+<rect x="20" y="20" width="1160" height="430" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">THE DISPATCHER · /usr/lib/jackbus-pa/libpulse.so.0 · DECIDED ONCE, AS THE PROGRAM STARTS</text>
+<rect x="40" y="70" width="300" height="96" rx="12" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="56" y="96" class="t-chip">a program loads libpulse.so.0</text>
+<text x="56" y="116" class="t-sub">the dynamic linker finds it first:</text>
+<text x="56" y="134" class="t-mono">/etc/ld.so.conf.d/jackbus-pa.conf</text>
+<text x="56" y="154" class="t-sub">whatever library path it was given</text>
+<path class="flow ctrl" d="M 340 118 H 380"/>
+<rect x="380" y="70" width="380" height="96" rx="12" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="396" y="96" class="t-chip">378 entry points: jmp *table[i]</text>
+<text x="396" y="116" class="t-sub">trampolines generated from PulseAudio's libpulse;</text>
+<text x="396" y="134" class="t-sub">the table filled by the library's constructor,</text>
+<text x="396" y="154" class="t-sub">before the program calls any of them</text>
+<path class="flow ctrl" d="M 570 166 V 196"/>
+<rect x="40" y="196" width="250" height="72" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="54" y="220" class="t-chip">JACKBUS_PA_MODE?</text>
+<text x="54" y="240" class="t-chipsub">jackbus (the launcher) · pulse</text>
+<text x="54" y="258" class="t-chipsub">survives a replaced library path</text>
+<rect x="320" y="196" width="250" height="72" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="334" y="220" class="t-chip">a PipeWire daemon?</text>
+<text x="334" y="240" class="t-chipsub">pipewire, wireplumber:</text>
+<text x="334" y="258" class="t-chipsub">always PulseAudio's</text>
+<rect x="600" y="196" width="250" height="72" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="614" y="220" class="t-chip">pulse = yes?</text>
+<text x="614" y="240" class="t-chipsub">the user's setting (PatchBox),</text>
+<text x="614" y="258" class="t-chipsub">off by default</text>
+<rect x="880" y="196" width="280" height="72" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="894" y="220" class="t-chip">JackBus's socket there?</text>
+<text x="894" y="240" class="t-chipsub">$XDG_RUNTIME_DIR/jackbus/&lt;server&gt;</text>
+<text x="894" y="258" class="t-chipsub">a stat: libjack prints nothing</text>
+<path class="flow ctrl" d="M 290 232 H 320"/>
+<path class="flow ctrl" d="M 570 232 H 600"/>
+<path class="flow ctrl" d="M 850 232 H 880"/>
+<path class="flow audio" d="M 1020 268 V 306"/>
+<path class="flow audio" d="M 445 268 V 290 H 300 V 306"/>
+<rect x="40" y="306" width="520" height="122" rx="12" fill="rgba(74,222,128,0.06)" stroke="#4ade80"/>
+<text x="56" y="332" class="t-band">PULSEAUDIO'S LIBPULSE</text>
+<text x="56" y="356" class="t-mono">/usr/lib/libpulse.so.0</text>
+<text x="56" y="378" class="t-sub">PipeWire's PulseAudio server plays it: as without the shim</text>
+<text x="56" y="398" class="t-sub">(the setting off · JackBus not running · a PipeWire daemon ·</text>
+<text x="56" y="416" class="t-sub">JackBus's library failed to load)</text>
+<rect x="640" y="306" width="520" height="122" rx="12" fill="rgba(45,212,191,0.07)" stroke="#2dd4bf"/>
+<text x="656" y="332" class="t-band">JACKBUS'S LIBPULSE</text>
+<text x="656" y="356" class="t-mono">libjackbus-pa.so + libpulsecommon</text>
+<text x="656" y="378" class="t-sub">the program's streams: ports of one JACK client</text>
+<text x="656" y="398" class="t-ok">functions found in the libraries' own symbol tables,</text>
+<text x="656" y="416" class="t-ok">not with dlsym (a program may interpose it)</text>
+</svg>
+    <p class="caption">
+      <b>Every program, decided once.</b> The package puts <code>/usr/lib/jackbus-pa</code> in the dynamic linker's
+      configuration, so the dispatcher reaches programs whose launchers replace the library path (a browser's helper,
+      a conferencing client's media process) as well as the rest. Each of the 378 functions is a jump through a table
+      that the constructor fills from one implementation for the life of the process. With the setting off it is
+      PulseAudio's own library, and nothing changes; with it on, JackBus's while JackBus runs, PulseAudio's (PipeWire)
+      while it doesn't. The functions are looked up in the chosen libraries' own ELF symbol tables (GNU hash, default
+      versions), never through <code>dlsym</code>: a program that interposes <code>dlsym</code> to hand back wrappers
+      of its own, which then call "the real function" through libpulse, would otherwise send the dispatcher's table
+      back into its wrappers, a loop. A program started before JackBus stays on PipeWire until it is restarted.
+    </p>
+  </div>
+
+  <h3 style="margin-top:34px">jackbus-alsa: the jackbus device</h3>
+  <p>
+    An external ALSA plugin (ioplug) whose ring is the application's own buffer: <code>pointer</code> returns the
+    position in JackBus's frames, <code>delay</code> the buffer's fill plus the ports' latency (and what a resampler
+    holds), an xrun is <code>EPIPE</code> as on a card, and the poll descriptors are the node's timer and event fd.
+    <code>50-jackbus.conf</code> defines <code>pcm.jackbus</code> with the options <code>NAME</code>,
+    <code>SERVER</code>, <code>AUTOCONNECT</code> and <code>FALLBACK</code>. With a fallback, the device opens that
+    PCM instead while JackBus isn't running (its socket checked first, so libjack prints nothing), or when its socket
+    is there and the server isn't; a fallback that leads back to the device fails instead of looping. PatchBox's
+    switch makes it ALSA's default device for the user: <code>pcm.!default { type jackbus fallback "pipewire" }</code>.
+  </p>
+
+  <h3 style="margin-top:34px">Settings</h3>
+  <p>
+    One file of <code>key = value</code> lines, <code>~/.config/jackbus/compat.conf</code> (then
+    <code>/etc/jackbus/compat.conf</code>), read as a stream is set up, never in a realtime thread. Each shim reads
+    its own key first, <code>pw.</code>, <code>pa.</code> or <code>alsa.</code> followed by the key, then the shared
+    key; an environment variable of each shim overrides both (<code>JACKBUS_PA_RESAMPLE=0</code>, and so on).
+    PatchBox's Shims tab writes them, a section per kind of application.
+  </p>
+  <div class="tablebox">
+    <table>
+      <tr><th>Key</th><th>Default</th><th>Meaning</th></tr>
+      <tr><td><code>resample</code></td><td>yes</td><td>a stream at another rate is resampled, after the direct route was looked for; no: refused (PipeWire, PulseAudio) or JackBus's rate only (ALSA)</td></tr>
+      <tr><td><code>resample-quality</code></td><td>normal</td><td>low, normal or high: the bridge resampler's 32, 56 or 96 taps</td></tr>
+      <tr><td><code>autoconnect</code></td><td>yes</td><td>a new stream's ports go to the output (input) device</td></tr>
+      <tr><td><code>output</code>, <code>input</code></td><td>the first card (<code>system</code>)</td><td>the JACK client new streams go to: <code>system</code> or a bridged card; PulseAudio's and PipeWire's default devices</td></tr>
+      <tr><td><code>pa.max-latency</code></td><td>0</td><td>ms: the most a PulseAudio stream queues in the shim beyond the device's latency, never below two cycles; 0: what it asks for</td></tr>
+      <tr><td><code>pulse</code></td><td>no</td><td>yes: PulseAudio applications use JackBus while it runs (the dispatcher)</td></tr>
+    </table>
+  </div>
+
+  <h3 style="margin-top:34px">PipeWire beside JackBus</h3>
+  <p>
+    PipeWire stays for what it does best, video and screen sharing, and plays audio while JackBus isn't running. While
+    JackBus runs it can be left without audio work: PatchBox's "PipeWire leaves audio to JackBus" writes a PipeWire
+    drop-in setting <code>module.jackdbus-detect = false</code>, so PipeWire's JACK bridge isn't loaded. Without the
+    shims, the bridge was the way a desktop's audio reached JackBus, and its cost was in every cycle.
+  </p>
+
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" role="img" aria-label="A browser's audio before and after the shims: through PipeWire's graph and its JACK bridge, or straight to its own JACK client">
+<rect x="20" y="20" width="1160" height="340" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">A BROWSER'S AUDIO · THROUGH PIPEWIRE'S JACK BRIDGE, OR STRAIGHT TO JACKBUS</text>
+<text x="40" y="84" class="t-tiny">WITH THE BRIDGE</text>
+<rect x="40" y="94" width="190" height="60" rx="10" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="54" y="118" class="t-chip">Firefox</text>
+<text x="54" y="138" class="t-chipsub">libpulse → a socket</text>
+<rect x="270" y="94" width="190" height="60" rx="10" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="284" y="118" class="t-chip">pipewire-pulse</text>
+<text x="284" y="138" class="t-chipsub">PulseAudio's protocol</text>
+<rect x="500" y="94" width="230" height="60" rx="10" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="514" y="118" class="t-chip">PipeWire's graph</text>
+<text x="514" y="138" class="t-chipsub">its nodes, mixing, resampling</text>
+<rect x="770" y="94" width="210" height="60" rx="10" fill="#1b2246" stroke="#fbbf24"/>
+<text x="784" y="118" class="t-chip">JACK client "PipeWire"</text>
+<text x="784" y="138" class="t-chipsub">runs that graph each cycle</text>
+<rect x="1020" y="94" width="140" height="60" rx="10" fill="rgba(74,222,128,0.07)" stroke="#4ade80"/>
+<text x="1034" y="118" class="t-chip">system</text>
+<text x="1034" y="138" class="t-chipsub">playback</text>
+<path class="flow audio" d="M 230 124 H 270"/>
+<path class="flow audio" d="M 460 124 H 500"/>
+<path class="flow audio" d="M 730 124 H 770"/>
+<path class="flow audio" d="M 980 124 H 1020"/>
+<text x="770" y="178" class="t-bad">JackBus's cycle waits for PipeWire's graph:</text>
+<text x="770" y="196" class="t-bad">a wakeup to PipeWire and back, each cycle</text>
+<text x="40" y="236" class="t-tiny">WITH THE SHIMS</text>
+<rect x="40" y="246" width="190" height="60" rx="10" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="54" y="270" class="t-chip">Firefox</text>
+<text x="54" y="290" class="t-chipsub">libpulse → jackbus-pa</text>
+<rect x="270" y="246" width="460" height="60" rx="10" fill="rgba(45,212,191,0.07)" stroke="#2dd4bf"/>
+<text x="284" y="270" class="t-chip">JACK client "Firefox" · FL FR</text>
+<text x="284" y="290" class="t-chipsub">one cycle from its ring: a copy, no system call</text>
+<rect x="1020" y="246" width="140" height="60" rx="10" fill="rgba(74,222,128,0.07)" stroke="#4ade80"/>
+<text x="1034" y="270" class="t-chip">system</text>
+<text x="1034" y="290" class="t-chipsub">playback</text>
+<path class="flow audio" d="M 230 276 H 270"/>
+<path class="flow audio" d="M 730 276 H 1020"/>
+<text x="620" y="330" class="t-ok">PipeWire: video, screen sharing; audio while JackBus isn't running</text>
+</svg>
+    <p class="caption">
+      <b>One graph in the cycle.</b> Through the bridge, every cycle of JackBus's ran PipeWire's whole graph inside it,
+      with a wakeup to PipeWire's process and back. Through a shim the browser is a client of its own and the cycle
+      does one copy for it; the browser's decoding and mixing were outside the cycle either way. Applications only
+      PipeWire plays (Flatpaks, PipeWire applications not run through jackbus-pw) are silent while JackBus runs with
+      the bridge off.
+    </p>
+  </div>
+
+  <h3 style="margin-top:34px">Tested with real applications</h3>
+  <p>
+    Each shim has a suite run on an isolated JackBus (private namespaces, <code>/dev/shm</code> and runtime directory,
+    the dummy driver, settings of its own via <code>JACKBUS_COMPAT_CONF</code>, §22), recording each
+    application's ports and checking a continuous 440 Hz sine:
+  </p>
+  <ul>
+    <li><b>jackbus-pw</b>: PipeWire's examples on JackBus at 44.1, 48 and 96 kHz (filters, two filters in one client, a stream offering
+      44.1 kHz only, capture); <code>pw-play</code>, <code>pw-record</code>, <code>pw-midiplay</code>, a MIDI <code>pw_filter</code>
+      with a data-loop invoke, mpv, SDL3, OpenAL, fluidsynth, the registry and link factory, ossia score's PipeWire
+      engine; resampling, the output setting; each realtime thread traced: no system call but futex.</li>
+    <li><b>jackbus-pa</b>: <code>paplay</code> direct, resampled and refused, <code>parecord</code>, mpv,
+      SDL3's PulseAudio backend, <code>pactl</code>'s introspection, Chrome and Firefox headless with their sandboxes
+      on (through the dispatcher and the setting, no launcher); the dispatcher's decisions; a program interposing
+      <code>dlsym</code>; the settings (per-shim keys, output device, the buffering cap, resampler quality); every
+      installed program and library linking libpulse finds all its functions; the realtime thread traced.</li>
+    <li><b>jackbus-alsa</b>: <code>aplay</code> in S16, S32 and float, 44.1 kHz resampled (JackBus's rate only with resampling off),
+      <code>arecord</code>, sample-accurate timing (frames played against JACK's frame time within a cycle), an
+      application stalling (one <code>EPIPE</code>, then on), killed (its client gone), the fallback device, the output
+      setting; the realtime thread traced.</li>
+  </ul>
+
+  <h3 style="margin-top:34px">Limits</h3>
+  <ul>
+    <li>PulseAudio's monitor sources (a recording of what a sink plays: OBS's "Desktop Audio") aren't there; a JACK
+      input does that in JackBus.</li>
+    <li>No central PulseAudio server: a volume control sees its own process's streams, device volumes are accepted and
+      not applied (levels are set in the graph).</li>
+    <li>The choice is made as a program starts: one started before JackBus keeps PipeWire until it restarts.</li>
+    <li>Flatpak and other sandboxed runtimes bring their own libraries: they stay on PipeWire. Bluetooth audio is
+      PipeWire's.</li>
+  </ul>
+</section>
+
+<!-- ============================================================ 14. jackdbus, PipeWire, the card -->
+<section id="s14">
+  <h2><span class="num">14</span>jackdbus, PipeWire and the card</h2>
   <p class="sub">
     <code>jackdbus</code> is the JACK server packaged as a D-Bus service: the session bus starts it on the first call
     to <code>org.jackaudio.service</code>, it keeps its settings in <code>~/.config/jack/conf.xml</code>, and it owns
-    the card through the desktop's device-reservation protocol. In the set-up it's built for, PipeWire runs on top of
-    it as an ordinary JACK client, carrying the PulseAudio and ALSA applications.
+    the card through the desktop's device-reservation protocol. PipeWire can run on top of it as an ordinary JACK
+    client, its JACK bridge carrying the PulseAudio and ALSA applications, as in the figure. With JackBus's shims
+    (§13) those applications reach JackBus directly instead, each a client of its own, and PipeWire, its bridge left
+    out, keeps video and screen sharing and plays audio only while JackBus isn't running.
   </p>
   <div class="figure">
     <div class="controls"><button class="toggle" type="button" data-play>Pause</button> <button class="toggle" type="button" data-replay>Replay</button></div>
@@ -2229,7 +3234,7 @@ pre.code .s { color: var(--amber); }
       practical consequences surfaced during this work: a JACK start right after PipeWire took the card can find the PCM
       still open for a moment ("device busy", a retry starts it; stock 1.9.22 behaves the same), and anything muted on
       the card while JACK was stopped gets un-muted by WirePlumber, which the hardware test harness now guards against
-      (§19).
+      (§22).
     </p>
     <p class="caption">
       <b>Engine parameters through D-Bus.</b> Everything settable on <code>jackd</code>'s command line is an engine or
@@ -2241,8 +3246,8 @@ pre.code .s { color: var(--amber); }
       <b>For session managers and monitors.</b> Four calls were added for tools around the server, all through
       libjackserver's control API (<code>common/JackControlNspa.h</code>), none in libjack. A session manager that is
       about to stop an application asks first, by client name or by the pid it started, and the application's clients
-      leave the graph before the signal (§13). A monitor reads, per client, the cycles it ran late and its longest
-      cycle (§14). An older jackdbus answers <code>UnknownMethod</code>, and a tool carries on as before.
+      leave the graph before the signal (§16). A monitor reads, per client, the cycles it ran late and its longest
+      cycle (§17). An older jackdbus answers <code>UnknownMethod</code>, and a tool carries on as before.
     </p>
   </div>
 
@@ -2256,8 +3261,8 @@ pre.code .s { color: var(--amber); }
       <tr><td>Control operations (C20)</td><td>buffer size / freewheel / switch master unserialized between D-Bus and request threads</td><td><span class="better">control mutex (never taken on the RT thread)</span></td></tr>
       <tr><td>Device reservation with ≥ 3 cards (C18)</td><td>slot bookkeeping out of bounds</td><td><span class="better">free-slot search with bounds</span></td></tr>
       <tr><td>Log file (R13)</td><td>opened and stat'ed per line from ~5 threads, unlocked; grows forever (274 MB seen)</td><td><span class="better">serialized writes · past <code>log-max-size</code> (4 MiB) moved to <code>jackdbus.log.1</code> · <code>log-level</code> off / errors / server (default) / all</span></td></tr>
-      <tr><td>Stopping an application from a session manager</td><td>killed in the graph: the cycle it is due in waits for it; with a stock libjack, or killed mid-callback, the graph stalls until it is found</td><td><span class="better"><code>DetachClient</code> / <code>DetachProcess</code>: out of the graph first, 0 xruns with any libjack (§13)</span></td></tr>
-      <tr><td>Which client runs late, and how close each runs to its deadline</td><td>only the xrun log line</td><td><span class="better"><code>GetClientTimings</code> / <code>ResetClientTimings</code> (§14)</span></td></tr>
+      <tr><td>Stopping an application from a session manager</td><td>killed in the graph: the cycle it is due in waits for it; with a stock libjack, or killed mid-callback, the graph stalls until it is found</td><td><span class="better"><code>DetachClient</code> / <code>DetachProcess</code>: out of the graph first, 0 xruns with any libjack (§16)</span></td></tr>
+      <tr><td>Which client runs late, and how close each runs to its deadline</td><td>only the xrun log line</td><td><span class="better"><code>GetClientTimings</code> / <code>ResetClientTimings</code> (§17)</span></td></tr>
       <tr><td>PM QoS</td><td>external helper only</td><td><span class="better">engine parameter <code>cpu-dma-latency</code>; effective value 8000 → 0 µs while running</span></td></tr>
       <tr><td>A sound card plugged in or removed</td><td>the ALSA device list is read once, at start: a USB interface plugged in later is not offered until jackdbus restarts</td><td><span class="better"><code>/dev/snd</code> watched from the main loop; about a second after a change (once the card's nodes are usable) the list is read again and <code>Configure.ConstraintsChanged</code> sent · no new thread, nothing on the RT path</span></td></tr>
     </table>
@@ -2382,7 +3387,7 @@ pre.code .s { color: var(--amber); }
     <i>count</i> even when it was taken, never freed one, and counted down for names it didn't hold. Both jackd's and
     jackdbus's tables now hold twenty, reuse free slots, are locked (the bridge monitor reserves from its own thread),
     and count a name asked for twice: a bridge on another device of the master's card shares the master's
-    reservation, and removing it no longer releases the master's. Each sound card bridge (§12) reserves its card the
+    reservation, and removing it no longer releases the master's. Each sound card bridge (§15) reserves its card the
     same way, keeps the reservation while the card is unplugged, and moves it if the card comes back under another
     index; jackdbus lists, adds and removes bridges (<code>bridges</code>, <code>AddBridge</code>,
     <code>RemoveBridge</code>, <code>GetBridges</code>), and its <code>/dev/snd</code> watch bridges a listed card the
@@ -2391,9 +3396,9 @@ pre.code .s { color: var(--amber); }
 </section>
 
 
-<!-- ============================================================ 12. sound card bridges -->
-<section id="s12">
-  <h2><span class="num">12</span>Sound card bridges</h2>
+<!-- ============================================================ 15. sound card bridges -->
+<section id="s15">
+  <h2><span class="num">15</span>Sound card bridges</h2>
   <p class="sub">
     A second sound card runs on its own crystal, and two crystals never agree: a few parts per million apart, the
     cards drift by a frame every few seconds. JACK2 offered a slave driver, which needs the second card clocked by the
@@ -2426,10 +3431,10 @@ pre.code .s { color: var(--amber); }
 <text x="60" y="86" class="t-band">MASTER DRIVER THREAD · RT</text>
 <rect x="56" y="100" width="220" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
 <text x="68" y="119" class="t-chip">Write</text>
-<text x="68" y="135" class="t-chipsub">the bridges' playback (last cycle's)</text>
+<text x="68" y="135" class="t-chipsub">the bridges copy what they play</text>
 <rect x="290" y="100" width="220" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
-<text x="302" y="119" class="t-chip">graph starts</text>
-<text x="302" y="135" class="t-chipsub">the bridges' capture, then readers</text>
+<text x="302" y="119" class="t-chip">clients woken</text>
+<text x="302" y="135" class="t-chipsub">then capture, readers, resampling</text>
 <rect x="524" y="100" width="222" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
 <text x="536" y="119" class="t-chip">cycle start t</text>
 <text x="536" y="135" class="t-chipsub">frame timer → the raw clock</text>
@@ -2510,10 +3515,12 @@ pre.code .s { color: var(--amber); }
 <text x="60" y="656" class="t-sub">Device reservation Audio&lt;n&gt;: held while unplugged, moved if the card returns under another index · xruns, underruns, missed frames: at most once a minute</text>
 </svg>
     <p class="caption">
-      <b>Two threads, no waiting.</b> The master runs every bridge from its own thread, at two points of the cycle that
-      match its own ports: playback right after its own Write, from the previous cycle's port buffers (as
-      <code>system:playback</code> in asynchronous mode), and capture once the graph has started, which fills the
-      bridge's ports and signals the clients that read them. Neither ever waits on the card: if the card side is late,
+      <b>Two threads, no waiting.</b> The master runs every bridge from its own thread, at two points of its cycle.
+      Right after its own Write, each bridge takes what it will play &mdash; the previous cycle's port buffers, as
+      <code>system:playback</code> in asynchronous mode &mdash; into memory of its own: a copy, nothing resampled yet.
+      Once the first clients have been woken, each bridge fills its capture ports and signals the clients that read
+      them, then resamples what it took for its card: the resampling runs while the clients run (the next figure).
+      Neither side ever waits on the card: if the card side is late,
       the graph side fades out and places its delay again; if the graph side is late, the card side plays silence for
       positions nothing was placed for. The card has a thread of its own, at the server's priority minus one, that
       wakes on the card's interrupts (with a timer behind them, §8) and moves frames between ALSA and the FIFOs.
@@ -2532,6 +3539,72 @@ pre.code .s { color: var(--amber); }
       loop has nothing to wind up. It acquires wide (1&nbsp;Hz for 4&nbsp;s), then locks narrow (0.05&nbsp;Hz). A delay
       error beyond half a master cycle is not drift but a break (a master xrun, a card restart): the delay is placed
       again at once, by moving the read point, with a 5&nbsp;ms fade.
+    </p>
+  </div>
+
+  <div class="figure">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380" role="img" aria-label="The master's cycle with a bridge: where the bridge's resampling ran, and where it runs now">
+<rect x="20" y="20" width="1160" height="340" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">THE MASTER'S CYCLE WITH A BRIDGE · WHERE ITS RESAMPLING RUNS · BEFORE AND NOW · NOT TO SCALE</text>
+<text x="40" y="86" class="t-tiny" style="fill:#fcd34d">BEFORE</text>
+<text x="40" y="100" class="t-tiny">MASTER THREAD</text>
+<rect x="150" y="62" width="1010" height="52" rx="10" fill="rgba(139,143,245,0.05)" stroke="#33397a"/>
+<rect x="160" y="68" width="96" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="170" y="85" class="t-chip">Read · Write</text><text x="170" y="100" class="t-chipsub">its own card</text>
+<rect x="262" y="68" width="170" height="40" rx="9" fill="rgba(251,191,36,0.10)" stroke="#fbbf24"/>
+<text x="272" y="85" class="t-chip">bridges' playback</text><text x="272" y="100" class="t-chipsub">resampled, nobody woken yet</text>
+<rect x="438" y="68" width="118" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="448" y="85" class="t-chip">Engine::Process</text><text x="448" y="100" class="t-chipsub">the graph switch</text>
+<rect x="562" y="68" width="82" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="572" y="85" class="t-chip">resume</text><text x="572" y="100" class="t-chipsub">its own ports</text>
+<rect x="650" y="68" width="170" height="40" rx="9" fill="rgba(251,191,36,0.10)" stroke="#fbbf24"/>
+<text x="660" y="85" class="t-chip">bridges' capture</text><text x="660" y="100" class="t-chipsub">resampled, readers signalled</text>
+<rect x="826" y="68" width="164" height="40" rx="9" fill="rgba(139,143,245,0.16)" stroke="#8b8ff5"/>
+<text x="836" y="85" class="t-chip">slaves' resume</text><text x="836" y="100" class="t-chipsub">the first clients woken</text>
+<text x="40" y="141" class="t-tiny">CLIENTS</text>
+<rect x="150" y="120" width="1010" height="34" rx="10" fill="rgba(45,212,191,0.045)" stroke="#24605b"/>
+<rect x="996" y="126" width="158" height="22" rx="6" fill="rgba(45,212,191,0.16)" stroke="#2dd4bf"/>
+<text x="1006" y="141" class="t-chipsub">every client, after both</text>
+<line x1="996" y1="60" x2="996" y2="156" stroke="#fb7185" stroke-width="1.4" stroke-dasharray="3 3"/>
+<text x="40" y="210" class="t-tiny" style="fill:#86efac">NOW</text>
+<text x="40" y="224" class="t-tiny">MASTER THREAD</text>
+<rect x="150" y="186" width="1010" height="52" rx="10" fill="rgba(139,143,245,0.05)" stroke="#33397a"/>
+<rect x="160" y="192" width="96" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="170" y="209" class="t-chip">Read · Write</text><text x="170" y="224" class="t-chipsub">its own card</text>
+<rect x="262" y="192" width="110" height="40" rx="9" fill="rgba(45,212,191,0.10)" stroke="#2dd4bf"/>
+<text x="272" y="209" class="t-chip">take playback</text><text x="272" y="224" class="t-chipsub">a copy</text>
+<rect x="378" y="192" width="118" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="388" y="209" class="t-chip">Engine::Process</text><text x="388" y="224" class="t-chipsub">the graph switch</text>
+<rect x="502" y="192" width="82" height="40" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="512" y="209" class="t-chip">resume</text><text x="512" y="224" class="t-chipsub">its own ports</text>
+<rect x="590" y="192" width="164" height="40" rx="9" fill="rgba(139,143,245,0.16)" stroke="#8b8ff5"/>
+<text x="600" y="209" class="t-chip">slaves' resume</text><text x="600" y="224" class="t-chipsub">the first clients woken</text>
+<rect x="760" y="192" width="190" height="40" rx="9" fill="rgba(251,191,36,0.10)" stroke="#fbbf24"/>
+<text x="770" y="209" class="t-chip">bridges' capture</text><text x="770" y="224" class="t-chipsub">resampled, readers signalled</text>
+<rect x="956" y="192" width="196" height="40" rx="9" fill="rgba(251,191,36,0.10)" stroke="#fbbf24"/>
+<text x="966" y="209" class="t-chip">bridges' playback</text><text x="966" y="224" class="t-chipsub">resampled from the copy</text>
+<text x="40" y="275" class="t-tiny">CLIENTS</text>
+<rect x="150" y="244" width="1010" height="54" rx="10" fill="rgba(45,212,191,0.045)" stroke="#24605b"/>
+<rect x="760" y="249" width="394" height="20" rx="6" fill="rgba(45,212,191,0.16)" stroke="#2dd4bf"/>
+<text x="770" y="263" class="t-chipsub">the clients run while the bridges resample</text>
+<rect x="956" y="273" width="198" height="20" rx="6" fill="rgba(45,212,191,0.10)" stroke="#2dd4bf" stroke-dasharray="3 3"/>
+<text x="966" y="287" class="t-chipsub">the bridges' readers, once signalled</text>
+<line x1="760" y1="184" x2="760" y2="300" stroke="#4ade80" stroke-width="1.4" stroke-dasharray="3 3"/>
+<text x="40" y="326" class="t-ok">the first client's start, snd-aloop (32 in, 32 out), 18 configurations: 18–71 µs → 5.4–14.5 µs · lower in 54 of 54 pairs</text>
+<text x="40" y="346" class="t-sub">what every client used to wait for, there: 12, 35 and 55 µs of resampling per cycle at 32, 64 and 128 frames</text>
+</svg>
+    <p class="caption">
+      <b>Off the wake path.</b> The first clients of a cycle are woken at the slaves' resume, the freewheel driver's,
+      which every client waits for. The bridges used to resample before it: a bridge's playback right after the
+      master's Write, its capture after the master's own resume. Every client in the graph, bridged or not, started
+      the whole resampling time late. Now the bridge only copies before the graph runs (the mix of what is connected
+      to each playback port; one connection is the other client's own buffer, which that client writes again once
+      woken; nothing connected is silence, as the cleared port buffer was), and after the slaves' resume it fills its
+      capture ports, signals their readers, then resamples what it took. With <code>-S</code> this comes before the
+      slaves' write, where the master waits for the graph's end, which needs the bridges' readers signalled; a sync
+      cycle that does not run the graph (the last one unfinished) still plays what it took. The same input reaches the
+      same playback code, capture's timing is the cycle's start as before, and nothing changes for clients, shared
+      memory or the protocol. The cycle trace marks the playback where it now runs (§20).
     </p>
   </div>
 
@@ -2776,6 +3849,9 @@ pre.code .s { color: var(--amber); }
       <tr><td>Through jackdbus: buffer size 128 / 512 / 256, then 44.1 kHz and back</td><td>relocked in 3.1 s per buffer change, 4.05 s per rate change · both cards reopened at 44 100 Hz · 0 client xruns, no silent second</td></tr>
       <tr><td>Resampler, quality 1 (the default, about zita's)</td><td>143 dB SNR at 1 kHz, 131 dB at 20 kHz · a 64-channel bridge: 1.9 % DSP at 256 frames</td></tr>
       <tr><td>Simulation, 10 scenarios (drift, steps, xruns, a card gone, master skips, 44.1 / 16 kHz cards)</td><td>lock in ≤ 1.3 s · steady delay error σ ≤ 0.02 frames · 0 underruns · tuned 1.2–1.9 ms lower</td></tr>
+      <tr><td>The resampling while the clients run, A/B in the engine (§20): a dummy master at 32 / 64 / 128 frames × <code>cpu-dma-latency</code> off / 1 / 0 × a 16-client chain or an 8-client fan-out, plus 2 clients on the bridged card; interleaved, shuffled</td><td>snd-aloop (32 in, 32 out), 3 runs each: the first client's start <span class="better">18–71 → 5.4–14.5 µs</span> (lower in 54 of 54 pairs), the last client's end 37.6–186 → 25.2–144 µs (52 of 54), the bridge's readers' start 20.4–85.5 → 16.5–66.4 µs (50 of 54) · U-44 + headset, 2 runs each: the first client's start 11.5–46.6 → 7.6–19.3 µs (35 of 36) · no bridge: equal</td></tr>
+      <tr><td>The cards meanwhile, both builds</td><td>snd-aloop: no card xrun, capture underrun or missed playback frame in 90 + 90 runs · USB: the occasional missed playback frames and the locked playback delays equal</td></tr>
+      <tr><td>Sync mode, a bridge, a client late by longer than the master waits for the graph (<code>sync-late.sh</code>, 10 times)</td><td>the bridge stays locked, its reader keeps running</td></tr>
     </table>
   </div>
   <div class="tablebox" style="margin-top:18px">
@@ -2787,14 +3863,15 @@ pre.code .s { color: var(--amber); }
       <tr><td>libjackserver (<code>JackControlNspa.h</code>)</td><td><code>jackctl_server_add_bridge_spec</code> · <code>jackctl_server_remove_bridge</code> · <code>jackctl_server_get_bridge_status</code></td></tr>
       <tr><td>PatchBox</td><td>Settings → Devices: a switch per card, its state, period, periods and wake-ups; a card switched off keeps its settings</td></tr>
       <tr><td>Duplex, capture or playback</td><td>duplex opens whichever the card has (a USB microphone, a USB DAC); another device of a card gets its number in its name (<code>PCH-3</code>)</td></tr>
+      <tr><td>A card with MIDI only</td><td>a USB keyboard or controller (<code>/proc/asound/cardN</code>: <code>midi0</code>, no <code>pcm</code> device) has no audio to bridge: <code>AddBridge</code> refuses it with that reason and leaves the list as it was; the ALSA driver's device list, the values jackdbus offers for <code>device</code>, names a card only once it has a PCM device; its MIDI ports come from a MIDI slave driver (<code>alsarawmidi</code>), as before</td></tr>
       <tr><td>The card's rate</td><td>the master's; a card that can't run at it runs at its own, resampled</td></tr>
     </table>
   </div>
 </section>
 
-<!-- ============================================================ 13. when a client dies -->
-<section id="s13">
-  <h2><span class="num">13</span>When a client dies</h2>
+<!-- ============================================================ 16. when a client dies -->
+<section id="s16">
+  <h2><span class="num">16</span>When a client dies</h2>
   <p class="sub">
     A client process can end at any moment &mdash; killed, crashed, closed by a session manager. Until the server takes
     it out of the graph, every cycle waits for it. 1.9.22 learned of a death only from the client's sockets closing,
@@ -3091,7 +4168,7 @@ pre.code .s { color: var(--amber); }
         <circle r="4.5" class="pkt req"><animateMotion dur="1.2s" begin="-0.6s" repeatCount="indefinite"><mpath xlink:href="#p12-proc"/></animateMotion></circle>
         <text x="40" y="320" class="t-ok">exiting or gone: detached at once, removed after the switch · a stock libjack's client killed: 1 xrun per kill</text>
         <text x="40" y="346" class="t-sub">a process whose main thread called pthread_exit() is not "exiting": only every thread of it counts · hidepid /proc: no lookup, the socket path remains</text>
-        <text x="40" y="372" class="t-sub">no timing heuristic: a slow or stuck client that is alive is never touched (hung clients: §21)</text>
+        <text x="40" y="372" class="t-sub">no timing heuristic: a slow or stuck client that is alive is never touched (hung clients: §24)</text>
       </g>
 
       <!-- ================= page 3: the socket ================= -->
@@ -3171,7 +4248,8 @@ pre.code .s { color: var(--amber); }
       kernel wakes it, and the notifier sleeps in <code>futex_waitv</code> on its own wake word and every watched slot
       at once. The file is the fork's one addition to <code>/dev/shm</code>, and optional on both sides: a stock
       libjack never opens it (its clients fall back to the next page), and a fork libjack facing a server without it
-      does without.
+      does without. A client of the JackBus socket receives the table as an fd and must hold its slot: its open fails
+      otherwise (§11), so a node is always found this way (§12).
     </p>
     <p class="caption pagecap">
       <b>/proc, for any libjack.</b> When the graph does not finish, the realtime thread does one relaxed store and,
@@ -3193,7 +4271,7 @@ pre.code .s { color: var(--amber); }
       an application can ask jackdbus to take its clients out of the graph before it stops it. That works with any
       libjack inside the application, and even when the application is killed in the middle of its callback &mdash;
       the one case the slot can't help a stock libjack with. The calls are described with the rest of the D-Bus
-      interface in §11.
+      interface in §14.
     </p>
   </div>
 
@@ -3219,9 +4297,9 @@ pre.code .s { color: var(--amber); }
 </section>
 
 
-<!-- ============================================================ 14. late clients -->
-<section id="s14">
-  <h2><span class="num">14</span>Late clients: catch up, report, count</h2>
+<!-- ============================================================ 17. late clients -->
+<section id="s17">
+  <h2><span class="num">17</span>Late clients: catch up, report, count</h2>
   <p class="sub">
     A client that overruns its period is alive and busy: nothing to remove. The fork keeps how JACK lets a late client
     catch up, reports each failing cycle once and names the client behind it, and counts per client how often, and by
@@ -3385,9 +4463,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 15. slow notification clients -->
-<section id="s15">
-  <h2><span class="num">15</span>Slow notification clients</h2>
+<!-- ============================================================ 18. slow notification clients -->
+<section id="s18">
+  <h2><span class="num">18</span>Slow notification clients</h2>
   <p class="sub">
     Notifications reach each client's notification thread over its own socket, and some of them wait for a reply.
     In 1.9.22 the request thread waited for each of those under the engine lock: one client that answered slowly
@@ -3483,12 +4561,12 @@ pre.code .s { color: var(--amber); }
 </section>
 
 
-<!-- ============================================================ 16. failure modes fixed -->
-<section id="s16">
-  <h2><span class="num">16</span>Failure modes fixed</h2>
+<!-- ============================================================ 19. failure modes fixed -->
+<section id="s19">
+  <h2><span class="num">19</span>Failure modes fixed</h2>
   <p class="sub">
-    Four failures that cross process boundaries, each reproduced against stock 1.9.22 before it was fixed. Step through
-    them with the arrows.
+    Five failures that cross process boundaries, each reproduced before it was fixed. Step through them with the
+    arrows.
   </p>
   <div class="figure" data-pager>
     <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 430" role="img" aria-label="Failure modes, one per page">
@@ -3619,6 +4697,44 @@ pre.code .s { color: var(--amber); }
         <text x="656" y="336" class="t-bad">built against 6.2: 0 / 4</text>
         <text x="656" y="360" class="t-ok">built against 5.3: 4 / 4</text>
       </g>
+      <!-- ================= page 5: C27 ================= -->
+      <g class="pageframe" data-name="C27 · a close that never returned">
+        <rect x="20" y="20" width="560" height="390" rx="18" fill="rgba(251,191,36,0.03)" stroke="#4a3d1a"/>
+        <text x="40" y="44" class="t-band">1.9.22 · A CLIENT CLOSES WHILE ONE IS ADDED</text>
+        <rect x="40" y="62" width="240" height="70" rx="12" fill="url(#g-ms)" stroke="#fbbf24"/>
+        <text x="160" y="90" text-anchor="middle" class="t-title">notification thread</text>
+        <text x="160" y="110" text-anchor="middle" class="t-sub">kAddClient: the new peer's futex</text>
+        <rect x="320" y="62" width="240" height="70" rx="12" fill="url(#g-ms)" stroke="#fbbf24"/>
+        <text x="440" y="90" text-anchor="middle" class="t-title">application thread</text>
+        <text x="440" y="110" text-anchor="middle" class="t-sub">jack_client_close(): cancels it</text>
+        <rect x="40" y="156" width="520" height="56" rx="12" fill="#161a36" stroke="#8a6a1c"/>
+        <text x="56" y="180" class="t-mono">JackGlobals::fSynchroMutex · one per process</text>
+        <text x="56" y="200" class="t-sub">held while Connect() shm_open()s the peer's futex file</text>
+        <path d="M160,132 L160,156 M440,132 L440,156" stroke="#6b7199" stroke-width="2" fill="none"/>
+        <rect x="40" y="232" width="520" height="56" rx="12" fill="#3a1220" stroke="#fb7185"/>
+        <text x="56" y="256" class="t-red">cancelled inside shm_open(), a cancellation point</text>
+        <text x="56" y="276" class="t-sub">the thread is gone; the mutex stays locked for good</text>
+        <text x="56" y="316" class="t-bad">the close then takes the same mutex: it never returns,</text>
+        <text x="56" y="336" class="t-bad">and so would any other client's in that process</text>
+        <text x="56" y="370" class="t-sub">start-race.sh: a server starting with two bridges while 8 processes</text>
+        <text x="56" y="388" class="t-sub">open and close clients · 79 clients hung in 20 starts</text>
+        <rect x="620" y="20" width="560" height="390" rx="18" fill="rgba(91,95,199,0.06)" stroke="#5b5fc7"/>
+        <text x="640" y="44" class="t-band" style="fill:#b3b6ff">FORK</text>
+        <rect x="640" y="62" width="520" height="96" rx="12" fill="rgba(139,143,245,0.12)" stroke="#8b8ff5"/>
+        <text x="656" y="88" class="t-title">no cancellation while the mutex is held</text>
+        <text x="656" y="110" class="t-sub">JackNoCancelScope around kAddClient and kRemoveClient,</text>
+        <text x="656" y="128" class="t-sub">as the port-list snapshot already had (C14): a pending</text>
+        <text x="656" y="146" class="t-sub">cancel acts once the mutex has been released</text>
+        <text x="656" y="186" class="t-ok">start-race.sh: 20 of 20 starts, no client hung</text>
+        <text x="656" y="208" class="t-ok">with the U-44 and a USB headset bridged: 10 of 10</text>
+        <rect x="640" y="236" width="520" height="118" rx="12" fill="rgba(139,143,245,0.06)" stroke="#6b6fbf" stroke-dasharray="4 4"/>
+        <text x="656" y="260" class="t-title">C28 · an accepted socket's flag</text>
+        <text x="656" y="282" class="t-sub">JackClientSocket(int), for every socket the server accepts, left</text>
+        <text x="656" y="300" class="t-sub">fNonBlocking unset: with a leftover value, a read that timed out</text>
+        <text x="656" y="318" class="t-sub">returned success and zeroed data. No such socket had a timeout;</text>
+        <text x="656" y="336" class="t-sub">the JackBus socket's do (§11). It now starts blocking.</text>
+        <text x="656" y="384" class="t-sub">C27's code is 1.9.22's; C28 came with a change taken from develop</text>
+      </g>
     </svg>
     <div class="page-nav">
       <button class="page-arrow" type="button" data-page-prev aria-label="Previous">◀</button>
@@ -3626,8 +4742,8 @@ pre.code .s { color: var(--amber); }
       <button class="page-arrow" type="button" data-page-next aria-label="Next">▶</button>
     </div>
     <p class="caption pagecap">
-      <b>C1 · found the hard way.</b> During the audit a test server on the same machine unlinked the live jackdbus
-      server's graph segment. All of a user's servers share one registry, and <code>jack_destroy_shm()</code> unlinked
+      <b>C1 · found the hard way.</b> During the audit a test server sharing the live jackdbus server's
+      <code>/dev/shm</code> unlinked that server's graph segment. All of a user's servers share one registry, and <code>jack_destroy_shm()</code> unlinked
       by registry index without checking who allocated the entry. The wrong index came from an object-lifetime bug that
       only LTO exposes: the segment info was written before placement-new started the object's lifetime, and GCC's
       lifetime dead-store elimination dropped the writes &mdash; the same root cause as upstream's long-open LTO crash
@@ -3655,12 +4771,23 @@ pre.code .s { color: var(--amber); }
       the system's db 6.2; Arch links db5.3. The same messages appeared earlier in this work whenever a 1.9.22 client
       met a fork server &mdash; the test that now gates it fails 4/4 against a 6.2 build.
     </p>
+    <p class="caption pagecap">
+      <b>C27 · seen as clients left behind by test runs.</b> The notification thread handles <code>kAddClient</code>
+      and <code>kRemoveClient</code> with libjack's process-wide synchro mutex held, and opening the new peer's futex
+      file is a cancellation point. <code>jack_client_close()</code> cancels that thread and then takes the same mutex:
+      cancelled while it held it, the thread left it locked, and the close waited forever. It takes a client being
+      added while another closes, which a server starting with sound card bridges while applications come and go makes
+      likely; <code>bridge/start-race.sh</code> reproduces it, and also watches the server's side (a refused client, a
+      bridge's futex gone), a separate fault seen twice with two USB bridges and 18 clients opening at start, and not
+      again in 50 starts since (§24). <i>C27</i> and <i>C28</i> are the identifiers used here; C28 changed no behaviour
+      when it was fixed, but the JackBus socket's read timeouts depend on it.
+    </p>
   </div>
 </section>
 
-<!-- ============================================================ 17. performance and results -->
-<section id="s17">
-  <h2><span class="num">17</span>Performance, measured in the engine</h2>
+<!-- ============================================================ 20. performance and results -->
+<section id="s20">
+  <h2><span class="num">20</span>Performance, measured in the engine</h2>
   <p class="sub">
     Every performance change was measured on the running engine &mdash; real clients, the same server, interleaved
     A/B runs, perf counters per cycle &mdash; and kept only if no configuration got slower. Hot-loop microbenchmarks
@@ -3778,6 +4905,39 @@ pre.code .s { color: var(--amber); }
     </p>
   </div>
 
+  <h3 style="margin:30px 0 10px">The cycle trace and the harness</h3>
+  <p>
+    Perf counters say how much a cycle costs, not where in it the time goes. <code>JACK_CYCLE_TRACE=&lt;file&gt;</code>,
+    set when the server starts, has the master note in nanoseconds on <code>CLOCK_MONOTONIC_RAW</code> (the clock
+    JACK's microseconds come from) when each part of its cycle ends: its wake-up (ALSA: the poll's return), Read,
+    Write, the bridges taking their playback, <code>Engine::Process</code>, its own resume, the slaves' resume (the
+    freewheel driver's, where the first clients wake), the bridges' capture and their playback, now after the wakes
+    (§15), and the slaves' write (with <code>-S</code>, the wait for the graph's end). At the next cycle it also
+    copies the clients' own timing records of the cycle that ended &mdash; signalled, woken, finished: the microseconds
+    every libjack writes &mdash; for the refnums below <code>JACK_CYCLE_TRACE_CLIENTS</code> (48). The cycles go into
+    a ring allocated and touched at start (<code>JACK_CYCLE_TRACE_CYCLES</code>, 16&nbsp;384), the oldest
+    overwritten; when the server stops, after the master's thread, the ring is written out as text with the graph as
+    it was (each refnum's name and the refnums it signals), and a server started again writes
+    <code>&lt;file&gt;.1</code> and so on. Off, the default, each mark is a load and a branch; on, a vDSO
+    <code>clock_gettime</code>. Nothing changes for clients.
+  </p>
+  <div class="tablebox" style="margin-top:14px">
+    <table>
+      <tr><th><code>nspa/tests/perf</code></th><th>What it does</th></tr>
+      <tr><td><code>cycle_bench.c</code></td><td>chains, fan-outs and grids of clients, one process each (or threads), whose callbacks note their start and end in ns with the cycle's frame time; sources and sinks may be a bridge's ports; <code>-e</code> makes graph edits while it records; a client close that does not return dumps every thread's stack</td></tr>
+      <tr><td><code>run-one.sh</code></td><td>one run inside <code>nspa/run-isolated.sh</code>: a server of the given build (dummy master, bridges on snd-aloop or real cards, <code>cpu-dma-latency</code>, <code>-S</code>) with the trace on, the bench, the server stopped with the bench's clients still in its graph; checks which libjackserver jackd loaded, notes the system's PM QoS value before and after; perf stat counters if asked</td></tr>
+      <tr><td><code>analyze.py</code></td><td>the trace joined with the bench on the frame time: each part of the driver's cycle, the first and last client, hops along chains, the first clients' wake-ups (bridge readers apart), each edge's woken − finished from the clients' own records; distributions</td></tr>
+      <tr><td><code>plan.py</code> · <code>batch.sh</code> · <code>compare.py</code></td><td>configurations × builds in a balanced, shuffled order (AB, then BA); per configuration the median of each run's quantiles, and the pairs each build won</td></tr>
+      <tr><td><code>bridge_glitches.py</code> · <code>perfstat.py</code></td><td>the bridges' card xruns, underruns and missed playback frames while measured (not the stop's) · per-cycle user-space counters (HITM loads, …)</td></tr>
+      <tr><td><code>with-muted.sh</code></td><td>a card's playback controls at 0 and muted for the whole session, a watchdog re-muting on mixer events, then restored, as <code>run-hw.sh</code> does (§22): every session runs inside it</td></tr>
+    </table>
+  </div>
+  <p class="caption" style="margin-top:12px">
+    <b>First use.</b> The bridges' resampling off the wake path (§15) was the first change measured this way: 18
+    configurations, each build's runs interleaved and shuffled, the cards' glitches counted alongside; without a
+    bridge the two builds came out equal, as they should.
+  </p>
+
   <h3 style="margin:30px 0 10px">Every measured result</h3>
   <div class="tablebox">
     <table>
@@ -3800,6 +4960,7 @@ pre.code .s { color: var(--amber); }
       <tr><td><span class="tag-x">C24</span></td><td>capture on connect</td><td class="num">0/20 fresh</td><td class="num"><span class="better">20/20</span></td><td>hw:PCH capture_stale</td></tr>
       <tr><td><span class="tag-x">C25</span></td><td>stale futex files</td><td class="num">375/750 cycles</td><td class="num"><span class="better">750/750</span></td><td>stale-client, TERM and KILL</td></tr>
       <tr><td><span class="tag-x">C26</span></td><td>cancel inside a lock scope</td><td class="num">(first fork version) abort</td><td class="num"><span class="better">100/100 clean</span></td><td>nocancel, 64/32-bit</td></tr>
+      <tr><td><span class="tag-x">C27</span></td><td>a close while a client is added</td><td class="num"><span class="worse">79 clients hung in 20 starts</span></td><td class="num"><span class="better">20/20 starts, none hung</span></td><td>bridge/start-race.sh · with USB cards 10/10</td></tr>
       <tr><td><span class="tag-x">DB</span></td><td>metadata across builds</td><td class="num">0/4 (db 6.2 build)</td><td class="num"><span class="better">4/4</span></td><td>metadata cross-version</td></tr>
       <tr><td colspan="5" style="color:var(--pink);font-weight:700;letter-spacing:.08em;font-size:12px">CLIENTS THAT DIE, RUN LATE OR FALL BEHIND</td></tr>
       <tr><td><span class="tag-x k">K1</span></td><td>a 1 GB client killed, ×6</td><td class="num"><span class="worse">346–402 xruns · ≤ 78-cycle stall</span></td><td class="num"><span class="better">0 xruns · 0 missed · ~9 ms</span></td><td>client-kill kill</td></tr>
@@ -3828,6 +4989,7 @@ pre.code .s { color: var(--amber); }
       <tr><td><span class="tag-x p">TLS</span></td><td><code>jack_port_connected()</code></td><td class="num">5.29 ns</td><td class="num"><span class="better">2.94 ns</span></td><td>in a process callback</td></tr>
       <tr><td><span class="tag-x p">LTO</span></td><td>package built with LTO</td><td class="num">224.0 µs</td><td class="num"><span class="better">214.8 µs</span></td><td>critical path median, 16 @32</td></tr>
       <tr><td><span class="tag-x p">QOS</span></td><td><code>cpu-dma-latency 0</code>, 128×2 idle xruns / 20 s</td><td class="num">410 – 546</td><td class="num"><span class="better">7 – 10</span></td><td>hw:PCH, PM QoS hold off → on</td></tr>
+      <tr><td><span class="tag-x p">BRG</span></td><td>bridges' resampling while the clients run</td><td class="num">18–71 µs</td><td class="num"><span class="better">5.4–14.5 µs</span></td><td>first client's start, snd-aloop, 18 configurations · 54/54 pairs</td></tr>
       <tr><td><span class="tag-x no">SIMD</span></td><td>AVX2 mixdown</td><td class="num">326 – 369 ns</td><td class="num"><span class="worse">432 – 509 ns</span></td><td>in the engine → reverted</td></tr>
     </table>
   </div>
@@ -3839,17 +5001,17 @@ pre.code .s { color: var(--amber); }
   </p>
 </section>
 
-<!-- ============================================================ 18. compatibility -->
-<section id="s18">
-  <h2><span class="num">18</span>Compatibility envelope</h2>
+<!-- ============================================================ 21. compatibility -->
+<section id="s21">
+  <h2><span class="num">21</span>Compatibility envelope</h2>
   <p class="sub">
     "Drop-in" is tested, not assumed: every combination of server and libjack that can meet on a desktop runs the same
     stress client, and the cross-process state that isn't covered by protocol 9 (the metadata database) has its own
     cross-build test.
   </p>
   <div class="figure">
-    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 470" role="img" aria-label="Server and libjack compatibility matrix">
-      <rect x="20" y="20" width="1160" height="430" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 536" role="img" aria-label="Server and libjack compatibility matrix">
+      <rect x="20" y="20" width="1160" height="496" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
       <text x="40" y="44" class="t-band">SERVER × LIBJACK · EVERY CELL IS A SUITE CHECK</text>
       <!-- headers -->
       <rect x="420" y="62" width="360" height="60" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-width="1.5"/>
@@ -3891,15 +5053,26 @@ pre.code .s { color: var(--amber); }
         <rect x="800" y="338" width="360" height="56" rx="12" fill="rgba(251,191,36,0.06)" stroke="#8a6a1c" stroke-dasharray="4 4"/>
         <text x="820" y="362" class="t-sub">stock ↔ stock</text><text x="820" y="382" class="t-sub"></text>
       </g>
-      <text x="600" y="430" text-anchor="middle" class="t-sub">also in both directions: the metadata database (db5.3), the C25 stale-client scenario, and mixed 64/32-bit clients on one server</text>
+      <g>
+        <rect x="40" y="404" width="360" height="56" rx="12" fill="url(#g-box)" stroke="#8b8ff5" stroke-dasharray="5 3"/>
+        <text x="56" y="428" class="t-title">fork libjack · the JackBus socket</text>
+        <text x="56" y="448" class="t-sub">jackbus_client_open · nodes (§11, §12)</text>
+        <rect x="420" y="404" width="360" height="56" rx="12" fill="rgba(74,222,128,0.1)" stroke="#4ade80"/>
+        <text x="440" y="428" class="t-ok">✓ bus.sh · chains with both libjacks</text><text x="440" y="448" class="t-sub">sample-exact · nodes · real programs · Ardour</text>
+        <rect x="800" y="404" width="360" height="56" rx="12" fill="rgba(251,191,36,0.06)" stroke="#8a6a1c" stroke-dasharray="4 4"/>
+        <text x="820" y="428" class="t-sub">no JackBus socket: the open fails cleanly</text><text x="820" y="448" class="t-sub">(JackFailure) · protocol 9 is the fallback</text>
+      </g>
+      <text x="600" y="496" text-anchor="middle" class="t-sub">also in both directions: the metadata database (db5.3), the C25 stale-client scenario, and mixed 64/32-bit clients on one server</text>
     </svg>
     <p class="caption">
       <b>What makes this hold.</b> The fork changed no shared layout, no futex semantics and no request encoding; the
       develop request rework it took writes the same fields in the same order (all 96 field reads compared), only as
       one complete packet. Everything new &mdash; the refnum bound, the queues, the dirty-row bookkeeping &mdash; lives
       in the server's private memory, and the client-side changes (request lock, snapshots, TLS, the chunked scan) only
-      change how libjack's own threads coordinate. The package <code>provides</code> <code>jack2=1.9.22</code>, so
-      packages that depend on it, Arch's <code>lib32-jack2</code> included, stay installable.
+      change how libjack's own threads coordinate. What libjack gained is additions: fifteen <code>jackbus_*</code>
+      functions (<code>jack/jackbus.h</code>), which no existing application calls, beside every symbol it had. The
+      package <code>provides</code> <code>jack2=1.9.22</code>, so packages that depend on it, Arch's
+      <code>lib32-jack2</code> included, stay installable.
     </p>
     <p class="caption">
       <b>The alive slot, cell by cell.</b> Fork libjack on this server, 64- or 32-bit: a dying client is found through
@@ -3908,16 +5081,30 @@ pre.code .s { color: var(--amber); }
       if a session manager detaches it first. A fork libjack on a stock server finds no file and does without. Kernels
       without <code>futex_waitv</code> (before 5.16): the slots are polled every 20&nbsp;ms.
     </p>
+    <p class="caption">
+      <b>The JackBus socket, cell by cell.</b> It is a second door to the same server, not a change to the first:
+      protocol 9's socket, segments, futex words and request encoding are what they were, and its clients &mdash; a
+      stock libjack, a fork libjack opened with <code>jack_client_open()</code> (unless
+      <code>JACKBUS_TRANSPORT=1</code> asks for it, §11) &mdash; never touch it. A JackBus client
+      (<code>jackbus_client_open()</code>, a node) runs in the same graph as they do, sample-exact in chains with this
+      libjack's protocol-9 clients and the system's 1.9.22 libjack, in either order, and in the same process as a
+      protocol-9 client. Against a stock server, or without a runtime directory, there is no JackBus socket: the open
+      returns NULL with <code>JackFailure</code> and starts nothing, and an application that wants to run anywhere
+      falls back to <code>jack_client_open()</code>, as <code>jackbus_simple -f</code> does. A 32-bit application
+      loads Arch's <code>lib32-jack2</code>, a stock libjack (the package ships no 32-bit one): for it the socket does
+      not exist.
+    </p>
   </div>
 </section>
 
-<!-- ============================================================ 19. validation -->
-<section id="s19">
-  <h2><span class="num">19</span>Validation harness</h2>
+<!-- ============================================================ 22. validation -->
+<section id="s22">
+  <h2><span class="num">22</span>Validation harness</h2>
   <p class="sub">
     Tests never touch the live audio session. All of a user's JACK servers share one shm registry and its SysV lock,
     whatever their names &mdash; which is how an early test unlinked the live server's segment (C1) &mdash; so every
-    test server runs in private namespaces; the hardware tests stop the session explicitly and restore it.
+    test server runs in private namespaces, with a private runtime directory for its JackBus socket; the hardware
+    tests stop the session explicitly and restore it.
   </p>
   <div class="figure">
     <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 560" role="img" aria-label="Test isolation and the hardware harness">
@@ -3951,30 +5138,32 @@ pre.code .s { color: var(--amber); }
       <rect x="400" y="20" width="360" height="520" rx="18" fill="rgba(91,95,199,0.06)" stroke="#5b5fc7"/>
       <text x="420" y="44" class="t-band" style="fill:#b3b6ff">NSPA/RUN-ISOLATED.SH</text>
       <text x="420" y="66" class="t-sub">unshare: user · mount · IPC · net namespaces</text>
-      <text x="420" y="84" class="t-sub">tmpfs on /dev/shm · dummy driver</text>
+      <text x="420" y="84" class="t-sub">tmpfs: /dev/shm, $XDG_RUNTIME_DIR · dummy driver</text>
       <g>
         <rect x="420" y="100" width="320" height="400" rx="12" fill="#161a36" stroke="#3d4683"/>
-        <text x="436" y="124" class="t-label">nspa/tests/run.sh · 97 checks</text>
+        <text x="436" y="124" class="t-label">nspa/tests/run.sh · 97 checks + 28</text>
         <g class="t-sub">
-          <text x="436" y="150">compat matrix: fork/Arch server × libjack, 64/32</text>
-          <text x="436" y="172">two servers; stale client (TERM, KILL)</text>
-          <text x="436" y="194">xrun timer; frame wrap; midi wrap</text>
-          <text x="436" y="216">rt-faults (memlock 64 KB); rt-syscalls (strace)</text>
-          <text x="436" y="238">api-concurrency; activate-init; port-churn</text>
-          <text x="436" y="260">sync-callback; transport-churn; RT helper thread</text>
-          <text x="436" y="282">pi-mutex; connection-copy; memops (5 520)</text>
-          <text x="436" y="304">nocancel; mixdown (1021 / 64, 32-bit)</text>
-          <text x="436" y="326">refnum-bound × 3; metadata × 4</text>
-          <text x="436" y="348">jackdbus: SIGTERM, switch-fail, patchbay, crash,</text>
-          <text x="436" y="370">detach, client timings, hotplug, bridges (12)</text>
-          <text x="436" y="392">client-kill × 11; notify-lag × 3, closed; lib32</text>
+          <text x="436" y="146">compat matrix: fork/Arch server × libjack, 64/32</text>
+          <text x="436" y="166">two servers; stale client (TERM, KILL)</text>
+          <text x="436" y="186">xrun timer; frame wrap; midi wrap</text>
+          <text x="436" y="206">rt-faults (memlock 64 KB); rt-syscalls (strace)</text>
+          <text x="436" y="226">api-concurrency; activate-init; port-churn</text>
+          <text x="436" y="246">sync-callback; transport-churn; RT helper thread</text>
+          <text x="436" y="266">pi-mutex; connection-copy; memops (5 520)</text>
+          <text x="436" y="286">nocancel; mixdown (1021 / 64, 32-bit)</text>
+          <text x="436" y="306">refnum-bound × 3; metadata × 4</text>
+          <text x="436" y="326">jackdbus: SIGTERM, switch-fail, patchbay, crash,</text>
+          <text x="436" y="346">detach, client timings, hotplug, bridges (12)</text>
+          <text x="436" y="366">client-kill × 11; notify-lag × 3, closed; lib32</text>
+          <text x="436" y="386">JackBus socket and nodes: bus.sh (28), real</text>
+          <text x="436" y="406">programs, Ardour (§11, §12)</text>
         </g>
-        <text x="436" y="424" class="t-label">expected to fail on 1.9.22</text>
+        <text x="436" y="432" class="t-label">expected to fail on 1.9.22</text>
         <g class="t-sub">
-          <text x="436" y="446">stale-client, xrun-timer and client-kill run</text>
-          <text x="436" y="466">against the stock server too, as INFO</text>
+          <text x="436" y="452">stale-client, xrun-timer and client-kill run</text>
+          <text x="436" y="470">against the stock server too, as INFO</text>
         </g>
-        <text x="436" y="490" class="t-ok">every run ends with a segment leak check</text>
+        <text x="436" y="492" class="t-ok">every run ends with a segment leak check</text>
       </g>
       <!-- hardware harness -->
       <rect x="780" y="20" width="400" height="520" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
@@ -4020,6 +5209,19 @@ pre.code .s { color: var(--amber); }
       suite &mdash; so TSan runs are gated on reports, not on client results; the jackdbus tests also run against a
       TSan server with uninstrumented clients, where all pass. The races it reported, one of them older than the
       fork, are fixed with atomic accesses that leave the shared memory layout and the client API as they were.
+      TSan doesn't see the graph's futex ordering, so libjack annotates it in TSan builds only: a release when a
+      client signals, an acquire when its wait returns, and since two clients chained in one process showed a false
+      report, a release before every activation-counter decrement too, also by a client that leaves the signalling to
+      another (elsewhere the annotation is empty, and the objects are byte-identical). <code>bus.sh</code>, the JackBus
+      socket and nodes: 24 checks under ASan, 0 failures and 0 reports; 0 reports under TSan. The bridges' change of
+      order (§15): the suite under ASan + UBSan, 65 passed and 0 reports, 0 TSan reports, and snd-aloop servers on the
+      regular, ASan and TSan builds without a report.
+    </p>
+    <p class="caption">
+      <b>A private runtime directory.</b> Since the JackBus socket lives in <code>$XDG_RUNTIME_DIR</code>,
+      <code>nspa/run-isolated.sh</code> mounts a tmpfs over it inside the namespace (or makes one under the private
+      <code>/dev/shm</code> when there is none): a test server's socket can never land in the user's real runtime
+      directory, and a test can't reach the session's PipeWire or D-Bus sockets there.
     </p>
   </div>
 
@@ -4030,16 +5232,18 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>resampler_test</code> · <code>bench_test</code></td><td>the resampler's quality, continuity and accounting; its cost per channel (AVX2, SSE2, AVX-512)</td></tr>
       <tr><td><code>aloop_test</code></td><td>real time on snd-aloop: a sine through playback and back through capture at a shifted rate, the round trip's SNR; a mid-run reopen; any card with <code>BRIDGE_CAPTURE</code> / <code>BRIDGE_PLAYBACK</code>, silence only</td></tr>
       <tr><td><code>server-bridge.sh</code> · <code>multi-bridge.sh</code></td><td>cards bridged in an isolated jackd, a client per card: xruns, the ports' latencies, the log; several cards at once</td></tr>
-      <tr><td><code>jackdbus-bridge.sh</code> (in the suite)</td><td>12 checks on snd-aloop through a private bus: the <code>bridges</code> setting, AddBridge / RemoveBridge / GetBridges, buffer size and master rate changes, the setting kept</td></tr>
+      <tr><td><code>jackdbus-bridge.sh</code> (in the suite)</td><td>12 checks on snd-aloop through a private bus: the <code>bridges</code> setting, AddBridge / RemoveBridge / GetBridges, buffer size and master rate changes, the setting kept; and a card with MIDI only, when one is plugged in, refused with its reason</td></tr>
+      <tr><td><code>start-race.sh</code></td><td>a server starting with bridges (snd-aloop, or USB cards with <code>NSPA_RACE_CARDS</code>) while 8 processes open and close clients as fast as they can: no client may hang (C27, §19), a new client must open afterwards, the log must show no futex destroyed under a bridge and no client refused</td></tr>
+      <tr><td><code>sync-late.sh</code></td><td><code>-S</code>, a bridge, and a client late by longer than the master waits for the graph's end, 10 times: nothing hangs or crashes, the bridge stays locked, its reader keeps running</td></tr>
       <tr><td><code>jackdbus-cards.sh</code></td><td>real cards through jackdbus: locked after each buffer size and rate change, the clients' signal and connections kept</td></tr>
       <tr><td><code>with-cards.sh</code></td><td>holds the cards for a test: their reservations taken, every playback control at 0 and muted, muted again if a card is replugged meanwhile, restored afterwards by card id</td></tr>
     </table>
   </div>
 </section>
 
-<!-- ============================================================ 20. evaluated and rejected -->
-<section id="s20">
-  <h2><span class="num">20</span>Evaluated and rejected</h2>
+<!-- ============================================================ 23. evaluated and rejected -->
+<section id="s23">
+  <h2><span class="num">23</span>Evaluated and rejected</h2>
   <p class="sub">
     Modern kernel and CPU features were examined against JACK's actual hot path, which per cycle is one
     <code>poll()</code> on the PCM and a futex wake per downstream client &mdash; there is little left for an I/O or
@@ -4053,13 +5257,13 @@ pre.code .s { color: var(--amber); }
       <tr><td>AVX2 sample conversion</td><td>stores are strided into the interleaved mmap area, so wider vectors don't help; this card's path is already 0.3 ns/sample</td><td>no gain</td></tr>
       <tr><td>AVX-512 anywhere</td><td>512-bit instructions can change the core's frequency license; not worth it for sub-µs loops on an RT core</td><td>rejected</td></tr>
       <tr><td><code>SCHED_DEADLINE</code></td><td>needs <code>CAP_SYS_NICE</code> (EPERM here despite rtprio 98); the driver alone does little work; per-client budgets are unknowable and an overrun throttles to the next period (a guaranteed xrun); DL preempts IRQ threads; mainline has no hierarchical DL</td><td>rejected</td></tr>
-      <tr><td><code>futex_waitv</code> / futex2 on the RT path</td><td>a cycle waits on one futex: measured wake round trips equal (4.4–5.1 µs median for <code>FUTEX_WAIT</code>, <code>futex_waitv</code>, futex2 <code>futex_wait</code>); futex2 has no PI ops</td><td>no gain there &mdash; but a real use off the RT path: the notifier waits on its own word and every client's alive slot at once (§13)</td></tr>
-      <tr><td>A late client skips its next trigger (CoreAudio-style)</td><td>its late finish has already signalled its successors; the skipped block of its input is lost: MIDI events (stuck notes), recording gaps; JACK's re-trigger is a catch-up</td><td>rejected; counted instead (§14)</td></tr>
-      <tr><td>pidfd or the socket for dead clients</td><td>a pidfd becomes readable at <code>exit_notify()</code>, the sockets close at <code>exit_files()</code>: both after the address space is torn down</td><td>robust futex instead (§13)</td></tr>
+      <tr><td><code>futex_waitv</code> / futex2 on the RT path</td><td>a cycle waits on one futex: measured wake round trips equal (4.4–5.1 µs median for <code>FUTEX_WAIT</code>, <code>futex_waitv</code>, futex2 <code>futex_wait</code>); futex2 has no PI ops</td><td>no gain there &mdash; but a real use off the RT path: the notifier waits on its own word and every client's alive slot at once (§16)</td></tr>
+      <tr><td>A late client skips its next trigger (CoreAudio-style)</td><td>its late finish has already signalled its successors; the skipped block of its input is lost: MIDI events (stuck notes), recording gaps; JACK's re-trigger is a catch-up</td><td>rejected; counted instead (§17)</td></tr>
+      <tr><td>pidfd or the socket for dead clients</td><td>a pidfd becomes readable at <code>exit_notify()</code>, the sockets close at <code>exit_files()</code>: both after the address space is torn down</td><td>robust futex instead (§16)</td></tr>
       <tr><td><code>io_uring</code></td><td>nothing to batch on the RT path; ring submission or SQPOLL adds work; the request socket is low-rate and non-RT</td><td>no gain</td></tr>
       <tr><td><code>eventfd</code> for RT → non-RT</td><td>an eventfd write takes <code>wqh.lock</code>, an <code>rt_mutex</code> on PREEMPT_RT, shared with a SCHED_OTHER reader</td><td>polled lock-free queues instead</td></tr>
       <tr><td><code>pidfd</code> for registry liveness</td><td>the registry stores bare PIDs in shared memory; a pidfd can't validate a PID read later</td><td>needs a layout change</td></tr>
-      <tr><td>memfd segments, huge pages, right-sized segments</td><td>clients open segments by name with <code>shm_open()</code>; THP doesn't exist on PREEMPT_RT</td><td>protocol change → future direction (§21)</td></tr>
+      <tr><td>memfd segments, huge pages, right-sized segments</td><td>protocol-9 clients open the segments by name with <code>shm_open()</code>, so they stay named; a JackBus socket client receives them as fds (§11), which a memfd could be too, but only for what no protocol-9 client maps; THP doesn't exist on PREEMPT_RT</td><td>future direction (§24)</td></tr>
       <tr><td>3-state activation futex (P7)</td><td>the futex word is shared with every libjack</td><td>protocol</td></tr>
       <tr><td>Deferred cancellation (R9)</td><td>a callback blocked on an application lock at close would hang forever</td><td>rejected; lock scopes instead</td></tr>
       <tr><td>uclamp, rdtsc time base, <code>-march</code> above x86-64 for libjack</td><td>RT already runs at max frequency; the time base is shared (protocol); lib32 and portability</td><td>rejected</td></tr>
@@ -4069,9 +5273,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 21. open items -->
-<section id="s21">
-  <h2><span class="num">21</span>Open items</h2>
+<!-- ============================================================ 24. open items -->
+<section id="s24">
+  <h2><span class="num">24</span>Open items</h2>
   <p class="sub">What was measured and deliberately left alone, what remains untested on hardware, and where larger gains would have to come from.</p>
   <div class="figure">
     <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1200 330" role="img" aria-label="A hung client, measured">
@@ -4083,7 +5287,7 @@ pre.code .s { color: var(--amber); }
         <text x="40" y="108" class="t-label">async · upstream</text>
         <rect x="300" y="96" width="376" height="16" rx="4" class="bar-new"/><text x="682" y="109" class="t-mono">94</text>
         <text x="40" y="136" class="t-label">async · downstream</text>
-        <rect x="300" y="124" width="3" height="16" rx="1" style="fill:#fb7185"/><text x="310" y="137" class="t-red">0 · plus ~350 xrun callbacks/s to every client (before §14)</text>
+        <rect x="300" y="124" width="3" height="16" rx="1" style="fill:#fb7185"/><text x="310" y="137" class="t-red">0 · plus ~350 xrun callbacks/s to every client (before §17)</text>
         <text x="40" y="164" class="t-label">async · unrelated</text>
         <rect x="300" y="152" width="376" height="16" rx="4" class="bar-new"/><text x="682" y="165" class="t-mono">94</text>
         <text x="40" y="208" class="t-label">sync (-S) · upstream</text>
@@ -4107,18 +5311,30 @@ pre.code .s { color: var(--amber); }
   <div class="grid2" style="margin-top:18px">
     <div class="card">
       <h3>Not covered yet</h3>
-      <p class="role">Implemented without the hardware to prove it here, or still to be looked into.</p>
+      <p class="role">Implemented without the hardware to prove it, or still to be looked into.</p>
       <ul>
         <li><b>jackd without jackdbus</b>: an unplugged master card still ends the server, as in 1.9.22; under
-          jackdbus the dummy stands in (§11).</li>
+          jackdbus the dummy stands in (§14).</li>
         <li><b><code>-X raw</code></b>: non-blocking wake pipes are in (R3); drain and thread priority unchanged; one
           failing raw MIDI port still stops the I/O thread for all (C21, not done).</li>
         <li><b>"Device busy" right after a PipeWire takeover</b>: a bridge retries its card once a second; the
           master's own open still has no retry.</li>
         <li><b>FireWire (FFADO)</b>: built like Arch's package, not tested (no FireWire hardware to test with).</li>
-        <li><b>Sound card bridges</b>: measured against PipeWire's follower on the same cards (only its formula is
-          compared here); a card whose rates exclude the master's runs at its own, resampled (untested on hardware);
-          PatchBox offering a newly plugged card a role.</li>
+        <li><b>Sound card bridges</b>: not yet measured against PipeWire's follower on the same cards (only its
+          formula is compared, §15); a card whose rates exclude the master's runs at its own, resampled (untested on
+          hardware); PatchBox offering a newly plugged card a role.</li>
+        <li><b>A refused open at start.</b> Twice, with two USB cards bridged and 18 clients opening as the server
+          started, a bridge's futex was destroyed under it and every later client open was refused. Not seen again
+          in 50 such starts; <code>bridge/start-race.sh</code> watches for it (§22).</li>
+        <li><b>The JackBus socket in a sandbox.</b> Tested with an empty, private <code>/dev/shm</code>, not yet inside
+          a Flatpak. There the client's metadata store (a Berkeley DB environment in <code>/dev/shm</code>) is its own,
+          not the one the server and other clients share: metadata does not cross the JackBus socket yet.</li>
+        <li><b>Nodes.</b> The API is experimental and may still change; the cycle record's nanosecond times are filled
+          from the server's microsecond frame timer.</li>
+        <li><b>The shims (§13).</b> No PulseAudio monitor sources yet (a recording of what a device plays, as OBS's
+          desktop audio uses); a volume control sees only its own process's streams; a program started before JackBus
+          stays on PipeWire until it restarts. Not yet tested through jackbus-pa: libcanberra's event sounds (the
+          desktop's) and Wine's <code>winepulse</code>.</li>
         <li><b>Xruns when apps start or add tracks.</b> In real use they come from the app's own callback (Ardour
           busy for just over one period during a load), not from the server; in async mode the other clients' audio
           is untouched. Next: measure with <code>GetClientTimings</code> during app start, track adds and plug-in
@@ -4129,12 +5345,12 @@ pre.code .s { color: var(--amber); }
       <h3>Larger directions</h3>
       <p class="role">Where further gains would come from, and what they cost.</p>
       <ul>
-        <li><b>A JackBus API</b> beside libjack's, which stays as it is: control, bridges and session hooks for the
-          applications that want them.</li>
-        <li><b>A dual-protocol server.</b> The client-open request already carries a protocol version. New libjack:
-          <code>memfd</code> segments passed over the socket, sealed, optionally huge pages, sized to actual use
-          instead of a fixed 107&nbsp;MB; old libjack: today's named segments. No recompiling of applications &mdash;
-          libjack is a drop-in &mdash; but full benefit only when every libjack in use is new.</li>
+        <li><b>The JackBus API beyond nodes</b> (§12), beside libjack's, which stays as it is: control, bridges and
+          session hooks for the applications that want them.</li>
+        <li><b>Segments of the JackBus socket's own.</b> The socket already hands a client the server's objects as
+          fds (§11); what it makes possible next is <code>memfd</code> segments, sealed, optionally on huge pages, sized
+          to actual use instead of a fixed 107&nbsp;MB, for what only JackBus clients map. Protocol-9 clients keep
+          today's named segments, so the full benefit comes only where every client opens over the socket.</li>
         <li><b>The scheduler.</b> What remains per cycle is wake-up latency and cache-line transfers: IRQ and CPU
           isolation, <code>sched_ext</code> policies, proxy execution &mdash; kernel and system work rather than JACK
           code.</li>
@@ -4148,9 +5364,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 22. packaging -->
-<section id="s22">
-  <h2><span class="num">22</span>Packaging and deployment</h2>
+<!-- ============================================================ 25. packaging -->
+<section id="s25">
+  <h2><span class="num">25</span>Packaging and deployment</h2>
   <p class="sub">
     <code>nspa/pkg/jackbus/PKGBUILD</code> builds one package from the repository's <code>main</code> branch
     (or a local clone with <code>NSPA_REPO</code>) that replaces Arch's <code>jack2</code> and <code>jack2-dbus</code>.
@@ -4158,14 +5374,29 @@ pre.code .s { color: var(--amber); }
   <div class="grid2">
     <div class="card">
       <h3>JackBus</h3>
-      <p class="role">The same 62 files at the same paths as jack2 + jack2-dbus; docs and lib32 left out.</p>
+      <p class="role">The same 62 files at the same paths as jack2 + jack2-dbus, and JackBus's own beside them; docs
+        and lib32 left out.</p>
       <ul>
         <li><b>Version.</b> <code>pkgver()</code> from <code>git describe</code> on the 1.9.22 tag, e.g.
           <code>1.9.22.r98.g3b031c4e</code>: sorts after 1.9.22.</li>
         <li><b>Provides.</b> <code>jack</code>, <code>jack2=1.9.22</code>, <code>jack2-dbus=1.9.22</code>,
           <code>libjack.so=0-64</code>, <code>libjacknet.so=0-64</code>, <code>libjackserver.so=0-64</code>; every
           package depending on jack2 (Ardour, mpv, OBS, qjackctl, wineasio, lib32-jack2) stays satisfied.</li>
-        <li><b>Conflicts.</b> <code>jack</code>, <code>jack2</code>, <code>jack2-dbus</code>.</li>
+        <li><b>Conflicts.</b> <code>jack</code>, <code>jack2</code>, <code>jack2-dbus</code>; it replaces
+          <code>jack2dbus-nspa</code>, its former name.</li>
+        <li><b>JackBus's own files.</b> <code>/usr/include/jack/jackbus.h</code> among the headers, its functions in
+          the same <code>libjack.so.0</code>; the examples <code>jackbus_simple</code>, <code>jackbus_tone</code> and
+          <code>jackbus_events</code> in <code>/usr/bin</code>.</li>
+        <li><b>The shims (§13).</b> <code>/usr/lib/jackbus-pw/libpipewire-0.3.so.0</code> and
+          <code>/usr/bin/jackbus-pw</code>; <code>/usr/lib/jackbus-pa/</code> (the dispatcher
+          <code>libpulse.so.0</code> and <code>libjackbus-pa.so</code>), <code>/usr/bin/jackbus-pa</code> and
+          <code>/etc/ld.so.conf.d/jackbus-pa.conf</code>; <code>/usr/lib/alsa-lib/libasound_module_pcm_jackbus.so</code>
+          and <code>/usr/share/alsa/alsa.conf.d/50-jackbus.conf</code>, linked from <code>/etc/alsa/conf.d</code>.
+          Built against this build's libjack; <code>libpulse</code> is a dependency (jackbus-pa links PulseAudio's
+          <code>libpulsecommon</code>), <code>libpipewire</code> and <code>libpulse</code> are needed to build.
+          Nothing changes for an application until it is run through a shim or the user's settings say so: with
+          <code>pulse</code> unset, every program loading libpulse gets PulseAudio's own library through the
+          dispatcher, as before.</li>
         <li><b>Build.</b> Arch's configure options (<code>--classic --dbus --systemd-unit --autostart=none</code>)
           without doxygen; makepkg's flags with LTO; Berkeley DB 5.3 found by the wscript, no patch.</li>
         <li><b>Validated as packaged.</b> The full suite against the extracted package's binaries (38/38 at r72); the jackdbus tests, detach and timings included, against r98: 14/14.</li>
@@ -4189,9 +5420,9 @@ pre.code .s { color: var(--amber); }
   </div>
 </section>
 
-<!-- ============================================================ 23. source map -->
-<section id="s23">
-  <h2><span class="num">23</span>Source map</h2>
+<!-- ============================================================ 26. source map -->
+<section id="s26">
+  <h2><span class="num">26</span>Source map</h2>
   <p class="sub">Where each change lives, and the commit that carries it on <code>main</code>.</p>
   <div class="tablebox">
     <table>
@@ -4224,16 +5455,36 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>common/JackBridgeSet.*</code>, <code>JackServer.*</code>, <code>JackAudioDriver.*</code>, <code>JackControlAPI.cpp</code>, <code>Jackdmp.cpp</code></td><td>bridges in the master's cycle · add, remove, status · a new master's rate and buffer size followed · <code>--bridge</code></td><td><span class="k">3c411b5b</span> · <span class="k">d7db0938</span></td></tr>
       <tr><td><code>dbus/controller*.c</code>, <code>dbus/audio_reserve.c</code></td><td>the <code>bridges</code> setting and calls · reservations counted, 20 slots · the master's card unplugged · device lists that follow the cards</td><td><span class="k">d7db0938</span> · <span class="k">30781a65</span> · <span class="k">5ae2bae0</span> · <span class="k">9f44400e</span></td></tr>
       <tr><td><code>linux/alsa/alsa_driver.c</code>, <code>JackAlsaDriver.cpp</code></td><td>the wake timer, adaptive by default</td><td><span class="k">74a69867</span> · <span class="k">fd71db62</span></td></tr>
-      <tr><td><code>nspa/</code></td><td>build script, isolation wrapper, 97-check suite, bridge tests, hardware harness, package (<code>jackbus</code>)</td><td>44 commits (tests land with their fixes)</td></tr>
+      <tr><td><code>posix/JackSocket.*</code>, <code>JackFdPassing.*</code></td><td>the JackBus socket's path (<code>JackBusSocketPath</code>), <code>BindPath</code> / <code>ConnectPath</code> · fds in an SCM_RIGHTS trailer · C28 an accepted socket starts blocking</td><td><span class="k">7f2e2151</span> · <span class="k">767fb8c8</span></td></tr>
+      <tr><td><code>posix/JackSocketServerChannel.*</code>, <code>JackSocketNotifyChannel.*</code>, <code>common/JackRequest.h</code>, <code>JackRequestDecoder.*</code>, <code>JackEngine.*</code>, <code>JackExternalClient.*</code>, <code>JackConstants.h</code></td><td>the JackBus socket, server side: the second listening socket in the request thread's poll, <code>kBusHello</code> / <code>kBusClientOpen</code>, the peer checks, an open's fds (<code>ClientBusFds</code>), a peer's futex fd with each <code>kAddClient</code>, requests for its own refnum only</td><td><span class="k">7f2e2151</span></td></tr>
+      <tr><td><code>common/shm.c</code>, <code>JackShmMem.h</code>, <code>linux/JackLinuxFutex.*</code>, <code>JackAliveTable.*</code></td><td>the shared objects to and from fds: <code>jack_shm_open_fd</code>, <code>SetShmFd</code>, <code>ConnectFd</code>, <code>DupFd</code>, <code>OpenNamedFd</code></td><td><span class="k">7f2e2151</span></td></tr>
+      <tr><td><code>common/JackBusLibClient.*</code>, <code>posix/JackBusClientChannel.*</code>, <code>common/JackLibAPI.cpp</code>, <code>JackLibGlobals.h</code>, <code>jack/jackbus.h</code></td><td>the JackBus socket, client side: <code>jackbus_client_open</code>, <code>JACKBUS_TRANSPORT=1</code></td><td><span class="k">7f2e2151</span></td></tr>
+      <tr><td><code>common/JackBusNode.cpp</code>, <code>jack/jackbus.h</code></td><td>nodes: the cycle record, buffers resolved once, the zero buffer, events and their fd, the port table</td><td><span class="k">ace74aae</span></td></tr>
+      <tr><td><code>example-clients/</code></td><td><code>jackbus_simple</code> · <code>jackbus_tone</code>, <code>jackbus_events</code></td><td><span class="k">9d1376ca</span> · <span class="k">78048d12</span></td></tr>
+      <tr><td><code>common/JackLibClient.cpp</code></td><td>C27 no cancellation while the synchro mutex is held</td><td><span class="k">c056a332</span></td></tr>
+      <tr><td><code>common/JackActivationCount.cpp</code>, <code>linux/JackLinuxFutex.cpp</code></td><td>TSan builds: a release before every activation-counter decrement</td><td><span class="k">46d67d32</span></td></tr>
+      <tr><td><code>common/JackCycleTrace.*</code>, <code>JackAudioDriver.cpp</code>, <code>JackServer.cpp</code>, <code>linux/alsa/JackAlsaDriver.cpp</code></td><td>the cycle trace, <code>JACK_CYCLE_TRACE</code></td><td><span class="k">6c834368</span></td></tr>
+      <tr><td><code>common/JackAudioDriver.*</code>, <code>JackBridgeSet.h</code>, <code>linux/bridge/JackBridgeDriver.*</code></td><td>the bridges' resampling while the clients run</td><td><span class="k">b7cc6cde</span></td></tr>
+      <tr><td><code>dbus/controller.c</code>, <code>linux/alsa/JackAlsaDriver.cpp</code></td><td>a card with MIDI only: not bridged, not offered as a device</td><td><span class="k">02b3c80a</span></td></tr>
+      <tr><td><code>nspa/tests/bus*.sh</code>, <code>bus_*.c</code>, <code>fd_trailer.cpp</code>, <code>tools/sine_check.py</code></td><td>the JackBus socket and nodes: protocol and node tests, real programs, Ardour, a dying server, sanitizer runs</td><td><span class="k">9fb1e4fa</span> · <span class="k">86156571</span> · <span class="k">8fbe0cb3</span></td></tr>
+      <tr><td><code>nspa/tests/perf/</code>, <code>nspa/tests/bridge/</code>, <code>nspa/run-isolated.sh</code></td><td>the perf harness · <code>start-race.sh</code>, <code>sync-late.sh</code> · a private runtime directory</td><td><span class="k">b5dc89bf</span> · <span class="k">c056a332</span> · <span class="k">b7cc6cde</span> · <span class="k">d4b0e405</span></td></tr>
+      <tr><td><code>nspa/</code></td><td>build script, isolation wrapper, 97-check suite, bridge tests, perf harness, hardware harness, package (<code>jackbus</code>)</td><td>commits of their own; tests land with their fixes</td></tr>
       <tr><td><code>Archlinux/jack2/</code></td><td>Arch's 1.9.22-2 packaging, for reference</td><td><span class="k">6989d6b0</span></td></tr>
       <tr><td><code>README.md</code></td><td>overview, changes and measurements</td><td><span class="k">5aff7602</span></td></tr>
+          <tr><td><code>nspa/compat/compat_conf.h</code>, <code>server.h</code></td><td>the shims' settings (<code>&lt;shim&gt;.&lt;key&gt;</code> over <code>&lt;key&gt;</code>, <code>JACKBUS_COMPAT_CONF</code>) · whether JackBus runs, without libjack</td><td><span class="k">f68434a1</span> · <span class="k">54cdc21d</span></td></tr>
+      <tr><td><code>nspa/pw-shim/</code>: <code>pw.c</code>, <code>core.c</code>, <code>loop.c</code>, <code>app.c</code>, <code>filter.c</code>, <code>stream.c</code>, <code>midi.c</code>, <code>resample.cpp</code>, <code>jackbus-pw</code></td><td>jackbus-pw: one node per application, pw_filter in the JACK thread, pw_stream direct or through a ring, the data loop, the JACK graph as the registry, the link factory, MIDI, resampling as the fallback</td><td><span class="k">a83ac96c</span> · <span class="k">66a11557</span> · <span class="k">1cca2168</span> · <span class="k">ce0bae6a</span> · <span class="k">eeac249c</span></td></tr>
+      <tr><td><code>nspa/pa-shim/</code>: <code>mainloop.c</code>, <code>node.c</code>, <code>context.c</code>, <code>stream.c</code>, <code>server.c</code>, <code>pa.map</code>, <code>jackbus-pa</code></td><td>jackbus-pa: main loops, context, operations, introspection, streams; libpulse's whole API</td><td><span class="k">d3b52334</span> · <span class="k">51180f9e</span></td></tr>
+      <tr><td><code>nspa/pa-shim/dispatch.c</code>, <code>gen-trampolines.sh</code></td><td>the dispatcher: 378 trampolines, JackBus's or PulseAudio's library decided at load, symbols from ELF tables (no <code>dlsym</code>); <code>/etc/ld.so.conf.d</code></td><td><span class="k">51180f9e</span> · <span class="k">d35bd845</span> · <span class="k">71f24328</span></td></tr>
+      <tr><td><code>nspa/jackbus-alsa/pcm_jackbus.c</code>, <code>50-jackbus.conf</code></td><td>jackbus-alsa: the <code>jackbus</code> device, resampling as the fallback, a fallback device</td><td><span class="k">21bad8fd</span> · <span class="k">aab624a3</span> · <span class="k">de337dd5</span></td></tr>
+      <tr><td><code>nspa/pw-shim/test/</code>, <code>nspa/pa-shim/test/</code>, <code>nspa/jackbus-alsa/test/</code></td><td>the shims with real applications; a fake card, a <code>dlsym</code> interposer</td><td><span class="k">15474b06</span> · <span class="k">0776c943</span> · <span class="k">50381c27</span> · <span class="k">71f24328</span></td></tr>
+      <tr><td><code>nspa/pkg/jackbus/PKGBUILD</code></td><td>the shims in the package</td><td><span class="k">ab8ad92f</span></td></tr>
     </table>
   </div>
 </section>
 
 <footer>
-  JackBus · architecture, third edition · JACK2 1.9.22 + 150 commits (github.com/nine7nine/JackBus) · protocol 9 ·
-  Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274, ZOOM U-44, a USB headset · updated 15 November 2026
+  JackBus · architecture, fourth edition · JACK2 1.9.22 + 192 commits (github.com/nine7nine/JackBus) · protocol 9 ·
+  Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274, ZOOM U-44, a USB headset · updated 16 November 2026
 </footer>
 
 </main>
@@ -4274,7 +5525,8 @@ pre.code .s { color: var(--amber); }
     (function (play) {
       var fig = play.closest('.figure'), svg = fig.querySelector('svg');
       play.addEventListener('click', function () { svg._held = running(svg); apply(svg); syncLocal(); });
-      fig.querySelector('button[data-replay]').addEventListener('click', function () {
+      var replay = fig.querySelector('button[data-replay]');   // a figure may have Pause alone
+      if (replay) replay.addEventListener('click', function () {
         svg.setCurrentTime(0); svg._held = false; apply(svg); syncLocal();
       });
     })(locals[j]);
