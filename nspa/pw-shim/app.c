@@ -102,7 +102,8 @@ static void *event_thread(void *arg)
 		jackbus_event_t e;
 		while (jackbus_node_next_event(app.node, &e) == 1) {
 			if (e.type == JACKBUS_EVENT_CLIENT || e.type == JACKBUS_EVENT_PORT ||
-			    e.type == JACKBUS_EVENT_RENAME || e.type == JACKBUS_EVENT_LOST) {
+			    e.type == JACKBUS_EVENT_CONNECT || e.type == JACKBUS_EVENT_RENAME ||
+			    e.type == JACKBUS_EVENT_LOST) {
 				shim_registry_changed();
 				continue;
 			}

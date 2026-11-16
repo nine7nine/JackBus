@@ -65,7 +65,7 @@ struct pw_core {
 	int sync_seq;
 	atomic_bool changed;			/* JACK's ports changed: look again */
 	bool app_ref;				/* holds the application's client */
-	struct spa_list devices;		/* JackBus's devices as listed last */
+	struct spa_list graph;			/* the JACK graph as listed last */
 };
 
 /* A pw_filter or pw_stream as the application's JACK client runs it */
@@ -106,7 +106,13 @@ void shim_midi_to_jack(const void *base, uint32_t maxsize, uint32_t offset, uint
 		void *jack_buf, uint32_t nframes);
 
 /* the registry (core.c) */
-void shim_registry_changed(void);		/* any thread: JACK's ports changed */
+uint32_t shim_new_id(void);			/* an object id, unique in the process */
+void shim_registry_changed(void);		/* any thread: JACK's graph changed */
+/* this application's filters and streams as registry nodes, their ports */
+void shim_own_node(uint32_t id, const char *name, const char *media_class);
+void shim_own_node_gone(uint32_t id);
+void shim_own_port(const jack_port_t *port, uint32_t node_id);
+void shim_own_port_gone(const jack_port_t *port);
 /* the physical ports of the device a stream targets (target.object: a node
  * name or serial, or target_id), NULL for the default; jack_free() it */
 const char **shim_target_ports(jack_client_t *client, const char *target,

@@ -168,8 +168,6 @@ struct pw_stream {
 	uint64_t underruns, overruns, dropped;
 };
 
-static uint32_t next_node_id = 2000;
-
 SHIM_EXPORT const char *pw_stream_state_as_string(enum pw_stream_state state)
 {
 	switch (state) {
@@ -1073,7 +1071,7 @@ SHIM_EXPORT struct pw_stream *pw_stream_new(struct pw_core *core, const char *na
 		pw_properties_set(s->props, PW_KEY_NODE_NAME, s->name);
 	apply_env(s->props);
 	spa_hook_list_init(&s->listeners);
-	s->node_id = next_node_id++;
+	s->node_id = shim_new_id();
 	s->volume = 1.0f;
 	for (uint32_t i = 0; i < MAX_CHANNELS; i++)
 		s->channel_volumes[i] = 1.0f;
@@ -1334,6 +1332,14 @@ SHIM_EXPORT int pw_stream_connect(struct pw_stream *s, enum pw_direction directi
 		}
 	}
 
+	for (uint32_t ch = 0; ch < s->n_ports; ch++)
+		shim_own_port(jackbus_port_jack(s->ports[ch]), s->node_id);
+	const char *mc = pw_properties_get(s->props, PW_KEY_MEDIA_CLASS);
+	bool playback = s->direction == SPA_DIRECTION_OUTPUT;
+	shim_own_node(s->node_id, pw_properties_get(s->props, PW_KEY_NODE_NAME), mc ? mc :
+			s->midi ? (playback ? "Stream/Output/Midi" : "Stream/Input/Midi") :
+			(playback ? "Stream/Output/Audio" : "Stream/Input/Audio"));
+
 	/* valid before the first cycle */
 	s->position.clock.rate = SPA_FRACTION(1, s->jack_rate);
 	s->position.clock.duration = jack_get_buffer_size(s->client);
@@ -1342,9 +1348,11 @@ SHIM_EXPORT int pw_stream_connect(struct pw_stream *s, enum pw_direction directi
 		s->timer = pw_loop_add_timer(s->core->context->main_loop, on_timer, s);
 		if (s->timer == NULL) {
 			for (uint32_t ch = 0; ch < s->n_ports; ch++) {
+				shim_own_port_gone(jackbus_port_jack(s->ports[ch]));
 				jackbus_port_remove(s->ports[ch]);
 				s->ports[ch] = NULL;
 			}
+			shim_own_node_gone(s->node_id);
 			connect_failed(s, -ENOMEM, "can't make a timer");
 			return -ENOMEM;
 		}
@@ -1369,10 +1377,12 @@ SHIM_EXPORT int pw_stream_disconnect(struct pw_stream *s)
 	}
 	for (uint32_t ch = 0; ch < MAX_CHANNELS; ch++) {
 		if (s->ports[ch]) {
+			shim_own_port_gone(jackbus_port_jack(s->ports[ch]));
 			jackbus_port_remove(s->ports[ch]);
 			s->ports[ch] = NULL;
 		}
 	}
+	shim_own_node_gone(s->node_id);
 	if (s->underruns || s->overruns || s->dropped)
 		shim_log("%s: %llu cycles short of data, %llu cycles dropped (full), %llu frames dropped",
 				s->name, (unsigned long long)s->underruns,

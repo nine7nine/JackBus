@@ -109,8 +109,6 @@ struct pw_filter {
 	struct spa_process_latency_info proc_latency;
 };
 
-static uint32_t next_node_id = 1000;
-
 SHIM_EXPORT const char *pw_filter_state_as_string(enum pw_filter_state state)
 {
 	switch (state) {
@@ -334,7 +332,7 @@ SHIM_EXPORT struct pw_filter *pw_filter_new(struct pw_core *core, const char *na
 	spa_hook_list_init(&f->listeners);
 	spa_list_init(&f->ports);
 	pthread_mutex_init(&f->ports_lock, NULL);
-	f->node_id = next_node_id++;
+	f->node_id = shim_new_id();
 	f->notify = pw_loop_add_event(core->context->main_loop, on_notify, f);
 	return f;
 }
@@ -407,6 +405,7 @@ static int register_port(struct pw_filter *f, struct filter_port *p)
 	}
 	if (p->bport == NULL)
 		return -EIO;
+	shim_own_port(jackbus_port_jack(p->bport), f->node_id);
 	shim_log("%s: port %s", f->name, jack_port_name(jackbus_port_jack(p->bport)));
 	return 0;
 }
@@ -487,8 +486,10 @@ SHIM_EXPORT int pw_filter_remove_port(void *port_data)
 	if (f->node)
 		publish_ports(f);	/* from here no cycle sees the port */
 	pthread_mutex_unlock(&f->ports_lock);
-	if (p->bport)
+	if (p->bport) {
+		shim_own_port_gone(jackbus_port_jack(p->bport));
 		jackbus_port_remove(p->bport);
+	}
 	pw_properties_free(p->props);
 	free(p->midi);
 	free(p);
@@ -557,6 +558,8 @@ SHIM_EXPORT int pw_filter_connect(struct pw_filter *f, enum pw_filter_flags flag
 	}
 	f->client = jackbus_node_client(f->node);
 	f->rate = jack_get_sample_rate(f->client);
+	const char *mc = pw_properties_get(f->props, PW_KEY_MEDIA_CLASS);
+	shim_own_node(f->node_id, pw_properties_get(f->props, PW_KEY_NODE_NAME), mc ? mc : "Audio/Duplex");
 	/* valid before the first cycle, for apps that read it at io_changed */
 	f->position.clock.rate = SPA_FRACTION(1, f->rate);
 	f->position.clock.duration = jack_get_buffer_size(f->client);
@@ -600,11 +603,13 @@ SHIM_EXPORT int pw_filter_disconnect(struct pw_filter *f)
 	shim_app_retire(atomic_exchange(&f->rt_ports, NULL));
 	spa_list_for_each(p, &f->ports, link) {
 		if (p->bport) {
+			shim_own_port_gone(jackbus_port_jack(p->bport));
 			jackbus_port_remove(p->bport);
 			p->bport = NULL;
 		}
 	}
 	pthread_mutex_unlock(&f->ports_lock);
+	shim_own_node_gone(f->node_id);
 	f->node = NULL;
 	f->client = NULL;
 	shim_app_update_latency();
