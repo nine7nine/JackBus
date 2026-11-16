@@ -4,7 +4,9 @@
 # The application's libpulse.so.0 is swapped for JackBus's (the way pw-jack
 # swaps libjack): its streams become ports of one JACK client, named after
 # it, at JackBus's rate and period; no PulseAudio or PipeWire server is
-# involved. Settings: ~/.config/jackbus/compat.conf (resample, autoconnect).
+# involved, even when JackBus isn't running (the application then waits for
+# it, or fails to connect, as without a server). Settings:
+# ~/.config/jackbus/compat.conf (resample, autoconnect).
 usage() {
     cat <<USAGE
 Usage: jackbus-pa [options] <program> [args...]
@@ -42,5 +44,6 @@ shift $((OPTIND - 1))
 [ $# -gt 0 ] || { usage >&2; exit 2; }
 
 LD_LIBRARY_PATH="$libdir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export LD_LIBRARY_PATH
+JACKBUS_PA_MODE=jackbus
+export LD_LIBRARY_PATH JACKBUS_PA_MODE
 exec "$@"

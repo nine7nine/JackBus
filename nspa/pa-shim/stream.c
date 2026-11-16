@@ -630,10 +630,11 @@ static bool resampling_allowed(void)
 	return jackbus_compat_bool("resample", "JACKBUS_PA_RESAMPLE", true);
 }
 
-static void autoconnect(pa_stream *s, const struct shim_device *d)
+/* the stream's ports to device d's physical ports */
+static void connect_to(pa_stream *s, const struct shim_device *d)
 {
 	jack_client_t *client = shim_node_client();
-	if (!jackbus_compat_bool("autoconnect", "JACKBUS_PA_AUTOCONNECT", true) || d == NULL || client == NULL)
+	if (d == NULL || client == NULL)
 		return;
 	bool playback = s->dir == PA_STREAM_PLAYBACK;
 	const char **ports = jack_get_ports(client, NULL, JACK_DEFAULT_AUDIO_TYPE,
@@ -656,6 +657,31 @@ static void autoconnect(pa_stream *s, const struct shim_device *d)
 			jack_connect(client, phys[i], mine[ch]);
 	}
 	jack_free(ports);
+}
+
+static void autoconnect(pa_stream *s, const struct shim_device *d)
+{
+	if (jackbus_compat_bool("autoconnect", "JACKBUS_PA_AUTOCONNECT", true))
+		connect_to(s, d);
+}
+
+/* a move (a volume control's): the stream's ports from wherever they are
+ * connected to device d's, whatever the autoconnect setting (it is asked for) */
+int shim_stream_move(pa_stream *s, const struct shim_device *d)
+{
+	jack_client_t *client = shim_node_client();
+	if (client == NULL || s->state != PA_STREAM_READY || d->playback != (s->dir == PA_STREAM_PLAYBACK))
+		return -PA_ERR_INVALID;
+	for (unsigned int ch = 0; ch < s->n_ports; ch++)
+		jack_port_disconnect(client, jackbus_port_jack(s->ports[ch]));
+	connect_to(s, d);
+	s->device_index = d->index;
+	free(s->device_name);
+	s->device_name = strdup(d->name);
+	shim_log("%s: moved to %s", s->name ? s->name : "stream", d->name);
+	if (s->moved_cb)
+		s->moved_cb(s, s->moved_ud);
+	return 0;
 }
 
 static void on_ready(pa_mainloop_api *a, pa_defer_event *e, void *userdata)

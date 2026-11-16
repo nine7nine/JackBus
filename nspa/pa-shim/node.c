@@ -12,6 +12,7 @@
  * the server's shutdown, wake the eventfds the contexts watch.
  */
 #define _GNU_SOURCE
+#include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -22,6 +23,7 @@
 #include <unistd.h>
 
 #include "shim.h"
+#include "../compat/server.h"
 
 struct member_list {
 	size_t count;
@@ -123,6 +125,10 @@ jackbus_node_t *shim_node_ref(const char *name)
 		const char *env = getenv("JACKBUS_PA_CLIENT_NAME");
 		if (env && env[0])
 			name = env;
+		if (!jackbus_server_present()) {
+			shim_log("JackBus is not running (no server socket)");
+			goto out;
+		}
 		node.node = jackbus_node_open(name && name[0] ? name : "pulse-app", JackNoStartServer, &status);
 		if (node.node == NULL) {
 			shim_log("can't reach JackBus (status 0x%x)", status);

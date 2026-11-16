@@ -180,6 +180,11 @@ pa_stream *shim_operation_stream(pa_operation *o)
 	return o->stream;
 }
 
+pa_context *shim_operation_context(pa_operation *o)
+{
+	return o->context;
+}
+
 void *shim_operation_callback(pa_operation *o, void **userdata)
 {
 	*userdata = o->userdata;
@@ -589,7 +594,10 @@ static void try_connect(pa_context *c)
 				c->api->time_restart(c->retry, shim_rttime(&tv, shim_now_usec() + 1000000));
 			return;
 		}
-		shim_warn("JackBus is not running");
+		static bool warned;		/* once: an application may retry for ever */
+		if (!warned)
+			shim_warn("JackBus is not running");
+		warned = true;
 		shim_context_fail(c, PA_ERR_CONNECTIONREFUSED);
 		return;
 	}
@@ -662,6 +670,14 @@ static pa_operation *success_op(pa_context *c, pa_context_success_cb_t cb, void 
 	if (o)
 		o->data.success = success;
 	return o;
+}
+
+pa_operation *shim_context_success_op(pa_context *c, pa_context_success_cb_t cb, void *userdata,
+		int success, int error)
+{
+	if (!success)
+		c->error = error;
+	return success_op(c, cb, userdata, success);
 }
 
 SHIM_EXPORT pa_operation *pa_context_exit_daemon(pa_context *c, pa_context_success_cb_t cb, void *userdata)
@@ -1039,21 +1055,10 @@ SHIM_EXPORT pa_operation *pa_context_set_source_mute_by_name(pa_context *c, cons
 
 /* this application's own streams: sink inputs and source outputs */
 
-static void run_stream_info(pa_operation *o)
+/* one stream's info to the operation's callback (eol 0) */
+static void emit_stream_info(pa_operation *o, pa_stream *s, bool playback)
 {
 	pa_context *c = o->context;
-	bool playback = o->data.name == NULL;	/* name unused: NULL sink input, "" source output */
-	pa_stream *s = shim_context_find_stream(c, playback, o->data.index);
-	if (o->cb == NULL)
-		return;
-	if (s == NULL) {
-		c->error = PA_ERR_NOENTITY;
-		if (playback)
-			((pa_sink_input_info_cb_t)o->cb)(c, NULL, -1, o->userdata);
-		else
-			((pa_source_output_info_cb_t)o->cb)(c, NULL, -1, o->userdata);
-		return;
-	}
 	pa_cvolume vol;
 	int mute = 0;
 	shim_stream_get_volume(s, &vol, &mute);
@@ -1081,7 +1086,6 @@ static void run_stream_info(pa_operation *o)
 		i.volume_writable = 1;
 		i.format = f;
 		((pa_sink_input_info_cb_t)o->cb)(c, &i, 0, o->userdata);
-		((pa_sink_input_info_cb_t)o->cb)(c, NULL, 1, o->userdata);
 	} else {
 		pa_source_output_info i;
 		memset(&i, 0, sizeof(i));
@@ -1102,11 +1106,45 @@ static void run_stream_info(pa_operation *o)
 		i.volume_writable = 1;
 		i.format = f;
 		((pa_source_output_info_cb_t)o->cb)(c, &i, 0, o->userdata);
-		((pa_source_output_info_cb_t)o->cb)(c, NULL, 1, o->userdata);
 	}
 	if (f)
 		pa_format_info_free(f);
 	pa_proplist_free(p);
+}
+
+static void end_stream_list(pa_operation *o, bool playback, int eol)
+{
+	if (playback)
+		((pa_sink_input_info_cb_t)o->cb)(o->context, NULL, eol, o->userdata);
+	else
+		((pa_source_output_info_cb_t)o->cb)(o->context, NULL, eol, o->userdata);
+}
+
+/* data.name: NULL for sink inputs, "" for source outputs; data.success 2: the list */
+static void run_stream_info(pa_operation *o)
+{
+	pa_context *c = o->context;
+	bool playback = o->data.name == NULL;
+	if (o->cb == NULL)
+		return;
+	if (o->data.success == 2) {
+		/* by index: a callback may disconnect a stream (the array shrinks) */
+		for (int i = 0; i < c->n_streams; i++) {
+			pa_stream *s = c->streams[i];
+			if (shim_stream_playback(s) == playback && pa_stream_get_state(s) == PA_STREAM_READY)
+				emit_stream_info(o, s, playback);
+		}
+		end_stream_list(o, playback, 1);
+		return;
+	}
+	pa_stream *s = shim_context_find_stream(c, playback, o->data.index);
+	if (s == NULL) {
+		c->error = PA_ERR_NOENTITY;
+		end_stream_list(o, playback, -1);
+		return;
+	}
+	emit_stream_info(o, s, playback);
+	end_stream_list(o, playback, 1);
 }
 
 SHIM_EXPORT pa_operation *pa_context_get_sink_input_info(pa_context *c, uint32_t idx,
@@ -1126,6 +1164,165 @@ SHIM_EXPORT pa_operation *pa_context_get_source_output_info(pa_context *c, uint3
 		o->data.index = idx;
 		o->data.name = strdup("");
 	}
+	return o;
+}
+
+SHIM_EXPORT pa_operation *pa_context_get_sink_input_info_list(pa_context *c, pa_sink_input_info_cb_t cb,
+		void *userdata)
+{
+	pa_operation *o = shim_operation_new(c, NULL, run_stream_info, (void *)cb, userdata);
+	if (o)
+		o->data.success = 2;
+	return o;
+}
+
+SHIM_EXPORT pa_operation *pa_context_get_source_output_info_list(pa_context *c, pa_source_output_info_cb_t cb,
+		void *userdata)
+{
+	pa_operation *o = shim_operation_new(c, NULL, run_stream_info, (void *)cb, userdata);
+	if (o) {
+		o->data.success = 2;
+		o->data.name = strdup("");
+	}
+	return o;
+}
+
+/* killing one of this application's streams: it fails, PA_ERR_KILLED (as a
+ * server kills a sink input), when the operation runs */
+static void run_kill(pa_operation *o)
+{
+	pa_context *c = o->context;
+	bool playback = o->data.name == NULL;
+	pa_stream *s = shim_context_find_stream(c, playback, o->data.index);
+	if (s)
+		shim_stream_fail(s, PA_ERR_KILLED);
+	else
+		c->error = PA_ERR_NOENTITY;
+	o->data.success = s != NULL;
+	run_context_success(o);
+}
+
+static pa_operation *kill_op(pa_context *c, bool playback, uint32_t idx, pa_context_success_cb_t cb, void *userdata)
+{
+	pa_operation *o = shim_operation_new(c, NULL, run_kill, (void *)cb, userdata);
+	if (o) {
+		o->data.index = idx;
+		if (!playback)
+			o->data.name = strdup("");
+	}
+	return o;
+}
+
+SHIM_EXPORT pa_operation *pa_context_kill_sink_input(pa_context *c, uint32_t idx,
+		pa_context_success_cb_t cb, void *userdata)
+{
+	return kill_op(c, true, idx, cb, userdata);
+}
+
+SHIM_EXPORT pa_operation *pa_context_kill_source_output(pa_context *c, uint32_t idx,
+		pa_context_success_cb_t cb, void *userdata)
+{
+	return kill_op(c, false, idx, cb, userdata);
+}
+
+/* moving a stream to another device: its ports reconnected to that device's */
+static pa_operation *move_op(pa_context *c, bool playback, uint32_t idx, const char *name, uint32_t dev_idx,
+		pa_context_success_cb_t cb, void *userdata)
+{
+	pa_stream *s = shim_context_find_stream(c, playback, idx);
+	const struct shim_device *d = shim_context_device(c, playback, name, dev_idx);
+	int err = s == NULL || d == NULL ? -PA_ERR_NOENTITY : shim_stream_move(s, d);
+	if (err == 0)
+		notify_sub(c, (playback ? PA_SUBSCRIPTION_EVENT_SINK_INPUT : PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT) |
+				PA_SUBSCRIPTION_EVENT_CHANGE, idx);
+	return shim_context_success_op(c, cb, userdata, err == 0, -err);
+}
+
+SHIM_EXPORT pa_operation *pa_context_move_sink_input_by_name(pa_context *c, uint32_t idx, const char *sink_name,
+		pa_context_success_cb_t cb, void *userdata)
+{
+	return move_op(c, true, idx, sink_name, PA_INVALID_INDEX, cb, userdata);
+}
+
+SHIM_EXPORT pa_operation *pa_context_move_sink_input_by_index(pa_context *c, uint32_t idx, uint32_t sink_idx,
+		pa_context_success_cb_t cb, void *userdata)
+{
+	return move_op(c, true, idx, NULL, sink_idx, cb, userdata);
+}
+
+SHIM_EXPORT pa_operation *pa_context_move_source_output_by_name(pa_context *c, uint32_t idx,
+		const char *source_name, pa_context_success_cb_t cb, void *userdata)
+{
+	return move_op(c, false, idx, source_name, PA_INVALID_INDEX, cb, userdata);
+}
+
+SHIM_EXPORT pa_operation *pa_context_move_source_output_by_index(pa_context *c, uint32_t idx,
+		uint32_t source_idx, pa_context_success_cb_t cb, void *userdata)
+{
+	return move_op(c, false, idx, NULL, source_idx, cb, userdata);
+}
+
+/* this application: the one client there is (index 1, as its streams say) */
+static void run_client_info(pa_operation *o)
+{
+	pa_context *c = o->context;
+	if (o->cb == NULL)
+		return;
+	if (o->data.index != PA_INVALID_INDEX && o->data.index != 1) {
+		c->error = PA_ERR_NOENTITY;
+		((pa_client_info_cb_t)o->cb)(c, NULL, -1, o->userdata);
+		return;
+	}
+	pa_client_info i;
+	memset(&i, 0, sizeof(i));
+	i.index = 1;
+	i.name = shim_context_app_name(c);
+	i.owner_module = PA_INVALID_INDEX;
+	i.driver = "jackbus";
+	i.proplist = c->props;
+	pa_proplist *empty = NULL;
+	if (i.proplist == NULL)
+		i.proplist = empty = pa_proplist_new();
+	((pa_client_info_cb_t)o->cb)(c, &i, 0, o->userdata);
+	((pa_client_info_cb_t)o->cb)(c, NULL, 1, o->userdata);
+	if (empty)
+		pa_proplist_free(empty);
+}
+
+SHIM_EXPORT pa_operation *pa_context_get_client_info(pa_context *c, uint32_t idx, pa_client_info_cb_t cb,
+		void *userdata)
+{
+	pa_operation *o = shim_operation_new(c, NULL, run_client_info, (void *)cb, userdata);
+	if (o)
+		o->data.index = idx == PA_INVALID_INDEX ? 0 : idx;	/* INVALID: the list's marker */
+	return o;
+}
+
+SHIM_EXPORT pa_operation *pa_context_get_client_info_list(pa_context *c, pa_client_info_cb_t cb, void *userdata)
+{
+	pa_operation *o = shim_operation_new(c, NULL, run_client_info, (void *)cb, userdata);
+	if (o)
+		o->data.index = PA_INVALID_INDEX;
+	return o;
+}
+
+static void run_kill_client(pa_operation *o)
+{
+	pa_context *c = o->context;
+	o->data.success = o->data.index == 1;
+	if (!o->data.success)
+		c->error = PA_ERR_NOENTITY;
+	run_context_success(o);
+	if (o->data.success && c->state == PA_CONTEXT_READY)
+		shim_context_fail(c, PA_ERR_KILLED);	/* this application was the client */
+}
+
+SHIM_EXPORT pa_operation *pa_context_kill_client(pa_context *c, uint32_t idx, pa_context_success_cb_t cb,
+		void *userdata)
+{
+	pa_operation *o = shim_operation_new(c, NULL, run_kill_client, (void *)cb, userdata);
+	if (o)
+		o->data.index = idx;
 	return o;
 }
 

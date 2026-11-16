@@ -8,7 +8,12 @@
 #  - mpv's pulse output, the whole file, no spurious underflow;
 #  - SDL3's pulseaudio backend: JackBus's devices listed at its rate, opened
 #    at it;
-#  - Chrome and Firefox (headless): a Web Audio 440 Hz tone;
+#  - pactl's introspection; every installed libpulse user finds all of its
+#    functions in the shim;
+#  - without the launcher (session-wide): JackBus while it runs, PulseAudio's
+#    own libpulse while it doesn't;
+#  - Chrome and Firefox (headless, their sandboxes on): a Web Audio 440 Hz
+#    tone;
 #  - the realtime thread of a stream (paplay): no system call but futex.
 # Audio is recorded from each application's port and checked as a continuous
 # 440 Hz sine. A missing program is skipped.
@@ -24,7 +29,7 @@ out=$JACK_BUILD/pa-shim
 L=$here/../jackbus-pa
 check=$tree/nspa/tests/tools/sine_check.py
 logs=$(mktemp -d /tmp/jbpa-real.XXXXXX)
-[ -e "$out/lib/libpulse.so.0" ] || { echo "missing the shim: make -C nspa/pa-shim"; exit 2; }
+[ -e "$out/lib/libpulse.so.0" ] && [ -e "$out/lib/libjackbus-pa.so" ] || { echo "missing the shim: make -C nspa/pa-shim"; exit 2; }
 
 PULSE_SERVER=unix:/jackbus-pa-test/no-server JACK_DEFAULT_SERVER=jbpa
 export PULSE_SERVER JACK_DEFAULT_SERVER
@@ -128,7 +133,71 @@ else
     echo "SKIP SDL3 (make -C nspa/pw-shim test-apps)"
 fi
 
-# 5. the browsers, headless: a Web Audio tone
+# 5. pactl: introspection as a volume control sees it; what JackBus doesn't
+#    have (cards, modules, the sample cache) answers empty or not supported
+if have pactl; then
+    P() { "$L" pactl "$@" 2>&1; }
+    info=$(P info); sinks=$(P list short sinks); sources=$(P list short sources)
+    cards=$(P list cards; echo "rc=$?"); mods=$(P list modules; echo "rc=$?"); clients=$(P list clients)
+    stat=$(P stat; echo "rc=$?"); load=$(P load-module module-null-sink; echo "rc=$?")
+    sample=$(P play-sample bell; echo "rc=$?")
+    if echo "$info" | grep -q 'Server Name: PulseAudio (on JackBus)' &&
+       echo "$info" | grep -q 'Default Sink: jackbus.system.playback' &&
+       echo "$sinks" | grep -q 'jackbus.system.playback' && echo "$sources" | grep -q 'jackbus.system.capture' &&
+       [ "$cards" = rc=0 ] && [ "$mods" = rc=0 ] && echo "$clients" | grep -q 'Client #1' &&
+       echo "$stat" | grep -q 'rc=0' && echo "$load" | grep -q 'Not supported' && echo "$load" | grep -q 'rc=1' &&
+       echo "$sample" | grep -q 'rc=1'; then
+        pass "pactl: info, sinks, sources, clients; no cards or modules; load-module and play-sample refused"
+    else
+        printf '%s\n' "$info" "$sinks" "$sources" "$cards" "$mods" "$clients" "$stat" "$load" "$sample" >"$logs/pactl.log"
+        flunk "pactl" "$logs/pactl.log"
+    fi
+fi
+
+# 6. the session-wide way (no launcher, the directory on the library path):
+#    an application goes to JackBus while it runs, to PulseAudio's own
+#    libpulse (PipeWire's server) while it doesn't; PipeWire's own daemons
+#    always to PulseAudio's
+if have pactl; then
+    auto() { env LD_LIBRARY_PATH="$out/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" JACKBUS_PA_VERBOSE=1 "$@" 2>&1; }
+    up=$(auto pactl info)
+    down=$(JACK_DEFAULT_SERVER=jbpa-none auto pactl info)
+    pwd_=$(auto bash -c 'exec -a pipewire pactl info')
+    if echo "$up" | grep -q 'jackbus-pa: JackBus (JackBus runs)' && echo "$up" | grep -q 'Server Name: PulseAudio (on JackBus)' &&
+       echo "$down" | grep -q "jackbus-pa: PulseAudio's libpulse (JackBus isn't running)" &&
+       echo "$down" | grep -q 'Connection failure: Connection refused' && ! echo "$down" | grep -q 'on JackBus' &&
+       echo "$pwd_" | grep -q "jackbus-pa: PulseAudio's libpulse (a PipeWire daemon)"; then
+        pass "session-wide: JackBus while it runs, PulseAudio's libpulse while it doesn't, and in PipeWire's daemons"
+    else
+        printf '%s\n--\n' "$up" "$down" "$pwd_" >"$logs/auto.log"
+        flunk "session-wide dispatch" "$logs/auto.log"
+    fi
+fi
+
+# 7. every installed program and library that links libpulse finds each of
+#    its pa_ functions (Arch links with immediate binding: one missing and it
+#    doesn't load; KDE's volume control and libcanberra are among them)
+defs=$logs/defined.txt
+for l in "$out/lib/libjackbus-pa.so" /usr/lib/pulseaudio/libpulsecommon-*.so /usr/lib/libpulse-simple.so.0 \
+         /usr/lib/libpulse-mainloop-glib.so.0; do
+    [ -e "$l" ] && nm -D --defined-only "$l"
+done | awk '{print $3}' | sed 's/@.*//' | sort -u >"$defs"
+users=0; lacking=
+for f in $(find /usr/lib /usr/bin /opt -maxdepth 4 -type f \( -name '*.so*' -o -perm -u+x \) 2>/dev/null); do
+    readelf -d "$f" 2>/dev/null | grep -qE 'NEEDED.*\[libpulse(-simple|-mainloop-glib)?\.so\.0\]' || continue
+    users=$((users + 1))
+    m=$(nm -D --undefined-only "$f" 2>/dev/null | awk '{print $2}' | sed 's/@.*//' | grep '^pa_' | sort -u | comm -23 - "$defs" | tr '\n' ' ')
+    [ -n "$m" ] && lacking="$lacking
+    $f: $m"
+done
+if [ -z "$lacking" ]; then
+    pass "every installed libpulse user ($users programs and libraries) finds all its functions"
+else
+    echo "$lacking" >"$logs/lacking.txt"
+    flunk "libpulse functions missing" "$logs/lacking.txt"
+fi
+
+# 8. the browsers, headless: a Web Audio tone
 cat >"$logs/tone.html" <<'EOH'
 <html><body><script>var c=new AudioContext();var o=c.createOscillator();o.frequency.value=440;var g=c.createGain();g.gain.value=0.5;o.connect(g);g.connect(c.destination);o.start();</script></body></html>
 EOH
@@ -149,7 +218,10 @@ browser() {  # label profile-dir command...
 chrome=$(command -v google-chrome-stable || command -v chromium || ls /opt/google/chrome/chrome 2>/dev/null)
 if [ -n "$chrome" ]; then
     mkdir -p "$logs/chrome-profile"
-    browser Chrome "$logs/chrome-profile" "$L" -v "$chrome" --headless=new --no-sandbox --no-first-run \
+    # Chrome won't run as root with its sandbox: an ordinary user (a nested
+    # user namespace), the sandbox on
+    browser Chrome "$logs/chrome-profile" unshare --user --map-user=1000 --map-group=1000 -- \
+        "$L" -v "$chrome" --headless=new --no-first-run \
         --disable-gpu --user-data-dir="$logs/chrome-profile" --autoplay-policy=no-user-gesture-required "file://$logs/tone.html"
 else
     echo "SKIP Chrome (not installed)"
@@ -160,14 +232,13 @@ if [ -n "$firefox" ]; then
     printf '%s\n' 'user_pref("media.autoplay.default", 0);' 'user_pref("media.autoplay.blocking_policy", 0);' \
         'user_pref("browser.shell.checkDefaultBrowser", false);' 'user_pref("app.update.enabled", false);' \
         'user_pref("datareporting.policy.dataSubmissionEnabled", false);' >"$logs/ff-profile/user.js"
-    browser Firefox "$logs/ff-profile" MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 \
-        MOZ_DISABLE_UTILITY_SANDBOX=1 "$L" -v "$firefox" --headless --no-remote --profile "$logs/ff-profile" \
+    browser Firefox "$logs/ff-profile" "$L" -v "$firefox" --headless --no-remote --profile "$logs/ff-profile" \
         "file://$logs/tone.html"
 else
     echo "SKIP Firefox (not installed)"
 fi
 
-# 6. a stream's realtime thread
+# 9. a stream's realtime thread
 rt_cycles() {
     rt=$(grep -E 'sched_setscheduler\([0-9]+, SCHED_FIFO' "$1" | head -1 | awk '{print $1}')
     [ -n "$rt" ] || return 1

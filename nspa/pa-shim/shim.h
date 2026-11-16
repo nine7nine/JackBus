@@ -71,6 +71,11 @@ struct shim_op_data *shim_operation_data(pa_operation *o);
 void shim_operation_cancel_all(pa_context *c, pa_stream *s);
 void *shim_operation_callback(pa_operation *o, void **userdata);
 pa_stream *shim_operation_stream(pa_operation *o);
+pa_context *shim_operation_context(pa_operation *o);
+/* an operation that calls a pa_context_success_cb_t (error: the context's
+ * errno when it fails) */
+pa_operation *shim_context_success_op(pa_context *c, pa_context_success_cb_t cb, void *userdata,
+		int success, int error);
 pa_mainloop_api *shim_context_api(pa_context *c);
 const char *shim_context_app_name(pa_context *c);
 int shim_context_fail(pa_context *c, int error);
@@ -84,6 +89,7 @@ pa_stream *shim_context_find_stream(pa_context *c, bool playback, uint32_t index
 
 /* stream.c */
 void shim_stream_fail(pa_stream *s, int error);
+int shim_stream_move(pa_stream *s, const struct shim_device *d);	/* 0 or -PA_ERR_* */
 void shim_stream_set_gain(pa_stream *s, const pa_cvolume *v, int mute);
 void shim_stream_get_volume(pa_stream *s, pa_cvolume *v, int *mute);
 bool shim_stream_playback(pa_stream *s);
