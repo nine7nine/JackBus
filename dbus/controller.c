@@ -637,15 +637,16 @@ jack_controller_bridge_device(
     }
 }
 
-/* whether the card a spec names is there now (/proc/asound/<id> or card<n>; other device names
-   than hw: and plughw: ones: assumed) */
+/* the /proc/asound directory of the card a spec names (<id> or card<n>); false for device
+   names other than hw: and plughw: ones */
 static bool
-jack_controller_bridge_card_present(
-    const char * spec)
+jack_controller_bridge_card_path(
+    const char * spec,
+    char * path,
+    size_t size)
 {
     char device[BRIDGE_DEVICE_SIZE];
     char card[64];
-    char path[128];
     const char * p;
 
     jack_controller_bridge_device(spec, device, sizeof(device));
@@ -659,7 +660,7 @@ jack_controller_bridge_card_present(
     }
     else
     {
-        return true;
+        return false;
     }
     if (strncmp(p, "CARD=", 5) == 0)
     {
@@ -668,17 +669,60 @@ jack_controller_bridge_card_present(
     snprintf(card, sizeof(card), "%.*s", (int)strcspn(p, ","), p);
     if (card[0] == 0)
     {
-        return true;
+        return false;
     }
     if (card[strspn(card, "0123456789")] == 0)
     {
-        snprintf(path, sizeof(path), "/proc/asound/card%s", card);
+        snprintf(path, size, "/proc/asound/card%s", card);
     }
     else
     {
-        snprintf(path, sizeof(path), "/proc/asound/%s", card);
+        snprintf(path, size, "/proc/asound/%s", card);
+    }
+    return true;
+}
+
+/* whether the card a spec names is there now (other device names than hw: and plughw: ones:
+   assumed) */
+static bool
+jack_controller_bridge_card_present(
+    const char * spec)
+{
+    char path[128];
+
+    if (!jack_controller_bridge_card_path(spec, path, sizeof(path)))
+    {
+        return true;
     }
     return access(path, F_OK) == 0;
+}
+
+/* whether the card a spec names has audio: a PCM device (/proc/asound/cardN/pcmXp or pcmXc).
+   A card with MIDI only (a USB keyboard, a controller) has none: there is nothing to bridge,
+   its MIDI ports come from the MIDI slave drivers. Not there, or another device name: assumed */
+static bool
+jack_controller_bridge_card_has_pcm(
+    const char * spec)
+{
+    char path[128];
+    struct dirent * entry;
+    DIR * dir;
+    bool pcm = false;
+
+    if (!jack_controller_bridge_card_path(spec, path, sizeof(path))
+        || (dir = opendir(path)) == NULL)
+    {
+        return true;
+    }
+    while (!pcm && (entry = readdir(dir)) != NULL)
+    {
+        size_t len = strlen(entry->d_name);
+        pcm = strncmp(entry->d_name, "pcm", 3) == 0 && len > 4
+            && strspn(entry->d_name + 3, "0123456789") == len - 4
+            && (entry->d_name[len - 1] == 'p' || entry->d_name[len - 1] == 'c');
+    }
+    closedir(dir);
+    return pcm;
 }
 
 static int
@@ -911,6 +955,12 @@ jack_controller_bridges_add(
     if (strpbrk(spec, BRIDGE_SEPARATORS) != NULL || spec[0] == 0)
     {
         snprintf(error, error_size, "not a bridge: \"%s\"", spec);
+        return false;
+    }
+    if (!jack_controller_bridge_card_has_pcm(spec))
+    {
+        snprintf(error, error_size, "%s has no audio device, only MIDI: nothing to bridge "
+            "(its MIDI ports come from a MIDI slave driver, alsarawmidi)", spec);
         return false;
     }
     snprintf(saved, sizeof(saved), "%s", controller_ptr->bridges_vparam_value.str);

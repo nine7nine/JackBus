@@ -110,6 +110,26 @@ else
     result spec-check 1 "bridges='$v', AddBridge said: $r"
 fi
 
+# 1b. a card with MIDI only (a USB keyboard: /proc/asound/cardN has midi*, no pcm*) has no
+#     audio to bridge: refused with the reason, the list unchanged (skipped without one)
+midicard=
+for c in /proc/asound/card[0-9]*; do
+    if ls "$c" 2>/dev/null | grep -q '^midi' && ! ls "$c" 2>/dev/null | grep -qE '^pcm[0-9]+[pc]$'; then
+        midicard=$(cat "$c/id" 2>/dev/null); break
+    fi
+done
+if [ -n "$midicard" ]; then
+    before=$(getp engine bridges)
+    r=$(gd org.jackaudio.JackControl.AddBridge "'$midicard'")
+    if echo "$r" | grep -q "has no audio device, only MIDI" && [ "$(getp engine bridges)" = "$before" ]; then
+        result midi-only 0 "$midicard (MIDI only) refused: nothing to bridge"
+    else
+        result midi-only 1 "AddBridge of $midicard said: $r; bridges='$(getp engine bridges)'"
+    fi
+else
+    echo "SKIP jackdbus-bridge midi-only: no MIDI-only card here"
+fi
+
 # 2. listed while stopped: bridged when the server starts
 setp engine,bridges "variant:string:Loopback"
 if call org.jackaudio.JackControl.StartServer && wait_locked Loopback 15; then

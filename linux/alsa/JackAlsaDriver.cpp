@@ -658,21 +658,9 @@ enum_alsa_devices(int stream = -1)
 
         {
             snprintf(card_id.str, sizeof(card_id.str), "hw:%s", snd_ctl_card_info_get_id(info));
-            /* filtered: the card goes in before its first device of that direction */
+            /* the card goes in before its first PCM device (of that direction, when filtered):
+               a card with MIDI only (a USB keyboard) has no audio to offer */
             bool card_listed = false;
-            if (stream < 0)
-            {
-                if (!jack_constraint_add_enum(
-                        &constraint_ptr,
-                        &array_size,
-                        &card_id,
-                        snd_ctl_card_info_get_name(info)))
-                {
-                    snd_ctl_close(handle);
-                    goto fail;
-                }
-                card_listed = true;
-            }
 
             device_no = -1;
 
