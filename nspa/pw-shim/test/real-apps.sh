@@ -195,7 +195,48 @@ if have fluidsynth; then
     fi
 fi
 
-# 9. the JACK realtime thread of a shim application makes no system call but
+# 9. the registry and links, as libremidi (ossia score) uses them: its own
+#    node and ports by node id, the default devices, link-factory by port and
+#    by node, links going with their proxies
+if [ -x "$out/pw-linktest" ]; then
+    timeout 30 "$L" -v "$out/pw-linktest" >"$logs/linktest.log" 2>&1
+    rc=$?
+    grep -E '^(PASS|FAIL)' "$logs/linktest.log" | sed 's/^\(PASS\|FAIL\) /\1 pw-linktest: /'
+    [ $rc -eq 0 ] && [ "$(grep -c '^PASS' "$logs/linktest.log")" = 4 ] || flunk "pw-linktest (rc $rc)" "$logs/linktest.log"
+fi
+
+# 10. ossia score (PipeWire is its default backend on Linux), unmodified, on
+#     Qt's offscreen platform with a scratch home: its filter, its own node
+#     found in the registry, its ports linked to the default devices through
+#     link-factory. It needs a document to start its engine:
+#     OSSIA_TEST_DOC=<file.score> (else skipped)
+if have ossia-score && [ -n "${OSSIA_TEST_DOC:-}" ] && [ -f "${OSSIA_TEST_DOC:-}" ]; then
+    oh=$logs/ossia-home
+    mkdir -p "$oh/Documents/ossia/score/packages/default"
+    echo '{ "version": 9999 }' >"$oh/Documents/ossia/score/packages/default/package.json"
+    env HOME="$oh" XDG_CONFIG_HOME="$oh/.config" XDG_DATA_HOME="$oh/.local/share" XDG_CACHE_HOME="$oh/.cache" \
+        QT_QPA_PLATFORM=offscreen "$L" -v ossia-score --no-opengl --force-restore "$OSSIA_TEST_DOC" >"$logs/ossia.log" 2>&1 &
+    p=$!
+    i=0
+    while [ $i -lt 600 ]; do
+        jack_lsp -c ossia-score:out_0 2>/dev/null | grep -q 'system:playback_1' &&
+            jack_lsp -c ossia-score:in_0 2>/dev/null | grep -q 'system:capture_1' && break
+        sleep 0.1; i=$((i + 1))
+    done
+    conns=$(jack_lsp -c 2>/dev/null | grep -A1 '^ossia-score:' | grep -c 'system:')
+    kill -TERM $p 2>/dev/null
+    i=0; while kill -0 $p 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    kill -KILL $p 2>/dev/null; wait $p 2>/dev/null
+    if [ "$conns" -ge 4 ] && grep -q 'link-factory: ossia-score:out_0 -> system:playback_1' "$logs/ossia.log"; then
+        pass "ossia score: its PipeWire engine on JackBus ($(grep -o 'forced to JackBus: [^,]*, [^,]*' "$logs/ossia.log" | head -1)), linked to the defaults through link-factory"
+    else
+        flunk "ossia score ($conns connections)" "$logs/ossia.log"
+    fi
+else
+    echo "SKIP ossia score (not installed, or no OSSIA_TEST_DOC document)"
+fi
+
+# 11. the JACK realtime thread of a shim application makes no system call but
 #    JACK's futex, from its first cycle on: an async stream (ring copies only),
 #    an RT stream being resampled (PipeWire's audio-src: 44100 Hz), a MIDI
 #    filter with a data-loop invoke; a negative control must be seen

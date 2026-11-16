@@ -46,7 +46,7 @@ $(SHIM): $(SRCS) $(OBJS) shim.h resample.h Makefile
 		-Wl,-soname,libpipewire-0.3.so.0 -Wl,--no-undefined -Wl,-z,defs \
 		-o $@ $(SRCS) $(OBJS) -L$(JACK_BUILD)/common -ljack -ldl -lpthread -lm
 
-TEST_APPS = $(OUT)/pw-probe $(OUT)/pw-twofilter $(OUT)/pw-midifilter $(OUT)/jbpw-check \
+TEST_APPS = $(OUT)/pw-probe $(OUT)/pw-twofilter $(OUT)/pw-midifilter $(OUT)/pw-linktest $(OUT)/jbpw-check \
 	$(if $(shell pkg-config --exists sdl3 && echo y),$(OUT)/sdl3-tone) \
 	$(if $(shell pkg-config --exists openal && echo y),$(OUT)/openal-tone) \
 	$(if $(PW_EXAMPLES),$(OUT)/audio-dsp-filter $(OUT)/audio-src $(OUT)/audio-capture)
@@ -63,6 +63,10 @@ $(OUT)/pw-twofilter: test/pw-twofilter.c
 	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
 
 $(OUT)/pw-midifilter: test/pw-midifilter.c
+	@mkdir -p $(@D)
+	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
+
+$(OUT)/pw-linktest: test/pw-linktest.c
 	@mkdir -p $(@D)
 	$(CC) $(PW_CFLAGS) $(CFLAGS) -o $@ $< $(PW_LIBS) -lm
 
