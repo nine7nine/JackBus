@@ -30,7 +30,9 @@
  * Options: name "<client name>" (default: the program's name, or
  * JACKBUS_ALSA_NAME), server "<JACK server>", autoconnect <bool> (default
  * yes, JACKBUS_ALSA_AUTOCONNECT=0: no): the ports go to the physical ports in
- * order (a mono stream to the first two).
+ * order (a mono stream to the first two); fallback "<PCM>": opened instead
+ * when JackBus isn't running (pcm.!default { type jackbus fallback "pipewire" }:
+ * ALSA applications on JackBus while it runs, on PipeWire while it doesn't).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -54,6 +56,7 @@
 #include <jack/jackbus.h>
 
 #include "../compat/compat_conf.h"
+#include "../compat/server.h"
 #include "../pw-shim/resample.h"
 
 #define MAX_CHANNELS 64
@@ -617,10 +620,25 @@ static int set_constraints(struct jb *p)
 	return 0;
 }
 
+/* the PCM to use while JackBus isn't running; a fallback that leads back
+ * here (to the default device that is this one) fails instead of looping */
+static int open_fallback(snd_pcm_t **pcmp, const char *fallback, snd_pcm_stream_t stream, int mode)
+{
+	static __thread int depth;
+	if (depth > 0)
+		return -ENODEV;
+	depth++;
+	int err = snd_pcm_open(pcmp, fallback, stream, mode);
+	depth--;
+	if (getenv("JACKBUS_ALSA_VERBOSE"))
+		fprintf(stderr, "jackbus-alsa: JackBus isn't running: %s (%s)\n", fallback, err < 0 ? snd_strerror(err) : "opened");
+	return err;
+}
+
 SND_PCM_PLUGIN_DEFINE_FUNC(jackbus)
 {
 	snd_config_iterator_t i, next;
-	const char *cname = NULL, *server = NULL;
+	const char *cname = NULL, *server = NULL, *fallback = NULL;
 	int connect = -1, err;		/* autoconnect: -1, the settings' */
 	jack_status_t status = 0;
 
@@ -641,6 +659,12 @@ SND_PCM_PLUGIN_DEFINE_FUNC(jackbus)
 				server = NULL;
 			continue;
 		}
+		if (strcmp(id, "fallback") == 0) {
+			snd_config_get_string(n, &fallback);
+			if (fallback && fallback[0] == 0)
+				fallback = NULL;
+			continue;
+		}
 		if (strcmp(id, "autoconnect") == 0) {
 			if ((connect = snd_config_get_bool(n)) < 0)
 				return -EINVAL;
@@ -649,6 +673,11 @@ SND_PCM_PLUGIN_DEFINE_FUNC(jackbus)
 		SNDERR("jackbus: unknown field %s", id);
 		return -EINVAL;
 	}
+
+	/* JackBus isn't running: the fallback, when there is one (checked without
+	 * libjack: nothing printed) */
+	if (fallback && !jackbus_server_running(server))
+		return open_fallback(pcmp, fallback, stream, mode);
 
 	struct jb *p = calloc(1, sizeof(*p));
 	if (p == NULL)
@@ -664,8 +693,10 @@ SND_PCM_PLUGIN_DEFINE_FUNC(jackbus)
 	jack_options_t options = JackNoStartServer | (server ? JackServerName : 0);
 	p->node = jackbus_node_open(client_name ? client_name : "alsa", options, &status, server);
 	if (p->node == NULL) {
-		SNDERR("jackbus: can't reach JackBus (status 0x%x)", status);
 		free(p);
+		if (fallback)			/* its socket is there, the server isn't */
+			return open_fallback(pcmp, fallback, stream, mode);
+		SNDERR("jackbus: can't reach JackBus (status 0x%x)", status);
 		return -ENODEV;
 	}
 	p->client = jackbus_node_client(p->node);

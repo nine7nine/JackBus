@@ -13,7 +13,10 @@
 #  - an application whose writing thread is late: the underrun reported to
 #    it (EPIPE), and after recovering it goes on;
 #  - an application killed: its client goes, the server goes on;
-#  - the node's realtime thread: no system call but JACK's futex.
+#  - the node's realtime thread: no system call but JACK's futex;
+#  - a device with a fallback (the default device PatchBox sets): JackBus
+#    while it runs, the fallback PCM while it doesn't (nothing printed); one
+#    that falls back to itself fails, no loop.
 #
 #   make -C nspa/jackbus-alsa all test-apps && nspa/jackbus-alsa/test/run.sh
 set -u
@@ -35,6 +38,8 @@ cat >"$logs/asound.conf" <<EOC
 </usr/share/alsa/alsa.conf>
 pcm_type.jackbus { lib "$out/libasound_module_pcm_jackbus.so" }
 <$here/../50-jackbus.conf>
+pcm.jbdefault { type jackbus fallback "null" }
+pcm.jbloop { type jackbus fallback "jbloop" }
 EOC
 export ALSA_CONFIG_PATH=$logs/asound.conf
 fail=0
@@ -192,7 +197,33 @@ if command -v strace >/dev/null; then
     fi
 fi
 
+# 8. with a fallback (as the default device PatchBox sets), while JackBus
+#    runs: JackBus
+aplay -D jbdefault "$logs/s48.wav" >"$logs/fb-up.log" 2>&1 &
+p=$!
+port=$(wait_port '^aplay:out_1$')
+wait $p; rc=$?
+if [ -n "$port" ] && [ $rc -eq 0 ]; then
+    pass "a device with a fallback, JackBus running: on JackBus (aplay:out_1), exit 0"
+else
+    flunk "fallback device with JackBus running (rc $rc)" "$logs/fb-up.log"
+fi
+
 stop $sp
+
+# 9. JackBus not running: the fallback (null here, pipewire for the default
+#    device), quietly; no fallback: an error; a fallback back to the device
+#    itself: an error, not a loop
+JACKBUS_ALSA_VERBOSE=1 timeout 20 aplay -D jbdefault "$logs/s48.wav" >"$logs/fb-down.log" 2>&1; rc1=$?
+timeout 20 aplay -D jackbus "$logs/s48.wav" >"$logs/fb-none.log" 2>&1; rc2=$?
+timeout 20 aplay -D jbloop "$logs/s48.wav" >"$logs/fb-loop.log" 2>&1; rc3=$?
+if [ $rc1 -eq 0 ] && grep -q "jackbus-alsa: JackBus isn't running: null (opened)" "$logs/fb-down.log" &&
+   ! grep -qi 'cannot connect\|jackbus socket' "$logs/fb-down.log" &&
+   [ $rc2 -ne 0 ] && [ $rc2 -ne 124 ] && [ $rc3 -ne 0 ] && [ $rc3 -ne 124 ]; then
+    pass "JackBus not running: the fallback opened, nothing from libjack; without one an error (exit $rc2); a fallback to itself an error (exit $rc3), no loop"
+else
+    flunk "JackBus not running (rc $rc1 $rc2 $rc3)" "$logs/fb-down.log" "$logs/fb-none.log" "$logs/fb-loop.log"
+fi
 grep -qE 'Segmentation|Assertion|terminate called' "$logs/jackd.log" && flunk "server log" "$logs/jackd.log"
 echo "logs: $logs"
 [ $fail -eq 0 ] && echo "ALL PASS" || echo "SOME FAILED"
