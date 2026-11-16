@@ -39,12 +39,17 @@ $(OUT)/obj/JackBridgeResampler.o: $(RESAMPLER) $(JACK_TREE)/common/JackBridgeRes
 	@mkdir -p $(@D)
 	$(CXX) -I$(JACK_TREE)/common $(CXXFLAGS) -fPIC -fvisibility=hidden -c -o $@ $<
 
-$(SHIM): $(SRCS) $(OBJS) shim.h resample.h Makefile
+$(SHIM): $(SRCS) $(OBJS) shim.h resample.h ../compat/compat_conf.h Makefile
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) -DSHIM_SPA_PLUGINDIR='"$(SPA_PLUGINDIR)"' $(CFLAGS) \
-		-fPIC -fvisibility=hidden -shared \
+		-fPIC -fvisibility=hidden -shared $(LDFLAGS) \
 		-Wl,-soname,libpipewire-0.3.so.0 -Wl,--no-undefined -Wl,-z,defs \
 		-o $@ $(SRCS) $(OBJS) -L$(JACK_BUILD)/common -ljack -ldl -lpthread -lm
+
+PREFIX ?= /usr
+install: $(SHIM)
+	install -Dm755 $(SHIM) $(DESTDIR)$(PREFIX)/lib/jackbus-pw/libpipewire-0.3.so.0
+	install -Dm755 jackbus-pw $(DESTDIR)$(PREFIX)/bin/jackbus-pw
 
 TEST_APPS = $(OUT)/pw-probe $(OUT)/pw-twofilter $(OUT)/pw-midifilter $(OUT)/pw-linktest $(OUT)/jbpw-check \
 	$(if $(shell pkg-config --exists sdl3 && echo y),$(OUT)/sdl3-tone) \
@@ -91,4 +96,4 @@ $(OUT)/jbpw-check: test/jbpw-check.c
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all test-apps clean
+.PHONY: install all test-apps clean

@@ -1,7 +1,7 @@
 # jackbus-alsa: JackBus's own ALSA plugin (libasound_module_pcm_jackbus.so).
 #
 #   make            the plugin, in $(OUT)
-#   make install    into ALSA's plugin directory and /etc/alsa/conf.d (DESTDIR for packaging)
+#   make install    into ALSA's plugin directory, its configuration in /usr/share/alsa/alsa.conf.d linked from /etc/alsa/conf.d (DESTDIR for packaging)
 
 JACK_TREE  ?= $(abspath ../..)
 JACK_BUILD ?= $(JACK_TREE)/build
@@ -33,12 +33,14 @@ $(OUT)/obj/JackBridgeResampler.o: $(JACK_TREE)/common/JackBridgeResampler.cpp $(
 
 $(PLUGIN): pcm_jackbus.c $(OBJS) ../compat/compat_conf.h Makefile
 	@mkdir -p $(@D)
-	$(CC) -DPIC -I$(JACK_TREE)/common $(ALSA_CFLAGS) $(CFLAGS) -fPIC -shared -Wl,--no-undefined \
+	$(CC) -DPIC -I$(JACK_TREE)/common $(ALSA_CFLAGS) $(CFLAGS) -fPIC -shared $(LDFLAGS) -Wl,--no-undefined \
 		-o $@ $< $(OBJS) -L$(JACK_BUILD)/common -ljack $(ALSA_LIBS) -lm
 
 install: $(PLUGIN)
 	install -Dm755 $(PLUGIN) $(DESTDIR)$(ALSA_PLUGIN_DIR)/libasound_module_pcm_jackbus.so
-	install -Dm644 50-jackbus.conf $(DESTDIR)/etc/alsa/conf.d/50-jackbus.conf
+	install -Dm644 50-jackbus.conf $(DESTDIR)/usr/share/alsa/alsa.conf.d/50-jackbus.conf
+	install -d $(DESTDIR)/etc/alsa/conf.d
+	ln -sf /usr/share/alsa/alsa.conf.d/50-jackbus.conf $(DESTDIR)/etc/alsa/conf.d/50-jackbus.conf
 
 clean:
 	rm -rf $(OUT)
