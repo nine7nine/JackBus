@@ -531,6 +531,13 @@ else
     else
         echo "SKIP jackbus-pw (the shim and PipeWire's examples are not built)"
     fi
+    # ALSA applications through JackBus's own ALSA plugin (make -C nspa/jackbus-alsa
+    # all test-apps)
+    if [ -e "$JACK_BUILD/jackbus-alsa/libasound_module_pcm_jackbus.so" ]; then
+        "$root/nspa/jackbus-alsa/test/run.sh" || fail=1
+    else
+        echo "SKIP jackbus-alsa (the plugin is not built)"
+    fi
 fi
 
 if [ -x "$JACK_BUILD/dbus/jackdbus" ]; then

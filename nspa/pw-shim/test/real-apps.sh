@@ -251,7 +251,7 @@ fi
 rt_cycles() {  # <strace file> -> the realtime thread's lines in its cycles
     rt=$(grep -E 'sched_setscheduler\([0-9]+, SCHED_FIFO' "$1" | head -1 | awk '{print $1}')
     [ -n "$rt" ] || return 1
-    awk -v t="$rt" '$1 == t' "$1" | sed -n '/sched_setscheduler(/,$p' | sed '1d' | sed '/ --- SIG/,$d'
+    awk -v t="$rt" '$1 == t' "$1" | sed -n '/sched_setscheduler(/,$p' | sed '1d' | sed '/<\.\.\. sched_setscheduler resumed>/d' | sed '/ --- SIG/,$d'
 }
 rt_check() {  # name strace
     if rt_cycles "$2" >"$2.loop" && [ -s "$2.loop" ]; then
