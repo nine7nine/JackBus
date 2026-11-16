@@ -725,6 +725,11 @@ static void fill_attr(pa_stream *s, const pa_buffer_attr *attr)
 		uint32_t dev_frames = (uint32_t)(dev * s->jack_rate / 1000000ull);
 		t = t > dev_frames ? t - dev_frames : 0;
 	}
+	/* the settings' cap on what a stream buffers here (max-latency, ms;
+	 * 0: what it asks for), never below two cycles */
+	long cap_ms = jackbus_compat_int("max-latency", "JACKBUS_PA_MAX_LATENCY", 0);
+	uint32_t cap = cap_ms > 0 && s->jack_rate ? (uint32_t)((uint64_t)cap_ms * s->jack_rate / 1000) : UINT32_MAX;
+	t = SHIM_MIN(t, cap);
 	s->tlength = SHIM_MIN(SHIM_MAX(t, 2 * quantum), RING_FRAMES / 2);
 	s->minreq = SHIM_MIN(SHIM_MAX(jack_frames(s, bytes_to_frames(s, a.minreq)), quantum), s->tlength);
 	uint32_t pb = jack_frames(s, bytes_to_frames(s, a.prebuf));
@@ -732,7 +737,8 @@ static void fill_attr(pa_stream *s, const pa_buffer_attr *attr)
 	 * the ring alone never reaches tlength, so playback starts a cycle below */
 	uint32_t pb_max = s->rs ? (s->tlength > quantum ? s->tlength - quantum : 0) : s->tlength;
 	atomic_store(&s->prebuf, SHIM_MIN(pb, pb_max));
-	s->fragsize = SHIM_MIN(SHIM_MAX(jack_frames(s, bytes_to_frames(s, a.fragsize)), quantum), RING_FRAMES / 2);
+	s->fragsize = SHIM_MIN(SHIM_MAX(SHIM_MIN(jack_frames(s, bytes_to_frames(s, a.fragsize)), cap), quantum),
+			RING_FRAMES / 2);
 	size_t fs = pa_frame_size(&s->ss);
 	a.tlength = (uint32_t)(app_frames(s, s->tlength) * fs);
 	a.minreq = (uint32_t)(app_frames(s, s->minreq) * fs);

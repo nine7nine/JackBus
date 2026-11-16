@@ -18,9 +18,9 @@ PW_LIBS       := $(shell pkg-config --libs libpipewire-0.3)
 SPA_PLUGINDIR := $(shell pkg-config --variable=plugindir libspa-0.2)
 
 CFLAGS   ?= -O2 -g
-CFLAGS   += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
+CFLAGS   += -DJACKBUS_COMPAT_LAYER='"pw"' -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
 CXXFLAGS ?= -O2 -g
-CXXFLAGS += -std=c++11 -Wall -fno-exceptions -fno-rtti
+CXXFLAGS += -DJACKBUS_COMPAT_LAYER='"pw"' -std=c++11 -Wall -fno-exceptions -fno-rtti
 CPPFLAGS += $(PW_CFLAGS) -I$(JACK_TREE)/common
 
 SRCS = pw.c loop.c core.c filter.c app.c stream.c midi.c

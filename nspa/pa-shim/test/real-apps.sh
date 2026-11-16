@@ -156,6 +156,61 @@ if have pactl; then
     fi
 fi
 
+# 5b. the shims' settings: output (a second card, as a bridged one: the
+#    default sink, and where a stream goes), the buffering cap
+#    (pulse-max-latency) on a stream asking for 500 ms, the resampler's
+#    quality (low and high) on a resampled stream
+if [ -x "$out/fake-card" ] && have paplay && have pactl; then
+    "$out/fake-card" >/dev/null 2>&1 &
+    fp=$!
+    i=0; while [ $i -lt 50 ] && ! jack_lsp 2>/dev/null | grep -q '^fakecard:playback_1$'; do sleep 0.1; i=$((i + 1)); done
+    printf 'output = system\npa.output = fakecard\n' >"$logs/compat.conf"
+    dsink=$("$L" pactl info 2>&1 | sed -n 's/^Default Sink: //p')
+    "$L" paplay "$logs/s48.wav" >"$logs/out-fake.log" 2>&1 &
+    p=$!
+    port=$(app_port)
+    conn=$(jack_lsp -c "$port" 2>/dev/null | sed -n 2p | tr -d ' ')
+    wait $p
+    rm -f "$logs/compat.conf"
+    stop $fp
+    if [ "$dsink" = jackbus.fakecard.playback ] && [ "$conn" = fakecard:playback_1 ]; then
+        pass "pa.output = fakecard (over output = system): the default sink $dsink, paplay to $conn"
+    else
+        flunk "output setting (default sink '$dsink', connected to '$conn')" "$logs/out-fake.log"
+    fi
+    "$L" -v paplay --latency-msec=500 "$logs/s48.wav" >"$logs/nocap.log" 2>&1
+    JACKBUS_PA_MAX_LATENCY=20 "$L" -v paplay --latency-msec=500 "$logs/s48.wav" >"$logs/cap.log" 2>&1; rc=$?
+    t0=$(sed -n 's/.*tlength \([0-9]*\) frames.*/\1/p' "$logs/nocap.log" | head -1)
+    t1=$(sed -n 's/.*tlength \([0-9]*\) frames.*/\1/p' "$logs/cap.log" | head -1)
+    if [ $rc -eq 0 ] && [ -n "$t0" ] && [ -n "$t1" ] && [ "$t0" -gt 960 ] && [ "$t1" -le 960 ]; then
+        pass "pulse-max-latency 20 ms: a stream asking for 500 ms buffers $t1 frames (uncapped: $t0), plays, exit 0"
+    else
+        flunk "pulse-max-latency (rc $rc, $t0 -> $t1 frames)" "$logs/cap.log"
+    fi
+    printf 'resample = yes\npa.resample = no\n' >"$logs/compat.conf"
+    timeout 10 "$L" paplay "$logs/s441.wav" >"$logs/layer-rs.log" 2>&1; rc=$?
+    rm -f "$logs/compat.conf"
+    if [ $rc -ne 0 ] && grep -q 'resampling is off' "$logs/layer-rs.log"; then
+        pass "pa.resample = no (over resample = yes): a 44100 Hz stream refused"
+    else
+        flunk "pa.resample over resample (rc $rc)" "$logs/layer-rs.log"
+    fi
+    for q in low high; do
+        JACKBUS_RESAMPLE_QUALITY=$q "$L" paplay "$logs/s441.wav" >"$logs/q-$q.log" 2>&1 &
+        p=$!
+        port=$(app_port)
+        sine_of "$port" "q-$q"; r=$?
+        wait $p; rc=$?
+        if [ $r -eq 0 ] && [ $rc -eq 0 ]; then
+            pass "resample-quality $q: 44100 -> 48000, $(cut -d' ' -f2- "$logs/q-$q.check")"
+        else
+            flunk "resample-quality $q (rc $rc)" "$logs/q-$q.check" "$logs/q-$q.log"
+        fi
+    done
+else
+    echo "SKIP the settings (make -C nspa/pa-shim test-apps)"
+fi
+
 # 6. the session-wide way: the package puts the dispatcher on the dynamic
 #    linker's path (here: the library path), so every program loading
 #    libpulse gets it. Setting off (the default): PulseAudio's libpulse, as

@@ -23,9 +23,9 @@ PULSE_PRIVDIR := $(PULSE_LIBDIR)/pulseaudio
 PULSE_COMMON  := $(firstword $(wildcard $(PULSE_PRIVDIR)/libpulsecommon-*.so))
 
 CFLAGS   ?= -O2 -g
-CFLAGS   += -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
+CFLAGS   += -DJACKBUS_COMPAT_LAYER='"pa"' -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
 CXXFLAGS ?= -O2 -g
-CXXFLAGS += -std=c++11 -Wall -fno-exceptions -fno-rtti
+CXXFLAGS += -DJACKBUS_COMPAT_LAYER='"pa"' -std=c++11 -Wall -fno-exceptions -fno-rtti
 CPPFLAGS += $(PULSE_CFLAGS) -I$(JACK_TREE)/common
 
 SRCS = mainloop.c node.c context.c stream.c server.c
@@ -65,7 +65,11 @@ $(IMPL): $(SRCS) $(OBJS) shim.h pa.map ../compat/compat_conf.h ../compat/server.
 		-o $@ $(SRCS) $(OBJS) $(PULSE_COMMON) -L$(JACK_BUILD)/common -ljack -lpthread -lm
 
 # test helpers: a dlsym interposer (as teams-sdl-cef's audio probe has)
-test-apps: $(OUT)/dlsym-hook.so $(OUT)/pa-dlsym-client
+test-apps: $(OUT)/dlsym-hook.so $(OUT)/pa-dlsym-client $(OUT)/fake-card
+
+$(OUT)/fake-card: test/fake-card.c
+	@mkdir -p $(@D)
+	$(CC) -I$(JACK_TREE)/common $(CFLAGS) -o $@ $< -L$(JACK_BUILD)/common -ljack
 
 $(OUT)/pa-dlsym-client: test/pa-dlsym-client.c
 	@mkdir -p $(@D)

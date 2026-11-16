@@ -54,6 +54,27 @@ python3 -I "$here/mkwav.py" "$logs/s441.wav" 44100 4
 python3 -I "$here/mkwav.py" "$logs/s48.wav" 48000 4
 python3 -I "$here/mkmid.py" "$logs/notes.mid"
 
+# 0. the output setting: a second card (as a bridged one) gets pw-play's
+#    stream, and is the default sink
+fc=$JACK_BUILD/pa-shim/fake-card
+if [ -x "$fc" ] && have pw-play; then
+    "$fc" >/dev/null 2>&1 &
+    fp=$!
+    wait_port '^fakecard:playback_1$' >/dev/null
+    JACKBUS_OUTPUT=fakecard "$L" pw-play "$logs/s48.wav" >"$logs/out-fake.log" 2>&1 &
+    p=$!
+    wait_port '^pw-play:FL$' >/dev/null
+    sleep 0.2
+    conn=$(jack_lsp -c pw-play:FL 2>/dev/null | sed -n 2p | tr -d ' ')
+    wait $p
+    stop $fp
+    if [ "$conn" = fakecard:playback_1 ]; then
+        pass "output = fakecard: pw-play to $conn"
+    else
+        flunk "output setting (connected to '$conn')" "$logs/out-fake.log"
+    fi
+fi
+
 # 1. pw-play (an async stream: no RT_PROCESS): a 48000 Hz file direct; a
 #    44100 Hz one resampled (the fallback), refused with the reason with -R
 if have pw-play; then

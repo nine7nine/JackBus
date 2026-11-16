@@ -346,13 +346,30 @@ static void autoconnect(struct jb *p)
 	p->connected = true;
 	const char **phys = jack_get_ports(p->client, NULL, JACK_DEFAULT_AUDIO_TYPE,
 			JackPortIsPhysical | (p->playback ? JackPortIsInput : JackPortIsOutput));
-	for (unsigned int i = 0; phys && phys[i] && i < (p->n_ports == 1 ? 2u : p->n_ports); i++) {
-		unsigned int ch = p->n_ports == 1 ? 0 : i;
+	/* one device's ports: the settings' output (input) when it has some,
+	 * else the first physical client's */
+	char who[128];
+	jackbus_compat_device(p->playback, who, sizeof(who));
+	size_t wl = strlen(who);
+	bool there = false;
+	for (unsigned int i = 0; wl && phys && phys[i]; i++)
+		there |= strncmp(phys[i], who, wl) == 0 && phys[i][wl] == ':';
+	if (!there && phys && phys[0]) {
+		const char *colon = strchr(phys[0], ':');
+		snprintf(who, sizeof(who), "%.*s", colon ? (int)(colon - phys[0]) : 0, phys[0]);
+		wl = strlen(who);
+	}
+	unsigned int k = 0;
+	for (unsigned int i = 0; phys && phys[i] && k < (p->n_ports == 1 ? 2u : p->n_ports); i++) {
+		if (strncmp(phys[i], who, wl) != 0 || phys[i][wl] != ':')
+			continue;
+		unsigned int ch = p->n_ports == 1 ? 0 : k;
 		const char *mine = jack_port_name(jackbus_port_jack(p->ports[ch]));
 		if (p->playback)
 			jack_connect(p->client, mine, phys[i]);
-		else if (i == ch)
+		else if (k == ch)
 			jack_connect(p->client, phys[i], mine);
+		k++;
 	}
 	jack_free(phys);
 }

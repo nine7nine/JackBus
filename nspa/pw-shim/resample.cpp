@@ -12,6 +12,7 @@
 
 extern "C" {
 #include "resample.h"
+#include "../compat/compat_conf.h"
 }
 
 struct shim_resampler {
@@ -25,7 +26,9 @@ extern "C" struct shim_resampler *shim_resampler_new(int channels, double ratio,
 	if (mem == NULL)
 		return NULL;
 	shim_resampler *s = new (mem) shim_resampler;
-	if (!s->r.Init(channels, ratio, 1, max_in, max_out)) {
+	/* the quality from the shims' settings (resample-quality), read here, not
+	 * in a realtime thread: a resampler is made as a stream is set up */
+	if (!s->r.Init(channels, ratio, jackbus_compat_quality(), max_in, max_out)) {
 		s->~shim_resampler();
 		free(mem);
 		return NULL;

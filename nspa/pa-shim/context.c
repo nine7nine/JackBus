@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "shim.h"
+#include "../compat/compat_conf.h"
 
 #define MAX_DEVICES 32
 
@@ -401,12 +402,22 @@ static void rescan(pa_context *c, bool notify)
 		notify_sub(c, PA_SUBSCRIPTION_EVENT_SERVER | PA_SUBSCRIPTION_EVENT_CHANGE, PA_INVALID_INDEX);
 }
 
+/* the settings' output (input) device when it is there, else the first */
 const struct shim_device *shim_context_default_device(pa_context *c, bool playback)
 {
-	for (int i = 0; i < c->n_devices; i++)
-		if (c->devices[i].playback == playback)
-			return &c->devices[i];
-	return NULL;
+	char want[128];
+	const struct shim_device *first = NULL;
+	jackbus_compat_device(playback, want, sizeof(want));
+	for (int i = 0; i < c->n_devices; i++) {
+		const struct shim_device *d = &c->devices[i];
+		if (d->playback != playback)
+			continue;
+		if (want[0] && strcmp(d->client, want) == 0)
+			return d;
+		if (first == NULL)
+			first = d;
+	}
+	return first;
 }
 
 const struct shim_device *shim_context_device(pa_context *c, bool playback, const char *name, uint32_t index)

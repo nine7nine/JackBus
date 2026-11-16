@@ -199,6 +199,28 @@ if command -v strace >/dev/null; then
     fi
 fi
 
+# 7b. the output setting: a second card (as a bridged one) gets the stream
+fc=$JACK_BUILD/pa-shim/fake-card
+if [ -x "$fc" ]; then
+    "$fc" >/dev/null 2>&1 &
+    fp=$!
+    wait_port '^fakecard:playback_1$' >/dev/null
+    JACKBUS_OUTPUT=fakecard aplay -D jackbus "$logs/s48.wav" >"$logs/out-fake.log" 2>&1 &
+    p=$!
+    wait_port '^aplay:out_1$' >/dev/null
+    sleep 0.2
+    conn=$(jack_lsp -c aplay:out_1 2>/dev/null | sed -n 2p | tr -d ' ')
+    wait $p
+    stop $fp
+    if [ "$conn" = fakecard:playback_1 ]; then
+        pass "output = fakecard: aplay to $conn"
+    else
+        flunk "output setting (connected to '$conn')" "$logs/out-fake.log"
+    fi
+else
+    echo "SKIP the output setting (make -C nspa/pa-shim test-apps)"
+fi
+
 # 8. with a fallback (as the default device PatchBox sets), while JackBus
 #    runs: JackBus
 aplay -D jbdefault "$logs/s48.wav" >"$logs/fb-up.log" 2>&1 &

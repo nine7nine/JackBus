@@ -60,6 +60,7 @@
 #include <spa/utils/string.h>
 
 #include "shim.h"
+#include "../compat/compat_conf.h"
 
 #define ID_METADATA_DEFAULT	30
 #define ID_METADATA_SETTINGS	31
@@ -449,13 +450,22 @@ static struct gobj *gget(struct pw_core *core, enum gtype type, const char *key,
 	return g;
 }
 
+/* the settings' output (input) device when it is there, else the first */
 static struct gobj *default_device(struct pw_core *core, bool playback)
 {
-	struct gobj *g;
-	spa_list_for_each(g, &core->graph, link)
-		if (g->type == G_NODE && g->kind == (playback ? N_PLAYBACK : N_CAPTURE))
+	struct gobj *g, *first = NULL;
+	char want[128], name[160];
+	jackbus_compat_device(playback, want, sizeof(want));
+	snprintf(name, sizeof(name), "jackbus.%s.%s", want, playback ? "playback" : "capture");
+	spa_list_for_each(g, &core->graph, link) {
+		if (g->type != G_NODE || g->kind != (playback ? N_PLAYBACK : N_CAPTURE))
+			continue;
+		if (want[0] && strcmp(g->name, name) == 0)
 			return g;
-	return NULL;
+		if (first == NULL)
+			first = g;
+	}
+	return first;
 }
 
 static void emit_global(struct shim_proxy *r, struct pw_core *core, struct gobj *g);
@@ -691,7 +701,18 @@ const char **shim_target_ports(jack_client_t *c, const char *target, uint32_t ta
 		jack_free(ports);
 		return NULL;
 	}
-	/* the default: the first physical client's ports */
+	/* the default: the settings' output (input) device when it has ports,
+	 * else the first physical client's */
+	if (who[0] == 0) {
+		char want[128];
+		jackbus_compat_device(playback, want, sizeof(want));
+		size_t wl = strlen(want);
+		for (size_t i = 0; wl && i < n; i++)
+			if (strncmp(ports[i], want, wl) == 0 && ports[i][wl] == ':') {
+				snprintf(who, sizeof(who), "%s", want);
+				break;
+			}
+	}
 	if (who[0] == 0) {
 		const char *colon = strchr(ports[0], ':');
 		snprintf(who, sizeof(who), "%.*s", colon ? (int)(colon - ports[0]) : 0, ports[0]);
