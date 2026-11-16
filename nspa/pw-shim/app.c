@@ -50,6 +50,8 @@ static struct {
 	bool events_running;
 	bool active;
 	char name[JACK_CLIENT_NAME_SIZE_MAX];	/* asked for */
+	char primary[256];			/* the first ports' node.name: no prefix */
+	bool have_primary;
 } app = { .lock = PTHREAD_MUTEX_INITIALIZER, .wake = { -1, -1 } };
 
 static int app_process(jackbus_node_t *node, const jackbus_cycle_t *cycle, void *arg)
@@ -177,6 +179,7 @@ void shim_app_unref(void)
 	close(app.wake[1]);
 	app.wake[0] = app.wake[1] = -1;
 	app.active = false;
+	app.have_primary = false;
 	jackbus_node_close(node);		/* the realtime thread is gone after this */
 	shim_data_loop_set_running(false);
 	free(atomic_exchange(&app.list, NULL));
@@ -241,8 +244,10 @@ void shim_app_detach(struct shim_member *f)
 					l->members[l->count++] = old->members[i];
 			atomic_store(&app.list, l);
 			shim_app_retire(old);	/* from here no cycle runs f */
-			if (l->count == 0)
+			if (l->count == 0) {
 				set_active(false);
+				app.have_primary = false;
+			}
 		}
 	}
 	pthread_mutex_unlock(&app.lock);
@@ -264,13 +269,23 @@ void shim_app_update_latency(void)
 	pthread_mutex_unlock(&app.lock);
 }
 
+/* the first filter or stream to name ports names them plainly (whatever the
+ * client is called: an application that listed devices first has its
+ * program's name); a later one of another node.name prefixes them */
 void shim_app_port_name(const char *node_name, const char *port, char *buf, size_t size)
 {
-	const char *client = shim_app_client_name();
-	if (node_name && client && strcmp(node_name, client) != 0)
-		snprintf(buf, size, "%s/%s", node_name, port);
-	else
+	const char *n = node_name ? node_name : "";
+	pthread_mutex_lock(&app.lock);
+	if (!app.have_primary) {
+		snprintf(app.primary, sizeof(app.primary), "%s", n);
+		app.have_primary = true;
+	}
+	bool plain = strcmp(n, app.primary) == 0 || strcmp(n, app.name) == 0 || n[0] == 0;
+	pthread_mutex_unlock(&app.lock);
+	if (plain)
 		snprintf(buf, size, "%s", port);
+	else
+		snprintf(buf, size, "%s/%s", n, port);
 }
 
 /* spa_io_position from the node's cycle record (realtime thread) */

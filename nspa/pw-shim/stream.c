@@ -12,8 +12,9 @@
  * application offers, the WineASIO way: the sample format is the first of the
  * application's that the shim converts (F32, F32P, S16, S16P, S32, S32P,
  * S24_32, F64), the channel count is the application's, and the rate is
- * JackBus's whenever the application allows it. An application that offers
- * only another rate is resampled, by JackBus's bridge resampler, at a fixed
+ * JackBus's whenever any format the application offers allows it (the
+ * direct route: no conversion of rate, no added latency). An application
+ * that offers only another rate is resampled, by JackBus's bridge resampler, at a fixed
  * ratio: it runs on JackBus's clock, so nothing drifts
  * (JACKBUS_PW_RESAMPLE=0: refused instead, with the reason). Conversion
  * happens at the boundary, with the stream's volume, mute and channel volumes
@@ -53,6 +54,7 @@
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/audio/raw-types.h>
 #include <spa/param/props.h>
+#include <spa/param/latency-utils.h>
 #include <spa/pod/builder.h>
 #include <spa/pod/iter.h>
 #include <spa/control/control.h>
@@ -158,6 +160,9 @@ struct pw_stream {
 	/* the thread that runs the application's process callback */
 	bool in_process, available, queued;
 	struct spa_io_position position;
+	/* as PipeWire's adapter gives a stream: the frames per cycle at the
+	 * stream's rate (OpenAL sizes its mixing from it) */
+	struct spa_io_rate_match rate_match;
 
 	/* counted where they happen, reported at disconnect */
 	uint64_t underruns, overruns, dropped;
@@ -274,8 +279,11 @@ static bool resampling_allowed(void)
 	return env == NULL || strcmp(env, "0") != 0;
 }
 
-/* one EnumFormat pod: what JackBus can take of it */
-static bool try_format(struct pw_stream *s, const struct spa_pod *param, uint32_t rate, char *why, size_t len)
+/* one EnumFormat pod: what JackBus can take of it; resample: may it take
+ * the application's own rate (the second pass, when no format allows
+ * JackBus's) */
+static bool try_format(struct pw_stream *s, const struct spa_pod *param, uint32_t rate,
+		bool resample, char *why, size_t len)
 {
 	uint32_t media_type, media_subtype;
 	if (!spa_pod_is_object_type(param, SPA_TYPE_OBJECT_Format) ||
@@ -323,7 +331,7 @@ static bool try_format(struct pw_stream *s, const struct spa_pod *param, uint32_
 	info.rate = rate;
 	if ((prop = spa_pod_object_find_prop(obj, NULL, SPA_FORMAT_AUDIO_rate)) != NULL &&
 	    !int_allows(&prop->value, (int32_t)rate, &def)) {
-		if (!resampling_allowed()) {
+		if (!resample || !resampling_allowed()) {
 			snprintf(why, len, "rate %d Hz asked, JackBus runs at %u Hz (resampling is off)", def, rate);
 			return false;
 		}
@@ -718,6 +726,13 @@ static bool read_time(struct pw_stream *s, jackbus_cycle_t *c)
 	return false;
 }
 
+static uint32_t frames_at_stream_rate(struct pw_stream *s, uint32_t n)
+{
+	if (s->midi || s->jack_rate == 0 || s->info.rate == s->jack_rate)
+		return n;
+	return (uint32_t)(((uint64_t)n * s->info.rate + s->jack_rate - 1) / s->jack_rate);
+}
+
 static void stream_process(struct shim_member *m, const jackbus_cycle_t *c)
 {
 	struct pw_stream *s = SPA_CONTAINER_OF(m, struct pw_stream, member);
@@ -728,6 +743,8 @@ static void stream_process(struct shim_member *m, const jackbus_cycle_t *c)
 	float *port[MAX_CHANNELS];
 
 	publish_time(s, c);
+	if (!s->async)
+		s->rate_match.size = frames_at_stream_rate(s, n);
 	if (s->midi) {
 		midi_rt(s, c, n, playback, run);
 		return;
@@ -794,6 +811,7 @@ static void update_quantum(struct pw_stream *s)
 	while (target < floor_frames)
 		target += q;
 	s->target = SPA_MIN(target, RING_FRAMES / 2);
+	s->rate_match.size = frames_at_stream_rate(s, q);
 	struct timespec value = { 0, 1 };
 	struct timespec iv = { (time_t)(interval / SPA_NSEC_PER_SEC), (long)(interval % SPA_NSEC_PER_SEC) };
 	pw_loop_update_timer(s->core->context->main_loop, s->timer, &value, &iv, false);
@@ -962,6 +980,26 @@ static void emit_format(struct pw_stream *s)
 			SPA_PARAM_Format, fmt);
 }
 
+/* the Latency param, once connected: from the ports' JACK latency (mpv,
+ * for one, takes it as the sign that the stream is linked) */
+static void emit_latency(struct pw_stream *s)
+{
+	uint8_t buffer[512];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	struct spa_latency_info info;
+	jack_latency_range_t r = { 0, 0 };
+	bool playback = s->direction == SPA_DIRECTION_OUTPUT;
+
+	if (s->ports[0])
+		jack_port_get_latency_range(jackbus_port_jack(s->ports[0]),
+				playback ? JackPlaybackLatency : JackCaptureLatency, &r);
+	info = SPA_LATENCY_INFO(playback ? SPA_DIRECTION_INPUT : SPA_DIRECTION_OUTPUT);
+	info.min_rate = r.min;
+	info.max_rate = r.max;
+	spa_hook_list_call(&s->listeners, struct pw_stream_events, param_changed, 0,
+			SPA_PARAM_Latency, spa_latency_build(&b, SPA_PARAM_Latency, &info));
+}
+
 static void on_notify(void *data, uint64_t count)
 {
 	struct pw_stream *s = data;
@@ -971,6 +1009,11 @@ static void on_notify(void *data, uint64_t count)
 		set_state(s, PW_STREAM_STATE_PAUSED, 0, NULL);
 		spa_hook_list_call(&s->listeners, struct pw_stream_events, io_changed, 0,
 				SPA_IO_Position, &s->position, sizeof(s->position));
+		s->rate_match.rate = 1.0;
+		s->rate_match.size = frames_at_stream_rate(s, jack_get_buffer_size(s->client));
+		s->rate_match.flags = s->rs ? SPA_IO_RATE_MATCH_FLAG_ACTIVE : 0;
+		spa_hook_list_call(&s->listeners, struct pw_stream_events, io_changed, 0,
+				SPA_IO_RateMatch, &s->rate_match, sizeof(s->rate_match));
 		emit_format(s);
 		spa_hook_list_call(&s->listeners, struct pw_stream_events, add_buffer, 0, &s->pwbuf);
 		if (!(s->flags & PW_STREAM_FLAG_INACTIVE)) {
@@ -981,6 +1024,7 @@ static void on_notify(void *data, uint64_t count)
 		if (s->async)
 			update_quantum(s);
 		autoconnect(s);
+		emit_latency(s);
 	}
 	if (bits & NOTIFY_DRAINED)
 		spa_hook_list_call(&s->listeners, struct pw_stream_events, drained, 0);
@@ -1231,10 +1275,13 @@ SHIM_EXPORT int pw_stream_connect(struct pw_stream *s, enum pw_direction directi
 	s->client = jackbus_node_client(s->node);
 	s->jack_rate = jack_get_sample_rate(s->client);
 
+	/* the direct route first: any offered format at JackBus's rate; only
+	 * then one to resample */
 	bool ok = false;
-	for (uint32_t i = 0; i < n_params && !ok; i++)
-		if (params[i])
-			ok = try_format(s, params[i], s->jack_rate, why, sizeof(why));
+	for (int pass = 0; pass < 2 && !ok; pass++)
+		for (uint32_t i = 0; i < n_params && !ok; i++)
+			if (params[i])
+				ok = try_format(s, params[i], s->jack_rate, pass == 1, why, sizeof(why));
 	if (!ok) {
 		shim_warn("%s: %s", s->name, why);
 		connect_failed(s, -EINVAL, why);
@@ -1519,6 +1566,7 @@ SHIM_EXPORT int pw_stream_flush(struct pw_stream *s, bool drain)
 		bool playback = s->direction == SPA_DIRECTION_OUTPUT;
 		if (drain && playback) {
 			s->draining = true;	/* drained once the ring is empty */
+			atomic_store(&s->counting, false);	/* the last, short cycle is the end */
 			return 0;
 		}
 		if (playback) {

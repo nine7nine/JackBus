@@ -104,6 +104,23 @@ static pthread_mutex_t cores_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct spa_list cores = SPA_LIST_INIT(&cores);
 static uint32_t next_device_id = ID_FIRST_DEVICE;	/* under cores_lock */
 
+/* a device's id, the same in every core of the process (under cores_lock) */
+static struct { char name[CLIENT_NAME_MAX + 32]; uint32_t id; } device_ids[64];
+static uint32_t n_device_ids;
+
+static uint32_t device_id_for(const char *name)
+{
+	for (uint32_t i = 0; i < n_device_ids; i++)
+		if (strcmp(device_ids[i].name, name) == 0)
+			return device_ids[i].id;
+	uint32_t id = next_device_id++;
+	if (n_device_ids < SPA_N_ELEMENTS(device_ids)) {
+		snprintf(device_ids[n_device_ids].name, sizeof(device_ids[0].name), "%s", name);
+		device_ids[n_device_ids++].id = id;
+	}
+	return id;
+}
+
 /* -------------------------------------------------------------- context */
 
 SHIM_EXPORT struct pw_context *pw_context_new(struct pw_loop *main_loop,
@@ -122,11 +139,31 @@ SHIM_EXPORT struct pw_context *pw_context_new(struct pw_loop *main_loop,
 	return this;
 }
 
+/* as in PipeWire, a context takes its cores with it */
+static void disconnect_cores_of(struct pw_context *context)
+{
+	for (;;) {
+		struct pw_core *c, *found = NULL;
+		pthread_mutex_lock(&cores_lock);
+		spa_list_for_each(c, &cores, link) {
+			if (c->context == context) {
+				found = c;
+				break;
+			}
+		}
+		pthread_mutex_unlock(&cores_lock);
+		if (found == NULL)
+			return;
+		pw_core_disconnect(found);
+	}
+}
+
 SHIM_EXPORT void pw_context_destroy(struct pw_context *context)
 {
 	if (context == NULL)
 		return;
 	spa_hook_list_call(&context->listeners, struct pw_context_events, destroy, 0);
+	disconnect_cores_of(context);
 	shim_data_loop_free(context);
 	spa_hook_list_call(&context->listeners, struct pw_context_events, free, 0);
 	spa_hook_list_clean(&context->listeners);
@@ -270,13 +307,13 @@ static void scan_direction(struct pw_core *core, jack_client_t *c, bool playback
 		if (found == NULL) {
 			if ((found = calloc(1, sizeof(*found))) == NULL)
 				continue;
-			pthread_mutex_lock(&cores_lock);
-			found->id = next_device_id++;
-			pthread_mutex_unlock(&cores_lock);
 			found->playback = playback;
 			snprintf(found->client, sizeof(found->client), "%s", client);
 			snprintf(found->name, sizeof(found->name), "jackbus.%s.%s", client,
 					playback ? "playback" : "capture");
+			pthread_mutex_lock(&cores_lock);
+			found->id = device_id_for(found->name);
+			pthread_mutex_unlock(&cores_lock);
 			snprintf(found->desc, sizeof(found->desc), "%s %s (JackBus)", client,
 					playback ? "playback" : "capture");
 			found->channels = 0;
@@ -552,7 +589,20 @@ static void emit_param(struct pw_core *core, struct work *w)
 	for (uint32_t i = 0; i < info.channels; i++)
 		info.position[i] = (info.channels == 2) ? (i ? SPA_AUDIO_CHANNEL_FR : SPA_AUDIO_CHANNEL_FL) :
 			(info.channels == 1) ? SPA_AUDIO_CHANNEL_MONO : SPA_AUDIO_CHANNEL_AUX0 + i;
-	struct spa_pod *param = spa_format_audio_raw_build(&b, w->param_id, &info);
+	/* the rate as a range (default, min, max) of JackBus's one rate, as
+	 * PipeWire's nodes publish it: SDL reads only that form */
+	struct spa_pod_frame f;
+	spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_Format, w->param_id);
+	spa_pod_builder_add(&b,
+			SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+			SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+			SPA_FORMAT_AUDIO_format, SPA_POD_Id(info.format),
+			SPA_FORMAT_AUDIO_rate, SPA_POD_CHOICE_RANGE_Int((int)info.rate, (int)info.rate, (int)info.rate),
+			SPA_FORMAT_AUDIO_channels, SPA_POD_Int((int)info.channels),
+			0);
+	spa_pod_builder_prop(&b, SPA_FORMAT_AUDIO_position, 0);
+	spa_pod_builder_array(&b, sizeof(uint32_t), SPA_TYPE_Id, info.channels, info.position);
+	struct spa_pod *param = spa_pod_builder_pop(&b, &f);
 	spa_hook_list_call(&p->object_listeners, struct pw_node_events, param, 0,
 			w->seq, w->param_id, 0, 1, param);
 }
