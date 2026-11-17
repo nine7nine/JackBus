@@ -75,6 +75,9 @@ h1 {
 }
 @keyframes sheen { from { background-position: 0% 0; } to { background-position: 100% 0; } }
 .lede { font-size: 19px; color: #c9ccf2; margin: 0; }
+.lede-list { font-size: 17px; color: #c9ccf2; margin: 16px 0 0; padding-left: 22px; }
+.lede-list li { margin: 8px 0; }
+.lede-list b { color: #f2f3ff; }
 .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin: 16px 0 0; padding: 0; list-style: none; }
 .stats li {
   background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
@@ -364,38 +367,35 @@ pre.code .s { color: var(--amber); }
   <div class="kicker">Architecture · Linux · PREEMPT_RT · x86_64</div>
   <h1>JackBus</h1>
   <p class="lede">
-    JACK2 1.9.22 &mdash; the release Arch Linux ships &mdash; with a set of real-time, correctness and performance
-    changes to the server engine, the ALSA driver, <code>jackdbus</code> and libjack's internals. It installs as one
-    package in place of Arch's <code>jack2</code> + <code>jack2-dbus</code>: same files, same paths, same configure
-    options, LTO enabled.
+    JackBus is a successor to JACK2: a realtime audio server and client library for Linux, built on JACK2 1.9.22. It
+    keeps JACK's client API, shared memory and wire protocol exactly as they were, so every JACK application runs on
+    it unchanged, with a stock or a JackBus libjack, 64- or 32-bit. Everything it adds sits beside those interfaces.
   </p>
-  <p class="lede" style="margin-top:12px">
-    The constraint behind every change: <b>no client API/ABI change and no wire-protocol change</b>. The shared-memory
-    layout, the futex protocol, the request encoding and the time base are exactly 1.9.22's, so an application
-    carrying a stock libjack (64- or 32-bit) works against this server, and this libjack works against a stock
-    server. What JackBus adds sits beside those interfaces, never in them: a small side file in which each client's
-    realtime thread holds a robust mutex, so the server learns the moment it ends (§16), which either side does
-    without when the other lacks it; and a second socket through which a client receives the server's objects as
-    file descriptors (§11), with JackBus's own client API on top of it, nodes (§12) &mdash; new libjack functions
-    beside the old ones, which no existing application calls. Everything else happens behind those interfaces
-    &mdash; on the RT driver thread, in the engine's per-cycle work, in the server's control threads, in libjack's
-    own locking &mdash; and every change was measured on the engine itself, not on a microbenchmark.
-  </p>
-  <p class="lede" style="margin-top:12px">
-    It also does what stock JACK never did: <b>sound card bridges</b> (§15) join cards that run on their own clocks to
-    the graph, each resampled in the master's own cycle, with the delay each card needs measured on the card instead of
-    a fixed margin; the master's own card can be unplugged and plugged back without a client noticing (§14);
-    jackdbus grew the calls a session manager and a settings page need; and desktop applications written for
-    PipeWire, PulseAudio or ALSA run on it directly through its shims (§13), each a JACK client of its own in the
-    cycle, with no sound server in between and PipeWire left to video; the desktop's volume control drives the card's own
-    mixer, and JackBus starts before the desktop so that its processes are its clients too (§14).
-    <a href="https://github.com/nine7nine/PatchBox" style="color:var(--teal)"><b>PatchBox</b></a>, built alongside it, is
-    its patchbay, settings page and session manager (<a href="https://nine7nine.github.io/PatchBox/" style="color:var(--teal)">its
-    architecture</a>): a card bridged with a switch, sessions whose applications leave the graph before they stop,
-    settings changed on the running server, and the shims set up from its Shims tab.
+  <ul class="lede-list">
+    <li><b>PipeWire, PulseAudio and ALSA applications.</b> Its shims make each one a JACK client of its own in the
+      cycle, at JackBus's rate and resampled only when it insists: browsers, conferencing clients, players, games and
+      the desktop's own sound, with no sound server in between (§13). The desktop's volume control drives the card's
+      own mixer, and JackBus starts before the desktop (§14).</li>
+    <li><b>Every sound card, hotplugged.</b> Sound card bridges join cards on their own clocks to one graph, each
+      resampled in the master's cycle with the delay measured on the card (§15). A card plugged in is offered within
+      a second, a bridged card comes back on its own, and the master's card can be unplugged and plugged back while
+      clients run (§14).</li>
+    <li><b>A harder realtime core.</b> The engine, the ALSA driver and jackdbus reworked, every change measured on the
+      engine itself: no system call on the driver thread but the card's poll and the clients' wakeups, the server's
+      memory locked, late period interrupts covered by a wake timer (§4&ndash;8).</li>
+    <li><b>Failing clients, contained.</b> A client that dies is out of the graph the moment its realtime thread ends;
+      one that hangs or runs late is named and counted, and no longer holds up the rest (§16&ndash;18).</li>
+    <li><b>For tools and new applications.</b> jackdbus calls for session managers and monitors (an application taken
+      out of the graph before it stops, each client's late cycles, bridges added live), and a native client API,
+      nodes over the JackBus socket (§11, §12, §14).</li>
+  </ul>
+  <p class="lede" style="margin-top:14px">
+    <a href="https://github.com/nine7nine/PatchBox" style="color:var(--teal)"><b>PatchBox</b></a>, built alongside it,
+    is its patchbay, settings page and session manager
+    (<a href="https://nine7nine.github.io/PatchBox/" style="color:var(--teal)">its architecture</a>).
   </p>
   <ul class="stats">
-    <li><b>1.9.22</b><span>base tag · Arch jack2 1.9.22-2</span></li>
+    <li><b>1.9.22</b><span>the JACK2 release it builds on</span></li>
     <li><b>3</b><span>shims · PipeWire, PulseAudio and ALSA applications as JACK clients (§13)</span></li>
     <li><b>197</b><span>commits · 19 cherry-picked from develop</span></li>
     <li><b>0</b><span>changes to the existing API · ABI · protocol</span></li>
