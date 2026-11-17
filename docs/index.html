@@ -387,7 +387,8 @@ pre.code .s { color: var(--amber); }
     a fixed margin; the master's own card can be unplugged and plugged back without a client noticing (§14);
     jackdbus grew the calls a session manager and a settings page need; and desktop applications written for
     PipeWire, PulseAudio or ALSA run on it directly through its shims (§13), each a JACK client of its own in the
-    cycle, with no sound server in between and PipeWire left to video.
+    cycle, with no sound server in between and PipeWire left to video; the desktop's volume control drives the card's own
+    mixer, and JackBus starts before the desktop so that its processes are its clients too (§14).
     <a href="https://github.com/nine7nine/PatchBox" style="color:var(--teal)"><b>PatchBox</b></a>, built alongside it, is
     its patchbay, settings page and session manager (<a href="https://nine7nine.github.io/PatchBox/" style="color:var(--teal)">its
     architecture</a>): a card bridged with a switch, sessions whose applications leave the graph before they stop,
@@ -396,7 +397,7 @@ pre.code .s { color: var(--amber); }
   <ul class="stats">
     <li><b>1.9.22</b><span>base tag · Arch jack2 1.9.22-2</span></li>
     <li><b>3</b><span>shims · PipeWire, PulseAudio and ALSA applications as JACK clients (§13)</span></li>
-    <li><b>192</b><span>commits · 19 cherry-picked from develop</span></li>
+    <li><b>197</b><span>commits · 19 cherry-picked from develop</span></li>
     <li><b>0</b><span>changes to the existing API · ABI · protocol</span></li>
     <li><b>0</b><span>xruns when a 1 GB client is killed · was 346–402 / 6</span></li>
     <li><b>0.4 ms</b><span>others' wait behind a slow client · was 2.9 s</span></li>
@@ -425,6 +426,7 @@ pre.code .s { color: var(--amber); }
       <tr><td style="border-left:3px solid #8b8ff5">libjack internals</td><td>unserialized requests; activate races init; port-list and callback races; pthread keys</td><td>channel lock; init handshake; snapshots; <code>__thread</code> with TLS descriptors</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">How a client reaches the server</td><td>names in <code>/dev/shm</code>: the shm registry, the segments, a futex file per client, a socket the server connects back to</td><td>protocol 9 as before, and the JackBus socket in <code>$XDG_RUNTIME_DIR</code>: the same objects as fds, the user's processes only (§11); nodes, a native API on it: a cycle record, events on an fd (§12)</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Desktop applications</td><td>through a sound server and its JACK bridge (PipeWire's, PulseAudio's module): the server's graph run inside every JACK cycle</td><td>JackBus's shims: PipeWire, PulseAudio and ALSA applications each a JACK client in the cycle, a copy per cycle in its realtime thread; PulseAudio and ALSA applications on PipeWire while JackBus isn't running (§13)</td></tr>
+      <tr><td style="border-left:3px solid #8b8ff5">The desktop's volume and start</td><td>the volume control is the sound server's; JACK started by a script or <code>jack@.service</code> (a jackd no D-Bus tool can drive), often after the desktop</td><td>the applet and the volume keys set the card's own mixer through jackbus-pa (§13); <code>jackbus.service</code> starts JackBus through jackdbus before the desktop (§14)</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">jackdbus</td><td>ignores SIGTERM; unsafe crash handler; patchbay and reservation races</td><td>clean SIGTERM exit; safe trace; locked patchbay; bounded reservation slots and log; calls for session managers and monitors</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">Other sound cards</td><td>a slave driver (the card clocked by the master's) or a resampling client with a fixed margin</td><td>sound card bridges in the master's cycle, each card's margin measured, added and removed live, unplugged and back with ports and connections kept (§15)</td></tr>
       <tr><td style="border-left:3px solid #8b8ff5">The master's card unplugged</td><td>the server stops; every client is told it shut down</td><td>under jackdbus the dummy stands in, then the card again (§14)</td></tr>
@@ -2778,8 +2780,8 @@ pre.code .s { color: var(--amber); }
 <text x="58" y="176" class="t-mono">jackbus-pw &lt;program&gt;</text>
 <rect x="40" y="236" width="290" height="128" rx="14" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
 <text x="58" y="262" class="t-band">PULSEAUDIO APPLICATIONS</text>
-<text x="58" y="288" class="t-sub">Firefox, Chrome, Teams, mpv, games:</text>
-<text x="58" y="306" class="t-sub">anything that loads libpulse</text>
+<text x="58" y="288" class="t-sub">Firefox, Chrome, Teams, mpv, games; the</text>
+<text x="58" y="306" class="t-sub">desktop's volume control, keys, sounds</text>
 <text x="58" y="336" class="t-mono">libpulse.so.0 (the dispatcher)</text>
 <rect x="40" y="396" width="290" height="128" rx="14" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
 <text x="58" y="422" class="t-band">ALSA APPLICATIONS</text>
@@ -2796,7 +2798,7 @@ pre.code .s { color: var(--amber); }
 <text x="400" y="262" class="t-band">JACKBUS-PA · libjackbus-pa.so</text>
 <text x="398" y="288" class="t-sub">main loops, context, streams, introspection;</text>
 <text x="398" y="306" class="t-sub">PulseAudio's libpulsecommon for the rest of the API;</text>
-<text x="398" y="324" class="t-sub">devices: a sink / source per card (system, bridges)</text>
+<text x="398" y="324" class="t-sub">devices: a sink / source per card, its mixer's volume</text>
 <text x="398" y="348" class="t-ok">a stream: its ports, its ring at JackBus's rate</text>
 <rect x="380" y="396" width="380" height="128" rx="14" fill="#151a3a" stroke="#8b8ff5"/>
 <text x="400" y="422" class="t-band">JACKBUS-ALSA · pcm_jackbus (ioplug)</text>
@@ -2945,10 +2947,13 @@ pre.code .s { color: var(--amber); }
     interpolation, sink-input and source-output volume and mute applied to the samples. The rest of libpulse's API
     (sample specs, channel maps, volumes, property lists, formats) is PulseAudio's own <code>libpulsecommon</code>,
     which the library links. The devices are JackBus's cards: a sink per JACK client with physical playback ports, a
-    source per client with capture ports, the settings' output and input the defaults. What a PulseAudio server has
-    and JackBus doesn't answers as a server without it would: no cards or modules, an empty sample cache (playing a
-    cached sample fails, so libcanberra plays the sound as a stream), stream-restore present and empty, device-manager
-    absent. There is no central server: each process knows its own streams, so a volume control lists its own.
+    source per client with capture ports, the settings' output and input the defaults; a device's volume and mute
+    are its card's own mixer (below). What a PulseAudio server has and JackBus doesn't answers as a server without
+    it would: no cards or modules, an empty sample cache (playing a cached sample fails, so libcanberra plays the
+    sound as a stream), stream-restore present and empty, device-manager absent. There is no central server: each
+    process knows its own streams, so a volume control lists its own; the devices, though, are the cards themselves,
+    and every process sees the same device volume. Events reach the application as a server's would, from its main
+    loop, never inside the call that caused them (below).
   </p>
 
   <div class="figure">
@@ -3011,6 +3016,184 @@ pre.code .s { color: var(--amber); }
       versions), never through <code>dlsym</code>: a program that interposes <code>dlsym</code> to hand back wrappers
       of its own, which then call "the real function" through libpulse, would otherwise send the dispatcher's table
       back into its wrappers, a loop. A program started before JackBus stays on PipeWire until it is restarted.
+    </p>
+  </div>
+
+  <h3 style="margin-top:34px">The desktop: its volume control, its sounds</h3>
+  <p>
+    A desktop's sound is libpulse in several of its processes. In Plasma: the volume applet and its on-screen display
+    in <code>plasmashell</code>, the volume keys in <code>kded6</code>, the Sound and System Sounds pages in System
+    Settings, and the event sounds (a notification, a volume change's click), which libcanberra plays from whichever
+    application raises them. GNOME's are the same libraries. Started after JackBus, which <code>jackbus.service</code>
+    sees to (§14), each of them gets jackbus-pa through the dispatcher: the applet lists JackBus's cards as its
+    devices, its slider and the keys set the card's own volume, and an event sound is a short stream, a node of its own
+    while it plays.
+  </p>
+
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" role="img" aria-label="The desktop on JackBus: its processes each with jackbus-pa, their streams as nodes, the device volume as the card's own mixer">
+<rect x="20" y="20" width="1160" height="560" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">THE DESKTOP ON JACKBUS · EACH PROCESS ITS OWN JACKBUS-PA · THE CARD'S MIXER SHARED BY ALL</text>
+<path class="flow ctrl slow" d="M 330 118 H 380"/>
+<path class="flow ctrl slow" d="M 330 214 H 380"/>
+<path class="flow ctrl slow" d="M 330 310 H 380"/>
+<path class="flow ctrl slow" d="M 330 406 H 380"/>
+<path class="flow audio" d="M 760 268 H 810"/>
+<path class="flow ctrl" d="M 760 136 H 785 V 372 H 810"/>
+<path class="flow desk slow" d="M 985 462 V 498 H 570 V 466"/>
+<text x="40" y="70" class="t-tiny">THE DESKTOP · LIBPULSE IN EACH PROCESS</text>
+<rect x="40" y="78" width="290" height="80" rx="12" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="56" y="102" class="t-chip">plasmashell · the volume applet</text>
+<text x="56" y="122" class="t-sub">devices, applications, sliders, mute;</text>
+<text x="56" y="140" class="t-sub">the on-screen display</text>
+<rect x="40" y="174" width="290" height="80" rx="12" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="56" y="198" class="t-chip">kded6 · the volume keys</text>
+<text x="56" y="218" class="t-sub">+5 % · −5 % · mute, on the default</text>
+<text x="56" y="236" class="t-sub">device; the click as feedback</text>
+<rect x="40" y="270" width="290" height="80" rx="12" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="56" y="294" class="t-chip">System Settings</text>
+<text x="56" y="314" class="t-sub">Sound: devices, test tones, levels;</text>
+<text x="56" y="332" class="t-sub">System Sounds: previews</text>
+<rect x="40" y="366" width="290" height="80" rx="12" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="56" y="390" class="t-chip">any application · libcanberra</text>
+<text x="56" y="410" class="t-sub">event sounds: a notification, a bell,</text>
+<text x="56" y="428" class="t-sub">played as a stream, ended by libcanberra</text>
+<text x="56" y="478" class="t-sub">and every other program loading libpulse:</text>
+<text x="56" y="496" class="t-sub">Firefox, Chrome, Teams, mpv</text>
+<text x="380" y="70" class="t-tiny">JACKBUS-PA · IN EACH OF THEM</text>
+<rect x="380" y="78" width="380" height="116" rx="12" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="396" y="102" class="t-chip">devices: a sink / source per card</text>
+<text x="396" y="122" class="t-sub">jackbus.system.playback / .capture, bridged cards</text>
+<text x="396" y="140" class="t-sub">the card from its ports' alias:</text>
+<text x="396" y="158" class="t-mono">alsa_pcm:hw:PCH:out1 → hw:PCH</text>
+<text x="396" y="180" class="t-ok">volume and mute: the card's · HW_VOLUME_CTRL</text>
+<rect x="380" y="210" width="380" height="116" rx="12" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="396" y="234" class="t-chip">streams: a node each</text>
+<text x="396" y="254" class="t-sub">its ring, its own volume applied to the samples</text>
+<text x="396" y="272" class="t-sub">(the applet's per-application sliders)</text>
+<text x="396" y="290" class="t-sub">a sound ended: TERMINATED, the node gone</text>
+<text x="396" y="312" class="t-ok">in the cycle: one copy, no system call</text>
+<rect x="380" y="342" width="380" height="124" rx="12" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="396" y="366" class="t-chip">events: from the main loop</text>
+<text x="396" y="386" class="t-sub">a device changed, a stream new or removed,</text>
+<text x="396" y="404" class="t-sub">a stream's end: queued, then delivered as a</text>
+<text x="396" y="422" class="t-sub">server's answer is, never inside the call</text>
+<text x="396" y="448" class="t-ok">the card's mixer watched: its fds on the loop</text>
+<text x="810" y="70" class="t-tiny">JACKBUS</text>
+<rect x="810" y="78" width="350" height="250" rx="12" fill="rgba(45,212,191,0.07)" stroke="#2dd4bf"/>
+<text x="828" y="102" class="t-band">THE GRAPH</text>
+<rect x="828" y="116" width="314" height="44" rx="9" fill="#1b2246" stroke="#4ade80"/>
+<text x="840" y="135" class="t-chip">system · playback · capture</text>
+<text x="840" y="151" class="t-chipsub">the card's ports: the devices</text>
+<rect x="828" y="170" width="314" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="840" y="189" class="t-chip">Firefox · FL FR</text>
+<text x="840" y="205" class="t-chipsub">an application's streams: its node</text>
+<rect x="828" y="224" width="314" height="44" rx="9" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="840" y="243" class="t-chip">an event sound · FL FR</text>
+<text x="840" y="259" class="t-chipsub">its application's node, while it plays</text>
+<text x="828" y="298" class="t-sub">routed, levelled and session-saved</text>
+<text x="828" y="316" class="t-sub">in the graph like any JACK client</text>
+<rect x="810" y="344" width="350" height="118" rx="12" fill="rgba(244,114,182,0.06)" stroke="#f472b6"/>
+<text x="828" y="368" class="t-band">THE CARD'S MIXER · HW:PCH</text>
+<text x="828" y="392" class="t-mono">Master</text><text x="900" y="392" class="t-mono">−65.25 … 0 dB</text><text x="1050" y="392" class="t-sub">the sink</text>
+<text x="828" y="412" class="t-mono">Capture</text><text x="900" y="412" class="t-mono">−17.25 … +30 dB</text><text x="1050" y="412" class="t-sub">the source</text>
+<text x="828" y="434" class="t-sub">the card holds the values: alsamixer and</text>
+<text x="828" y="452" class="t-sub">every process see the same</text>
+<text x="590" y="520" class="t-sub">a change made anywhere (a slider, a key, alsamixer, another process)</text>
+<text x="590" y="538" class="t-sub">reaches every subscriber as a change of that sink or source</text>
+<text x="40" y="560" class="t-tiny">NOT IN THE CYCLE: THE MIXER IS OPENED AND WATCHED ON EACH APPLICATION'S MAIN LOOP</text>
+</svg>
+    <p class="caption">
+      <b>One volume, held by the card.</b> Without a central server each process has its own jackbus-pa, so the
+      device volume can't live in any of them: it is the card's hardware mixer, which every process opens for itself
+      and the card keeps. A sink or source is an ALSA card when its ports' alias names one, as JackBus's ALSA driver
+      and the sound card bridges (§15) both set it (<code>alsa_pcm:&lt;device&gt;:out1</code>); its playback control is
+      the sink's volume and mute, its capture control the source's. The applet, the keys, System Settings and
+      alsamixer then show and set one value, and a change from any of them reaches the others through the mixer's own
+      events. A stream's volume (the applet's per-application slider) stays in that stream's process, applied to its
+      samples.
+    </p>
+  </div>
+
+  <div class="tablebox">
+    <table>
+      <tr><th>Device</th><th>Its control</th><th>0 %</th><th>100 %</th><th>Above 100 %</th><th>On an HDA card (ALC274)</th></tr>
+      <tr><td><b>sink</b></td><td>Master, else PCM, Speaker, Headphone, Front, Line Out, else the first with a playback volume</td><td>the minimum</td><td>the maximum</td><td>held at 100 %</td><td>Master −65.25 … 0 dB, 0.75 dB a step: 50 % is −16 dB, −20 dB reads 42 %</td></tr>
+      <tr><td><b>source</b></td><td>Capture, else Mic, Line, Digital, Input, else the first with a capture volume that isn't a boost</td><td>the minimum</td><td><b>0 dB</b>, unity</td><td>the control's gain, as PulseAudio's amplification (150 % ≈ +10.6 dB), up to its maximum</td><td>Capture −17.25 … +30 dB: 100 % is step 23 of 63, the maximum reads 316 %</td></tr>
+      <tr><td><b>no card</b></td><td>a client's own ports; a card without such a control</td><td colspan="3">a fixed 100 %: a request is accepted, not applied, and the device has no <code>HW_VOLUME_CTRL</code></td><td>&mdash;</td></tr>
+    </table>
+  </div>
+  <p>
+    The percentages are alsamixer's: perceptual over the control's dB range, PulseAudio's cubic curve
+    (<i>n</i> = 10<sup>dB/60</sup>) scaled so that the minimum is 0 %, so the applet, the keys and alsamixer agree. A
+    set is rounded the way the volume moves, so a 5 % step always moves the control at least one of its own steps, up
+    or down; a stereo control takes each channel (balance), a mono one their maximum. A capture control's 100 % is its
+    0 dB because its range goes well above it: on the full range, 100 % was this card's +30 dB, and a slider at the top,
+    or an application's automatic gain control pushing up, gave a loud, noisy microphone. The gain is still there,
+    above 100 %, where the applet's "raise maximum volume" puts it. The mixer is opened on the main loop when it is
+    first needed (a device listed, a volume set, a subscription to devices) and closed when the card goes away;
+    nothing of it is in the cycle. The card keeps the values when JackBus hands it back to PipeWire, which then
+    re-applies its own stored volumes (§14).
+  </p>
+
+  <h3 style="margin-top:34px">Events from the main loop, as a server's</h3>
+  <p>
+    A PulseAudio server answers later: a stream's end, a device's change, a stream added or removed reach the
+    application through its main loop, after the call that caused them returned. Applications are written for that,
+    and jackbus-pa keeps it, although it has nothing to wait for: subscription events are queued and delivered from a
+    deferred event on the application's main loop, as are a disconnected stream's <code>TERMINATED</code> and a moved
+    stream's callback.
+  </p>
+
+  <div class="figure">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 330" role="img" aria-label="An event sound ending: libcanberra disconnects its stream holding a lock that its subscription callback takes; delivered inside the call the main loop deadlocks, from the main loop it doesn't">
+<rect x="20" y="20" width="1160" height="290" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">AN EVENT SOUND ENDS · LIBCANBERRA DISCONNECTS IT HOLDING A LOCK ITS SUBSCRIPTION CALLBACK TAKES</text>
+<text x="40" y="80" class="t-tiny">DELIVERED INSIDE THE CALL</text>
+<rect x="40" y="90" width="250" height="56" rx="10" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="54" y="112" class="t-chip">the stream drained</text>
+<text x="54" y="130" class="t-chipsub">libcanberra takes its lock</text>
+<rect x="330" y="90" width="230" height="56" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="344" y="112" class="t-chip">pa_stream_disconnect()</text>
+<text x="344" y="130" class="t-chipsub">still inside the call:</text>
+<rect x="600" y="90" width="250" height="56" rx="10" fill="#1b2246" stroke="#fb7185"/>
+<text x="614" y="112" class="t-chip">"sink-input removed"</text>
+<text x="614" y="130" class="t-chipsub">to libcanberra's subscriber</text>
+<rect x="890" y="90" width="270" height="56" rx="10" fill="rgba(251,113,133,0.10)" stroke="#fb7185"/>
+<text x="904" y="112" class="t-chip">which takes the same lock</text>
+<text x="904" y="130" class="t-chipsub">the main-loop thread waits on itself</text>
+<path class="flow ctrl" d="M 290 118 H 330"/>
+<path class="flow ctrl" d="M 560 118 H 600"/>
+<path class="flow ctrl" d="M 850 118 H 890"/>
+<text x="40" y="170" class="t-red">the sound never ends; closing the context waits forever: System Settings froze leaving its System Sounds page</text>
+<text x="40" y="208" class="t-tiny">FROM THE MAIN LOOP · JACKBUS-PA</text>
+<rect x="40" y="218" width="250" height="56" rx="10" fill="rgba(91,95,199,0.10)" stroke="#5b5fc7"/>
+<text x="54" y="240" class="t-chip">the stream drained</text>
+<text x="54" y="258" class="t-chipsub">libcanberra takes its lock</text>
+<rect x="330" y="218" width="230" height="56" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="344" y="240" class="t-chip">pa_stream_disconnect()</text>
+<text x="344" y="258" class="t-chipsub">TERMINATED · returns</text>
+<rect x="600" y="218" width="250" height="56" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="614" y="240" class="t-chip">the lock released</text>
+<text x="614" y="258" class="t-chipsub">the callback returns to the loop</text>
+<rect x="890" y="218" width="270" height="56" rx="10" fill="rgba(74,222,128,0.07)" stroke="#4ade80"/>
+<text x="904" y="240" class="t-chip">next iteration: the events</text>
+<text x="904" y="258" class="t-chipsub">state callback, then the subscriber</text>
+<path class="flow ctrl" d="M 290 246 H 330"/>
+<path class="flow ctrl" d="M 560 246 H 600"/>
+<path class="flow ctrl" d="M 850 246 H 890"/>
+<text x="40" y="296" class="t-ok">each event after the call that caused it, in order; a subscriber that never runs its loop holds at most 4096</text>
+</svg>
+    <p class="caption">
+      <b>A server's order, kept.</b> libcanberra's PulseAudio driver ends a sound from the stream's drain callback,
+      holding the lock that guards its outstanding sounds, and its subscription callback takes the same lock to find
+      the sound a removed stream belonged to. With the event delivered inside <code>pa_stream_disconnect()</code>, the
+      main-loop thread blocked on its own lock: after the first event sound no other played, and destroying the context
+      (a settings page closing) waited for that thread forever. Delivered from the loop, as PulseAudio's server does, the
+      lock is free by then. The test (<code>canberra.sh</code>) plays three sounds without a callback, three with one
+      and one cancelled while it plays (the first recorded from its port: a continuous 440 Hz sine), and each context
+      must close within a time limit: the earlier library hung on the first.
     </p>
   </div>
 
@@ -3119,7 +3302,13 @@ pre.code .s { color: var(--amber); }
       SDL3's PulseAudio backend, <code>pactl</code>'s introspection, Chrome and Firefox headless with their sandboxes
       on (through the dispatcher and the setting, no launcher); the dispatcher's decisions; a program interposing
       <code>dlsym</code>; the settings (per-shim keys, output device, the buffering cap, resampler quality); every
-      installed program and library linking libpulse finds all its functions; the realtime thread traced.</li>
+      installed program and library linking libpulse finds all its functions; the realtime thread traced. Device
+      volume (<code>volume.sh</code>) on a test card whose mixer is an ALSA control plugin standing in for every
+      card's (an HDA card's Master and Capture, no real card opened): alsamixer's mapping, 5 % steps that always
+      move, balance, 0 % and over 100 %, mute as the switch, a capture control's 0 dB as 100 % and its gain above, a
+      change made by <code>amixer</code> or another client reaching a subscriber, a device of no card; libcanberra's
+      event sounds (<code>canberra.sh</code>, above). On the desktop: Plasma's applet and volume keys driving the
+      card's Master.</li>
     <li><b>jackbus-alsa</b>: <code>aplay</code> in S16, S32 and float, 44.1 kHz resampled (JackBus's rate only with resampling off),
       <code>arecord</code>, sample-accurate timing (frames played against JACK's frame time within a cycle), an
       application stalling (one <code>EPIPE</code>, then on), killed (its client gone), the fallback device, the output
@@ -3130,9 +3319,11 @@ pre.code .s { color: var(--amber); }
   <ul>
     <li>PulseAudio's monitor sources (a recording of what a sink plays: OBS's "Desktop Audio") aren't there; a JACK
       input does that in JackBus.</li>
-    <li>No central PulseAudio server: a volume control sees its own process's streams, device volumes are accepted and
-      not applied (levels are set in the graph).</li>
-    <li>The choice is made as a program starts: one started before JackBus keeps PipeWire until it restarts.</li>
+    <li>No central PulseAudio server: a volume control sees its own process's streams, not other applications'
+      (their levels are set in the graph). Device volumes are the cards' own mixers; a device without one (a card with
+      no volume control, a client's ports) keeps 100 %.</li>
+    <li>The choice is made as a program starts: one started before JackBus keeps PipeWire until it restarts. For the
+      desktop's own processes, <code>jackbus.service</code> starts JackBus first (§14).</li>
     <li>Flatpak and other sandboxed runtimes bring their own libraries: they stay on PipeWire. Bluetooth audio is
       PipeWire's.</li>
   </ul>
@@ -3143,8 +3334,9 @@ pre.code .s { color: var(--amber); }
   <h2><span class="num">14</span>jackdbus, PipeWire and the card</h2>
   <p class="sub">
     <code>jackdbus</code> is the JACK server packaged as a D-Bus service: the session bus starts it on the first call
-    to <code>org.jackaudio.service</code>, it keeps its settings in <code>~/.config/jack/conf.xml</code>, and it owns
-    the card through the desktop's device-reservation protocol. PipeWire can run on top of it as an ordinary JACK
+    to <code>org.jackaudio.service</code> (at login, <code>jackbus.service</code> makes that call before the desktop
+    starts, below), it keeps its settings in <code>~/.config/jack/conf.xml</code>, and it owns the card through the
+    desktop's device-reservation protocol. PipeWire can run on top of it as an ordinary JACK
     client, its JACK bridge carrying the PulseAudio and ALSA applications, as in the figure. With JackBus's shims
     (§13) those applications reach JackBus directly instead, each a client of its own, and PipeWire, its bridge left
     out, keeps video and screen sharing and plays audio only while JackBus isn't running.
@@ -3276,6 +3468,65 @@ pre.code .s { color: var(--amber); }
 <span class="c"># jackdbus' own engine parameters (jack_control eps …), saved in conf.xml</span>
 <span class="k">log-level</span>     off | errors | <span class="s">server</span> | all
 <span class="k">log-max-size</span>  MiB, default <span class="s">4</span></pre>
+
+  <h3 style="margin-top:34px">At login, before the desktop</h3>
+  <p>
+    A program decides as it starts whether its libpulse is JackBus's or PulseAudio's (§13), and the desktop's own
+    sound (the volume applet, the keys, the event sounds) starts with the session. So JackBus has to be running
+    before the desktop's processes start, or they stay on PipeWire for the session. An autostart entry running
+    <code>jack_control start</code> comes too late: XDG autostart runs after the desktop's own units, and on one login
+    Plasma's shell started at 10:07:00 and the entry's start at 10:07:03. The package's user unit,
+    <code>jackbus.service</code>, starts JackBus earlier, through jackdbus.
+  </p>
+
+  <div class="figure">
+    <div class="controls"><button class="toggle" type="button" data-play>Pause</button></div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" role="img" aria-label="Login order: jackbus.service starts JackBus through jackdbus before the desktop's units; an autostart entry would start it after them">
+<rect x="20" y="20" width="1160" height="430" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="46" class="t-band">AT LOGIN · THE SYSTEMD USER MANAGER · JACKBUS BEFORE THE DESKTOP</text>
+<rect x="40" y="64" width="196" height="56" rx="10" fill="rgba(74,222,128,0.07)" stroke="#4ade80"/>
+<text x="52" y="86" class="t-chip">the session bus</text><text x="52" y="104" class="t-chipsub">dbus.socket</text>
+<path class="flow ctrl" d="M 241 92 H 266"/>
+<rect x="271" y="64" width="196" height="56" rx="10" fill="#2a2412" stroke="#fbbf24"/>
+<text x="283" y="86" class="t-chip">PipeWire, WirePlumber</text><text x="283" y="104" class="t-chipsub">take the card for now</text>
+<path class="flow ctrl" d="M 472 92 H 497"/>
+<rect x="502" y="64" width="196" height="56" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="514" y="86" class="t-chip">jackbus.service</text><text x="514" y="104" class="t-chipsub">busctl … StartServer</text>
+<path class="flow ctrl" d="M 703 92 H 728"/>
+<rect x="733" y="64" width="196" height="56" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="745" y="86" class="t-chip">jackdbus, activated</text><text x="745" y="104" class="t-chipsub">conf.xml · Audio0 handed over</text>
+<path class="flow ctrl" d="M 934 92 H 959"/>
+<rect x="964" y="64" width="196" height="56" rx="10" fill="rgba(45,212,191,0.07)" stroke="#2dd4bf"/>
+<text x="976" y="86" class="t-chip">the desktop's units</text><text x="976" y="104" class="t-chipsub">kded6 · plasmashell → JackBus</text>
+<text x="40" y="156" class="t-tiny">WHEN EACH STARTS · ONE LOGIN</text>
+<line x1="200" y1="176" x2="1150" y2="176" stroke="#3d4683"/>
+<text x="40" y="200" class="t-label">jackbus.service</text>
+<rect x="200" y="188" width="150" height="18" rx="4" fill="rgba(139,143,245,0.35)" stroke="#8b8ff5"/>
+<text x="360" y="202" class="t-sub">JackBus running</text>
+<rect x="470" y="188" width="680" height="18" rx="4" fill="rgba(45,212,191,0.22)" stroke="#2dd4bf"/>
+<text x="480" y="202" class="t-chipsub">Plasma's processes start: their libpulse finds JackBus's socket → jackbus-pa</text>
+<text x="40" y="244" class="t-label">an autostart entry</text>
+<rect x="200" y="232" width="560" height="18" rx="4" fill="rgba(251,191,36,0.18)" stroke="#fbbf24"/>
+<text x="210" y="246" class="t-chipsub">Plasma's processes start (10:07:00): no JackBus yet → PipeWire's PulseAudio</text>
+<rect x="770" y="232" width="150" height="18" rx="4" fill="rgba(139,143,245,0.35)" stroke="#8b8ff5"/>
+<text x="930" y="246" class="t-sub">jack_control start (10:07:03)</text>
+<text x="200" y="272" class="t-bad">late: the desktop's sound stays on PipeWire until each of its processes restarts</text>
+<text x="40" y="314" class="t-chip">the unit</text><text x="200" y="314" class="t-sub">Type=oneshot, RemainAfterExit · after dbus.socket, PipeWire, WirePlumber · before graphical-session-pre.target, XDG autostart, Plasma's units</text>
+<text x="40" y="338" class="t-chip">through jackdbus</text><text x="200" y="338" class="t-sub">its saved settings; PatchBox and jack_control stop and start it as before (jack@.service runs a plain jackd neither can drive)</text>
+<text x="40" y="362" class="t-chip">a card still held</text><text x="200" y="362" class="t-sub">PipeWire hands it over through the device reservation; five tries a second apart cover one still starting</text>
+<text x="40" y="386" class="t-chip">already running</text><text x="200" y="386" class="t-sub">StartServer does nothing: an old autostart entry beside the unit is harmless, only redundant</text>
+<text x="40" y="410" class="t-chip">if it can't start</text><text x="200" y="410" class="t-sub">a card gone, settings refused: the unit fails after about 6 s, and the desktop starts anyway, on PipeWire</text>
+<text x="40" y="434" class="t-tiny">systemctl --user enable jackbus.service · WantedBy=graphical-session-pre.target</text>
+</svg>
+    <p class="caption">
+      <b>First the server, then the desktop.</b> The unit is a call, not a server of its own: it asks the session bus
+      for <code>org.jackaudio.service</code>, which activates jackdbus, and tells it to start, with the settings
+      PatchBox and <code>jack_control</code> saved. The desktop's units are ordered after it, so by the time
+      <code>plasmashell</code> and <code>kded6</code> load libpulse, JackBus's socket is there and the dispatcher
+      gives them jackbus-pa. Stopping and starting the server later works as before; programs started while it is
+      stopped get PipeWire, and keep it until they restart.
+    </p>
+  </div>
 
   <h3 style="margin-top:34px">The master's own card unplugged</h3>
   <p>
@@ -5333,8 +5584,9 @@ pre.code .s { color: var(--amber); }
           from the server's microsecond frame timer.</li>
         <li><b>The shims (§13).</b> No PulseAudio monitor sources yet (a recording of what a device plays, as OBS's
           desktop audio uses); a volume control sees only its own process's streams; a program started before JackBus
-          stays on PipeWire until it restarts. Not yet tested through jackbus-pa: libcanberra's event sounds (the
-          desktop's) and Wine's <code>winepulse</code>.</li>
+          stays on PipeWire until it restarts (the desktop's own processes don't: <code>jackbus.service</code>, §14);
+          a card without a hardware volume control keeps a fixed device volume. Not yet tested through jackbus-pa:
+          Wine's <code>winepulse</code>.</li>
         <li><b>Xruns when apps start or add tracks.</b> In real use they come from the app's own callback (Ardour
           busy for just over one period during a load), not from the server; in async mode the other clients' audio
           is untouched. Next: measure with <code>GetClientTimings</code> during app start, track adds and plug-in
@@ -5396,7 +5648,11 @@ pre.code .s { color: var(--amber); }
           <code>libpulsecommon</code>), <code>libpipewire</code> and <code>libpulse</code> are needed to build.
           Nothing changes for an application until it is run through a shim or the user's settings say so: with
           <code>pulse</code> unset, every program loading libpulse gets PulseAudio's own library through the
-          dispatcher, as before.</li>
+          dispatcher, as before. jackbus-pa links alsa-lib for the cards' mixers (a device's volume, §13).</li>
+        <li><b>At login (§14).</b> <code>/usr/lib/systemd/user/jackbus.service</code> beside Arch's
+          <code>jack@.service</code>: not enabled by the package; <code>systemctl --user enable jackbus.service</code>
+          starts JackBus through jackdbus before the desktop, in place of an autostart entry (hide or remove one:
+          beside the unit it does nothing, on its own it starts JackBus after the desktop).</li>
         <li><b>Build.</b> Arch's configure options (<code>--classic --dbus --systemd-unit --autostart=none</code>)
           without doxygen; makepkg's flags with LTO; Berkeley DB 5.3 found by the wscript, no patch.</li>
         <li><b>Validated as packaged.</b> The full suite against the extracted package's binaries (38/38 at r72); the jackdbus tests, detach and timings included, against r98: 14/14.</li>
@@ -5413,7 +5669,7 @@ pre.code .s { color: var(--amber); }
         <li><b>Keep a way back</b><span><code>sudo pacman -Sw jack2 jack2-dbus</code> puts Arch's packages in the cache.</span></li>
         <li><b>Install</b><span><code>sudo pacman -U jackbus-*.pkg.tar.zst</code>; pacman offers to replace jack2 and jack2-dbus (or jack2dbus-nspa, its former name).</span></li>
         <li><b>End the old daemon</b><span><code>jack_control exit</code>. <code>stop</code> isn't enough: the old daemon keeps 1.9.22's libjackserver mapped and can't load the new drivers (<code>undefined symbol … IsCaptureChannelNeeded</code>).</span></li>
-        <li><b>Start</b><span>Your start script or <code>jack_control start</code>; D-Bus launches the new <code>/usr/bin/jackdbus</code>. If PipeWire held the card, a second start clears a "device busy".</span></li>
+        <li><b>Start</b><span>At login, <code>jackbus.service</code> once enabled; now, <code>jack_control start</code>; D-Bus launches the new <code>/usr/bin/jackdbus</code>. If PipeWire held the card, a second start clears a "device busy".</span></li>
         <li><b>Check</b><span><code>readlink /proc/$(pgrep -x jackdbus)/exe</code> shows no "(deleted)"; <code>GetXruns</code> / <code>GetLoad</code> / <code>GetClientTimings</code> over D-Bus; <code>~/.log/jack/jackdbus.log</code>.</span></li>
       </ol>
     </div>
@@ -5476,14 +5732,17 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>nspa/pa-shim/</code>: <code>mainloop.c</code>, <code>node.c</code>, <code>context.c</code>, <code>stream.c</code>, <code>server.c</code>, <code>pa.map</code>, <code>jackbus-pa</code></td><td>jackbus-pa: main loops, context, operations, introspection, streams; libpulse's whole API</td><td><span class="k">d3b52334</span> · <span class="k">51180f9e</span></td></tr>
       <tr><td><code>nspa/pa-shim/dispatch.c</code>, <code>gen-trampolines.sh</code></td><td>the dispatcher: 378 trampolines, JackBus's or PulseAudio's library decided at load, symbols from ELF tables (no <code>dlsym</code>); <code>/etc/ld.so.conf.d</code></td><td><span class="k">51180f9e</span> · <span class="k">d35bd845</span> · <span class="k">71f24328</span></td></tr>
       <tr><td><code>nspa/jackbus-alsa/pcm_jackbus.c</code>, <code>50-jackbus.conf</code></td><td>jackbus-alsa: the <code>jackbus</code> device, resampling as the fallback, a fallback device</td><td><span class="k">21bad8fd</span> · <span class="k">aab624a3</span> · <span class="k">de337dd5</span></td></tr>
-      <tr><td><code>nspa/pw-shim/test/</code>, <code>nspa/pa-shim/test/</code>, <code>nspa/jackbus-alsa/test/</code></td><td>the shims with real applications; a fake card, a <code>dlsym</code> interposer</td><td><span class="k">15474b06</span> · <span class="k">0776c943</span> · <span class="k">50381c27</span> · <span class="k">71f24328</span></td></tr>
+      <tr><td><code>nspa/pa-shim/mixer.c</code>, <code>context.c</code>, <code>shim.h</code></td><td>a device's volume and mute: its card's own mixer, found from the ports' alias, watched on the main loop · a capture control's 100 % is 0 dB</td><td><span class="k">a7e3b34a</span> · <span class="k">1f911b01</span></td></tr>
+      <tr><td><code>nspa/pa-shim/context.c</code>, <code>stream.c</code></td><td>subscription events, a stream's <code>TERMINATED</code> and a move from the main loop, as a server's (libcanberra)</td><td><span class="k">59c467fe</span></td></tr>
+      <tr><td><code>nspa/pw-shim/test/</code>, <code>nspa/pa-shim/test/</code>, <code>nspa/jackbus-alsa/test/</code></td><td>the shims with real applications; a fake card, a <code>dlsym</code> interposer · a test card's mixer (an ALSA control plugin), <code>volume.sh</code> · libcanberra, <code>canberra.sh</code></td><td><span class="k">15474b06</span> · <span class="k">0776c943</span> · <span class="k">50381c27</span> · <span class="k">71f24328</span> · <span class="k">a7e3b34a</span> · <span class="k">59c467fe</span></td></tr>
       <tr><td><code>nspa/pkg/jackbus/PKGBUILD</code></td><td>the shims in the package</td><td><span class="k">ab8ad92f</span></td></tr>
+      <tr><td><code>systemd/jackbus.service</code>, <code>systemd/wscript</code></td><td>JackBus at login, through jackdbus, before the desktop</td><td><span class="k">ac286fb4</span></td></tr>
     </table>
   </div>
 </section>
 
 <footer>
-  JackBus · architecture, fourth edition · JACK2 1.9.22 + 192 commits (github.com/nine7nine/JackBus) · protocol 9 ·
+  JackBus · architecture, fourth edition · JACK2 1.9.22 + 197 commits (github.com/nine7nine/JackBus) · protocol 9 ·
   Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274, ZOOM U-44, a USB headset · updated 16 November 2026
 </footer>
 

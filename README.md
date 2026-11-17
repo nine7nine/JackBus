@@ -144,6 +144,13 @@ on how much a PulseAudio stream buffers. With PatchBox's "PipeWire leaves audio
 to JackBus", PipeWire's JACK bridge isn't loaded: while JackBus runs PipeWire
 has no audio work, and video and screen sharing are untouched.
 
+The desktop's own sound goes the same way: its volume applet, volume keys,
+settings pages and event sounds (libcanberra) get `jackbus-pa`. A device's
+volume and mute are the card's own mixer (Master, Capture: alsamixer's
+scale, a capture control's 100 % at 0 dB), so every process and alsamixer
+show one value. For the desktop's processes to start on JackBus, JackBus has
+to start first: `jackbus.service` does that at login (below).
+
 ### The native API
 
 `jack/jackbus.h` is a client API beside libjack's, in the same library. A
@@ -201,8 +208,9 @@ Older jackdbus versions answer `UnknownMethod`, and tools carry on as before.
 - **Shims with real applications** (`nspa/pw-shim/test`, `nspa/pa-shim/test`,
   `nspa/jackbus-alsa/test`): PipeWire's tools, mpv, SDL3, OpenAL, fluidsynth,
   ossia score, paplay/parecord, Chrome and Firefox with their sandboxes on,
-  aplay/arecord; each application's ports recorded and checked as a continuous
-  sine; every realtime thread traced (no system call but futex).
+  aplay/arecord, libcanberra's event sounds; each application's ports recorded
+  and checked as a continuous sine; every realtime thread traced (no system
+  call but futex); device volume against a test card's mixer.
 - **Engine measurements:** an opt-in cycle trace (the master's cycle in ns) and
   an A/B harness that runs two builds in turn, isolated and muted.
 - **Bridge tests** (`nspa/tests/bridge`): simulated cards (drift, jitter, xruns,
@@ -237,6 +245,16 @@ leaves the old daemon running.
 The package also installs the shims. Nothing changes for an application until
 it is run through one (`jackbus-pw`, `jackbus-pa`, `aplay -D jackbus`) or the
 switches in PatchBox's Shims tab are on.
+
+To start JackBus at login, before the desktop (through jackdbus, with the
+settings PatchBox and `jack_control` save):
+
+```sh
+systemctl --user enable jackbus.service
+```
+
+It takes the place of an autostart entry running `jack_control start`, which
+runs after the desktop has started: hide or remove one.
 
 Elsewhere, build with waf as for upstream JACK2:
 
