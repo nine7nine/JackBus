@@ -1,7 +1,9 @@
 #!/bin/sh
 # Run a command in a private user/mount/IPC/net namespace with its own tmpfs
 # on /dev/shm, so test JACK servers/clients can never touch the host's JACK
-# shm registry, segments, SysV registry lock, sockets or session D-Bus.
+# shm registry, segments, SysV registry lock, sockets or session D-Bus. And its
+# own PID namespace: when the command ends (or is killed, as by a timeout),
+# every process it started goes with it, none is left running.
 #
 # Usage: nspa/run-isolated.sh <command> [args...]
 # Inside: JACK_BUILD (fork build dir), LD_LIBRARY_PATH (fork libs, unless
@@ -10,7 +12,7 @@ set -eu
 here="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
-    exec unshare --user --map-root-user --mount --ipc --net \
+    exec unshare --user --map-root-user --mount --ipc --net --pid --mount-proc --kill-child \
         env NSPA_ISOLATED=1 "$0" "$@"
 fi
 
