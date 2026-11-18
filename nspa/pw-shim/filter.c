@@ -584,6 +584,7 @@ SHIM_EXPORT int pw_filter_connect(struct pw_filter *f, enum pw_filter_flags flag
 	pthread_mutex_unlock(&f->ports_lock);
 
 	log_forced_settings(f);
+	shim_app_need_rt();			/* a filter runs in the cycle */
 	shim_app_attach(&f->member);
 	shim_app_update_latency();
 	atomic_fetch_or(&f->pending, NOTIFY_START);

@@ -139,7 +139,12 @@ struct pw_stream {
 	float *left[MAX_CHANNELS];	/* playback at JackBus's rate: given beyond the request */
 	uint32_t n_left;
 	float *ring[MAX_CHANNELS];
-	atomic_ullong ring_w, ring_r;
+	/* the async ring's positions, controls and counts, laid out as an async endpoint's
+	 * (jack/jackbus.h): local when the node's realtime thread moves the ring (ring_rt),
+	 * JackBus's (ep) when JackBus moves it itself (the settings' pw.async) */
+	jackbus_endpoint_shared_t *sh;
+	jackbus_endpoint_shared_t local;
+	jackbus_endpoint_t *ep;
 	struct midi_slot *slots;
 	atomic_uint slot_w, slot_r;
 	atomic_bool flush_rt;		/* playback: the realtime side drops what is queued */
@@ -587,6 +592,14 @@ static void consume(struct pw_stream *s, const float *const *in, uint32_t n)
 	call_process(s, 0, n);
 }
 
+/* the side that moves the ring (the node's ring_rt, or JackBus for an endpoint) moves
+ * frames while the stream streams and is active */
+static void update_run(struct pw_stream *s)
+{
+	atomic_store_explicit(&s->sh->run, atomic_load(&s->streaming) && atomic_load(&s->active) ? 1u : 0u,
+			memory_order_release);
+}
+
 /* --------------------------------------------------- the async ring */
 
 static void ring_out(struct pw_stream *s, uint64_t pos, float *const *dst, uint32_t n)
@@ -611,8 +624,8 @@ static void ring_in(struct pw_stream *s, uint64_t pos, const float *const *src, 
 static void ring_rt(struct pw_stream *s, float *const *port, uint32_t n, bool playback, bool run)
 {
 	if (playback) {
-		uint64_t w = atomic_load_explicit(&s->ring_w, memory_order_acquire);
-		uint64_t r = atomic_load_explicit(&s->ring_r, memory_order_relaxed);
+		uint64_t w = atomic_load_explicit(&s->sh->w, memory_order_acquire);
+		uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_relaxed);
 		if (atomic_load_explicit(&s->flush_rt, memory_order_relaxed)) {
 			r = w;
 			atomic_store_explicit(&s->flush_rt, false, memory_order_relaxed);
@@ -626,16 +639,16 @@ static void ring_rt(struct pw_stream *s, float *const *port, uint32_t n, bool pl
 			if (run && atomic_load_explicit(&s->counting, memory_order_relaxed))
 				s->underruns++;
 		}
-		atomic_store_explicit(&s->ring_r, r + take, memory_order_release);
+		atomic_store_explicit(&s->sh->r, r + take, memory_order_release);
 	} else if (run) {
-		uint64_t r = atomic_load_explicit(&s->ring_r, memory_order_acquire);
-		uint64_t w = atomic_load_explicit(&s->ring_w, memory_order_relaxed);
+		uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_acquire);
+		uint64_t w = atomic_load_explicit(&s->sh->w, memory_order_relaxed);
 		if (RING_FRAMES - (w - r) < n) {
 			s->overruns++;
 			return;
 		}
 		ring_in(s, w, (const float *const *)port, n);
-		atomic_store_explicit(&s->ring_w, w + n, memory_order_release);
+		atomic_store_explicit(&s->sh->w, w + n, memory_order_release);
 	}
 }
 
@@ -715,8 +728,38 @@ static void publish_time(struct pw_stream *s, const jackbus_cycle_t *c)
 	atomic_store_explicit(&s->snap.seq, seq + 2, memory_order_release);
 }
 
+/* an endpoint stream: the cycle record from JackBus's account of the last cycle */
+static bool endpoint_time(struct pw_stream *s, jackbus_cycle_t *c)
+{
+	jackbus_endpoint_shared_t *sh = s->sh;
+	for (int i = 0; i < 1000; i++) {
+		unsigned a = atomic_load_explicit(&sh->seq, memory_order_acquire);
+		if (a & 1)
+			continue;
+		memset(c, 0, sizeof(*c));
+		c->size = sizeof(*c);
+		c->nframes = atomic_load_explicit(&sh->nframes, memory_order_relaxed);
+		c->sample_rate = atomic_load_explicit(&sh->sample_rate, memory_order_relaxed);
+		c->frame = atomic_load_explicit(&sh->frame, memory_order_relaxed);
+		c->time_ns = atomic_load_explicit(&sh->time_ns, memory_order_relaxed);
+		c->raw_ns = atomic_load_explicit(&sh->raw_ns, memory_order_relaxed);
+		c->next_ns = atomic_load_explicit(&sh->next_ns, memory_order_relaxed);
+		c->period_ns = atomic_load_explicit(&sh->period_ns, memory_order_relaxed);
+		atomic_thread_fence(memory_order_acquire);
+		if (atomic_load_explicit(&sh->seq, memory_order_relaxed) != a)
+			continue;
+		c->rate_diff = (c->period_ns && c->sample_rate) ?
+			((double)c->nframes * 1e9 / c->sample_rate) / (double)c->period_ns : 1.0;
+		c->transport_state = jack_transport_query(s->client, NULL);
+		return a != 0;
+	}
+	return false;
+}
+
 static bool read_time(struct pw_stream *s, jackbus_cycle_t *c)
 {
+	if (s->ep)
+		return endpoint_time(s, c);
 	for (int i = 0; i < 1000; i++) {
 		unsigned a = atomic_load_explicit(&s->snap.seq, memory_order_acquire);
 		if (a & 1)
@@ -745,6 +788,8 @@ static void stream_process(struct shim_member *m, const jackbus_cycle_t *c)
 		atomic_load_explicit(&s->active, memory_order_relaxed);
 	float *port[MAX_CHANNELS];
 
+	if (s->ep)
+		return;			/* JackBus moves its ring itself */
 	publish_time(s, c);
 	if (!s->async)
 		s->rate_match.size = frames_at_stream_rate(s, n);
@@ -780,6 +825,7 @@ static void stream_shutdown(struct shim_member *m)
 {
 	struct pw_stream *s = SPA_CONTAINER_OF(m, struct pw_stream, member);
 	atomic_store(&s->streaming, false);
+	update_run(s);
 	atomic_fetch_or(&s->pending, NOTIFY_SHUTDOWN);
 	pw_loop_signal_event(s->core->context->main_loop, s->notify);
 }
@@ -826,6 +872,7 @@ static void emit_drained(struct pw_stream *s)
 {
 	s->draining = false;
 	atomic_store(&s->counting, false);
+	atomic_store(&s->sh->draining, 0u);
 	spa_hook_list_call(&s->listeners, struct pw_stream_events, drained, 0);
 }
 
@@ -897,8 +944,8 @@ static void on_timer(void *data, uint64_t expirations)
 	}
 	if (playback) {
 		for (int i = 0; i < 32; i++) {
-			uint64_t r = atomic_load_explicit(&s->ring_r, memory_order_acquire);
-			uint64_t w = atomic_load_explicit(&s->ring_w, memory_order_relaxed);
+			uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_acquire);
+			uint64_t w = atomic_load_explicit(&s->sh->w, memory_order_relaxed);
 			if (s->draining) {
 				if (w == r)
 					emit_drained(s);	/* the application may destroy s */
@@ -910,19 +957,19 @@ static void on_timer(void *data, uint64_t expirations)
 			if (got == 0)
 				return;
 			ring_in(s, w, (const float *const *)s->stage, got);
-			atomic_store_explicit(&s->ring_w, w + got, memory_order_release);
+			atomic_store_explicit(&s->sh->w, w + got, memory_order_release);
 			atomic_store(&s->counting, true);
 		}
 		return;
 	}
 	for (int i = 0; i < 32; i++) {
-		uint64_t w = atomic_load_explicit(&s->ring_w, memory_order_acquire);
-		uint64_t r = atomic_load_explicit(&s->ring_r, memory_order_relaxed);
+		uint64_t w = atomic_load_explicit(&s->sh->w, memory_order_acquire);
+		uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_relaxed);
 		if (w == r)
 			return;
 		uint32_t n = (uint32_t)SPA_MIN(w - r, (uint64_t)s->quantum);
 		ring_out(s, r, s->stage, n);
-		atomic_store_explicit(&s->ring_r, r + n, memory_order_release);
+		atomic_store_explicit(&s->sh->r, r + n, memory_order_release);
 		if (atomic_load(&s->active))
 			consume(s, (const float *const *)s->stage, n);
 	}
@@ -1024,6 +1071,7 @@ static void on_notify(void *data, uint64_t count)
 			set_state(s, PW_STREAM_STATE_STREAMING, 0, NULL);
 		}
 		atomic_store_explicit(&s->streaming, true, memory_order_release);
+		update_run(s);
 		if (s->async)
 			update_quantum(s);
 		autoconnect(s);
@@ -1069,6 +1117,9 @@ SHIM_EXPORT struct pw_stream *pw_stream_new(struct pw_core *core, const char *na
 	s->member.process = stream_process;
 	s->member.shutdown = stream_shutdown;
 	s->member.latency = stream_latency;
+	s->sh = &s->local;
+	s->local.size = sizeof(s->local);
+	s->local.ring_frames = RING_FRAMES;
 	s->core = core;
 	s->name = strdup(name ? name : "pw-stream");
 	s->props = props ? props : pw_properties_new(NULL, NULL);
@@ -1362,6 +1413,27 @@ SHIM_EXPORT int pw_stream_connect(struct pw_stream *s, enum pw_direction directi
 			return -ENOMEM;
 		}
 	}
+	/* async audio with the settings' pw.async: JackBus moves the ring itself, nothing of the
+	 * application's in the graph's cycle; else (or without endpoints) the node's realtime
+	 * thread runs the stream */
+	if (s->async && !s->midi && shim_app_async()) {
+		s->ep = jackbus_endpoint_open(s->node, s->ports, s->n_ports, RING_FRAMES);
+		if (s->ep && jackbus_endpoint_shared(s->ep)->ring_frames != RING_FRAMES) {
+			jackbus_endpoint_close(s->ep);
+			s->ep = NULL;
+		}
+		if (s->ep) {
+			s->sh = jackbus_endpoint_shared(s->ep);
+			for (uint32_t ch = 0; ch < s->n_ports; ch++)
+				s->ring[ch] = jackbus_endpoint_ring(s->ep, ch);
+			/* underruns count once data has come (ring_rt's "counting") */
+			atomic_store(&s->sh->prebuf, 1u);
+		} else {
+			shim_warn("%s: no async endpoint (%s): in the graph's cycle", s->name, strerror(errno));
+		}
+	}
+	if (s->ep == NULL)
+		shim_app_need_rt();
 	log_forced_settings(s);
 
 	shim_app_attach(&s->member);
@@ -1375,7 +1447,17 @@ SHIM_EXPORT int pw_stream_disconnect(struct pw_stream *s)
 	if (s->node == NULL)
 		return 0;
 	atomic_store(&s->streaming, false);
+	update_run(s);
 	shim_app_detach(&s->member);		/* from here no cycle runs the stream */
+	if (s->ep) {
+		/* JackBus stops moving it, before its ports go */
+		s->underruns += atomic_load(&s->sh->underflows);
+		s->overruns += atomic_load(&s->sh->overflows);
+		jackbus_endpoint_close(s->ep);
+		s->ep = NULL;
+		s->sh = &s->local;
+		memset(s->ring, 0, sizeof(s->ring));
+	}
 	if (s->timer) {
 		pw_loop_destroy_source(s->core->context->main_loop, s->timer);
 		s->timer = NULL;
@@ -1395,8 +1477,8 @@ SHIM_EXPORT int pw_stream_disconnect(struct pw_stream *s)
 	if (s->state == PW_STREAM_STATE_STREAMING || s->state == PW_STREAM_STATE_PAUSED)
 		spa_hook_list_call(&s->listeners, struct pw_stream_events, remove_buffer, 0, &s->pwbuf);
 	free_buffers(s);
-	atomic_store(&s->ring_w, 0);
-	atomic_store(&s->ring_r, 0);
+	atomic_store(&s->sh->w, 0);
+	atomic_store(&s->sh->r, 0);
 	atomic_store(&s->slot_w, 0);
 	atomic_store(&s->slot_r, 0);
 	atomic_store(&s->counting, false);
@@ -1512,7 +1594,7 @@ SHIM_EXPORT int pw_stream_get_time_n(struct pw_stream *s, struct pw_time *time, 
 	/* queued: what the ring holds, in the application's frames (pw_buffer.size's
 	 * unit); buffered: held in the resampler or beyond a request */
 	if (s->async && !s->midi && s->jack_rate) {
-		uint64_t level = atomic_load(&s->ring_w) - atomic_load(&s->ring_r);
+		uint64_t level = atomic_load(&s->sh->w) - atomic_load(&s->sh->r);
 		t.queued = (uint64_t)(level * (double)s->info.rate / s->jack_rate);
 		t.queued_buffers = s->quantum ? (uint32_t)(level / s->quantum) : 0;
 	}
@@ -1570,6 +1652,7 @@ SHIM_EXPORT int pw_stream_return_buffer(struct pw_stream *s, struct pw_buffer *b
 SHIM_EXPORT int pw_stream_set_active(struct pw_stream *s, bool active)
 {
 	atomic_store(&s->active, active);
+	update_run(s);
 	if (s->state == PW_STREAM_STATE_PAUSED || s->state == PW_STREAM_STATE_STREAMING)
 		set_state(s, active ? PW_STREAM_STATE_STREAMING : PW_STREAM_STATE_PAUSED, 0, NULL);
 	return 0;
@@ -1582,9 +1665,15 @@ SHIM_EXPORT int pw_stream_flush(struct pw_stream *s, bool drain)
 		if (drain && playback) {
 			s->draining = true;	/* drained once the ring is empty */
 			atomic_store(&s->counting, false);	/* the last, short cycle is the end */
+			atomic_store(&s->sh->draining, 1u);
 			return 0;
 		}
-		if (playback) {
+		if (playback && s->ep) {
+			atomic_store(&s->sh->skip_to, atomic_load(&s->sh->w));
+			s->n_left = 0;
+			if (s->rs)
+				shim_resampler_reset(s->rs);
+		} else if (playback) {
 			atomic_store(&s->flush_rt, true);
 			s->n_left = 0;
 			if (s->rs)
@@ -1592,7 +1681,7 @@ SHIM_EXPORT int pw_stream_flush(struct pw_stream *s, bool drain)
 		} else if (s->midi) {
 			atomic_store(&s->slot_r, atomic_load(&s->slot_w));
 		} else {
-			atomic_store(&s->ring_r, atomic_load(&s->ring_w));
+			atomic_store(&s->sh->r, atomic_load(&s->sh->w));
 		}
 		if (drain) {
 			atomic_fetch_or(&s->pending, NOTIFY_DRAINED);

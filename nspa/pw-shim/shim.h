@@ -84,6 +84,10 @@ void shim_app_attach(struct shim_member *m);	/* it runs from the next cycle */
 void shim_app_detach(struct shim_member *m);	/* returns once no cycle runs it */
 void shim_app_update_latency(void);
 void shim_app_retire(void *old);		/* free once no cycle can read it */
+/* the settings' pw.async (read when the node opened): async audio streams are async
+ * endpoints; the node runs a realtime thread only for what needs one */
+bool shim_app_async(void);
+void shim_app_need_rt(void);
 /* spa_io_position (filter and stream) from the cycle record, realtime thread */
 void shim_fill_position(struct spa_io_position *pos, const jackbus_cycle_t *cycle, jack_client_t *client);
 /* the JACK port name for a port of node node_name: "<node>/<port>", or the

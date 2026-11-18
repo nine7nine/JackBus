@@ -24,6 +24,7 @@
 
 #include "shim.h"
 #include "../compat/server.h"
+#include "../compat/compat_conf.h"
 
 struct member_list {
 	size_t count;
@@ -43,6 +44,9 @@ static struct {
 	int wake[2];
 	int watch[16];
 	int n_watch;
+	bool async;			/* the settings' pa.async, when the node opened */
+	bool has_process;		/* node_process set: a realtime thread when active */
+	int holds;			/* async streams */
 } node = { .lock = PTHREAD_MUTEX_INITIALIZER, .wake = { -1, -1 } };
 
 static int node_process(jackbus_node_t *n, const jackbus_cycle_t *c, void *arg)
@@ -137,7 +141,10 @@ jackbus_node_t *shim_node_ref(const char *name)
 		struct member_list *l = calloc(1, sizeof(*l));
 		atomic_store(&node.list, l);
 		atomic_store(&node.dead, false);
-		if (jackbus_node_set_process(node.node, node_process, NULL) != 0 ||
+		node.async = jackbus_compat_bool("async", "JACKBUS_PA_ASYNC", false);
+		node.has_process = !node.async;
+		node.holds = 0;
+		if ((node.has_process && jackbus_node_set_process(node.node, node_process, NULL) != 0) ||
 		    pipe2(node.wake, O_CLOEXEC) != 0) {
 			jackbus_node_close(node.node);
 			node.node = NULL;
@@ -145,8 +152,9 @@ jackbus_node_t *shim_node_ref(const char *name)
 			goto out;
 		}
 		node.events_running = pthread_create(&node.events, NULL, event_thread, NULL) == 0;
-		shim_log("JACK client \"%s\" opened on the JackBus socket",
-				jack_get_client_name(jackbus_node_client(node.node)));
+		shim_log("JACK client \"%s\" opened on the JackBus socket%s",
+				jack_get_client_name(jackbus_node_client(node.node)),
+				node.async ? " (async streams)" : "");
 	}
 	node.refs++;
 	n = node.node;
@@ -205,6 +213,43 @@ void shim_node_watch(int efd, bool add)
 	pthread_mutex_unlock(&node.lock);
 }
 
+bool shim_node_async(void)
+{
+	return node.async;
+}
+
+/* a stream in the cycle: the node gets its process function (and, active, a realtime
+ * thread: JACK's path for a client activated without one) */
+void shim_node_need_rt(void)
+{
+	pthread_mutex_lock(&node.lock);
+	if (node.node && !node.has_process) {
+		if (jackbus_node_set_process(node.node, node_process, NULL) == 0)
+			node.has_process = true;
+		else
+			shim_warn("can't give the JACK client a realtime thread");
+	}
+	pthread_mutex_unlock(&node.lock);
+}
+
+static void set_active(bool active);
+
+static size_t members(void)
+{
+	struct member_list *l = atomic_load(&node.list);
+	return l ? l->count : 0;
+}
+
+void shim_node_hold(bool on)
+{
+	pthread_mutex_lock(&node.lock);
+	node.holds += on ? 1 : -1;
+	if (node.holds < 0)
+		node.holds = 0;
+	set_active(node.holds > 0 || members() > 0);
+	pthread_mutex_unlock(&node.lock);
+}
+
 /* under node.lock: in the graph's cycle while something runs in it */
 static void set_active(bool active)
 {
@@ -251,7 +296,7 @@ void shim_node_detach(struct shim_member *m)
 					l->members[l->count++] = old->members[i];
 			atomic_store(&node.list, l);
 			retire(old);		/* from here no cycle runs m */
-			if (l->count == 0)
+			if (l->count == 0 && node.holds == 0)
 				set_active(false);
 		}
 	}

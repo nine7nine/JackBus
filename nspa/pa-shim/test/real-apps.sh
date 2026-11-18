@@ -344,6 +344,9 @@ if command -v strace >/dev/null && have paplay; then
         others=$(grep -vcE '^[0-9]+ +(futex\(|<\.\.\. futex resumed>)' "$logs/rt.loop")
         [ "$others" -eq 0 ] && pass "paplay's realtime thread: no system call but futex ($calls)" \
             || flunk "system calls in the realtime thread ($calls)" "$logs/rt.loop"
+    elif [ "${JACKBUS_PA_ASYNC:-0}" = 1 ]; then
+        # async: JackBus moves the stream; the application has no realtime thread of JackBus's
+        pass "paplay async: no realtime thread in the application"
     else
         flunk "no realtime thread traced" "$logs/rt.strace"
     fi

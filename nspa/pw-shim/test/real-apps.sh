@@ -284,6 +284,9 @@ rt_check() {  # name strace
         else
             flunk "$1: system calls in its realtime thread ($calls)" "$2.loop"
         fi
+    elif [ "${JACKBUS_PW_ASYNC:-0}" = 1 ] && [ "$1" = "pw-play (async)" ]; then
+        # pw.async: JackBus moves an async stream itself, the application has no realtime thread
+        pass "$1, pw.async: no realtime thread in the application"
     else
         flunk "$1: no realtime thread traced" "$2"
     fi

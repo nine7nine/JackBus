@@ -33,6 +33,7 @@
 #define JACK_CLIENT_NAME_SIZE_MAX 128
 
 #include "shim.h"
+#include "../compat/compat_conf.h"
 
 struct filter_list {
 	size_t count;
@@ -49,6 +50,8 @@ static struct {
 	int wake[2];			/* stops the event thread */
 	bool events_running;
 	bool active;
+	bool async;			/* the settings' pw.async, when the node opened */
+	bool has_process;		/* app_process set: a realtime thread when active */
 	char name[JACK_CLIENT_NAME_SIZE_MAX];	/* asked for */
 	char primary[256];			/* the first ports' node.name: no prefix */
 	bool have_primary;
@@ -139,7 +142,11 @@ jackbus_node_t *shim_app_ref(const char *name)
 		}
 		struct filter_list *l = calloc(1, sizeof(*l));
 		atomic_store(&app.list, l);
-		if (jackbus_node_set_process(app.node, app_process, NULL) != 0
+		/* async audio streams (pw.async) need no realtime thread: the node gets one only
+		 * for what runs in the cycle (shim_app_need_rt) */
+		app.async = jackbus_compat_bool("async", "JACKBUS_PW_ASYNC", false);
+		app.has_process = !app.async;
+		if ((app.has_process && jackbus_node_set_process(app.node, app_process, NULL) != 0)
 		    || pipe2(app.wake, O_CLOEXEC) != 0) {
 			shim_warn("can't start the JACK client \"%s\"", name);
 			jackbus_node_close(app.node);
@@ -195,6 +202,26 @@ const char *shim_app_client_name(void)
 jack_client_t *shim_app_client(void)
 {
 	return app.node ? jackbus_node_client(app.node) : NULL;
+}
+
+bool shim_app_async(void)
+{
+	return app.async;
+}
+
+/* something that runs in the cycle (a filter, an RT_PROCESS or MIDI stream, or a stream
+ * without an endpoint): the node gets its process function, and a realtime thread if it is
+ * active already (JACK's path for a client activated without one) */
+void shim_app_need_rt(void)
+{
+	pthread_mutex_lock(&app.lock);
+	if (app.node && !app.has_process) {
+		if (jackbus_node_set_process(app.node, app_process, NULL) == 0)
+			app.has_process = true;
+		else
+			shim_warn("can't give the JACK client \"%s\" a realtime thread", app.name);
+	}
+	pthread_mutex_unlock(&app.lock);
 }
 
 /* under app.lock: in the graph's cycle while something runs in it */

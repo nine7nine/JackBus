@@ -45,6 +45,11 @@ void shim_node_unref(void);
 jack_client_t *shim_node_client(void);
 void shim_node_attach(struct shim_member *m);	/* runs from the next cycle */
 void shim_node_detach(struct shim_member *m);	/* returns once no cycle runs it */
+/* the settings' pa.async (read when the node opened): streams are async endpoints, the
+ * node has no realtime thread unless one is needed (shim_node_need_rt) */
+bool shim_node_async(void);
+void shim_node_need_rt(void);
+void shim_node_hold(bool on);			/* an async stream: the node active while any */
 /* the node's events (graph changes, shutdown) wake these eventfds */
 void shim_node_watch(int efd, bool add);
 bool shim_node_dead(void);

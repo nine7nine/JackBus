@@ -82,6 +82,8 @@ struct pa_stream {
 	double ratio;			/* application frames per JackBus frame */
 	void *mem;
 	size_t mem_size;
+	void *ring_mem;			/* the ring in the cycle (an async stream's is JackBus's) */
+	size_t ring_size;
 	float *ring[PA_CHANNELS_MAX];
 	float *tmp[PA_CHANNELS_MAX];	/* the application's rate */
 	float *tmp2[PA_CHANNELS_MAX];	/* JackBus's rate, resampled */
@@ -90,18 +92,15 @@ struct pa_stream {
 	uint8_t *pbuf;			/* peek */
 	size_t pbuf_len, pbuf_size;
 
-	/* shared with the realtime side */
-	_Atomic uint64_t w, r;		/* ring positions, JackBus frames */
-	_Atomic uint64_t moved;		/* frames played (or captured) in all */
-	atomic_bool corked, started, draining, running;
-	_Atomic uint64_t flush_to;	/* playback: drop the ring up to here (a flush) */
-	atomic_uint prebuf;		/* JackBus frames */
-	atomic_uint underflows, overflows;
-	_Atomic float gain[PA_CHANNELS_MAX];
-	/* the last cycle, for interpolation: a seqlock */
-	atomic_uint tseq;
-	uint64_t t_before, t_ns, t_period;
-	uint32_t t_n;
+	/* shared with the realtime side: the ring's positions (JackBus frames), the controls
+	 * (prebuffering, flush, drain, run, gains), the counts and the last cycle (a seqlock),
+	 * laid out as an async endpoint's (jack/jackbus.h). In the cycle (the node's realtime
+	 * thread, stream_process): local, sh = &local. Async (the settings' pa.async): JackBus's
+	 * memory, where JackBus itself moves the ring each cycle, and stream_process never runs. */
+	jackbus_endpoint_shared_t *sh;
+	jackbus_endpoint_shared_t local;
+	jackbus_endpoint_t *ep;
+	atomic_bool corked, running;	/* the application's: sh->run is running && !corked */
 
 	/* the application's side */
 	pa_time_event *timer;
@@ -259,6 +258,14 @@ static uint64_t bytes_to_frames(const pa_stream *s, uint64_t bytes)
 	return fs ? bytes / fs : 0;
 }
 
+/* the realtime side (the node's, or JackBus's for an async stream) moves frames while
+ * the stream runs and isn't corked */
+static void update_run(pa_stream *s)
+{
+	atomic_store_explicit(&s->sh->run,
+			atomic_load(&s->running) && !atomic_load(&s->corked) ? 1u : 0u, memory_order_release);
+}
+
 /* ------------------------------------------------------- realtime side */
 
 static void stream_process(struct shim_member *m, const jackbus_cycle_t *c)
@@ -266,40 +273,39 @@ static void stream_process(struct shim_member *m, const jackbus_cycle_t *c)
 	pa_stream *s = (pa_stream *)m;
 	uint32_t n = c->nframes;
 	float *port[PA_CHANNELS_MAX];
-	uint64_t before = atomic_load_explicit(&s->moved, memory_order_relaxed);
+	uint64_t before = atomic_load_explicit(&s->sh->moved, memory_order_relaxed);
 	uint32_t moved = 0;
 
 	for (unsigned int ch = 0; ch < s->n_ports; ch++)
 		port[ch] = jackbus_port_audio(s->ports[ch]);
 
-	if (s->dir == PA_STREAM_PLAYBACK && atomic_load_explicit(&s->running, memory_order_acquire)) {
+	if (s->dir == PA_STREAM_PLAYBACK) {
 		/* a flush: what was in the ring then goes, corked or not */
-		uint64_t to = atomic_load_explicit(&s->flush_to, memory_order_acquire);
-		uint64_t r = atomic_load_explicit(&s->r, memory_order_relaxed);
+		uint64_t to = atomic_load_explicit(&s->sh->skip_to, memory_order_acquire);
+		uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_relaxed);
 		if (to > r)
-			atomic_store_explicit(&s->r, to, memory_order_release);
+			atomic_store_explicit(&s->sh->r, to, memory_order_release);
 	}
-	if (!atomic_load_explicit(&s->running, memory_order_acquire) ||
-	    atomic_load_explicit(&s->corked, memory_order_relaxed)) {
+	if (!atomic_load_explicit(&s->sh->run, memory_order_acquire)) {
 		if (s->dir == PA_STREAM_PLAYBACK)
 			for (unsigned int ch = 0; ch < s->n_ports; ch++)
 				memset(port[ch], 0, n * sizeof(float));
 		goto out;
 	}
 	if (s->dir == PA_STREAM_PLAYBACK) {
-		uint64_t w = atomic_load_explicit(&s->w, memory_order_acquire);
-		uint64_t r = atomic_load_explicit(&s->r, memory_order_relaxed);
+		uint64_t w = atomic_load_explicit(&s->sh->w, memory_order_acquire);
+		uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_relaxed);
 		uint64_t fill = w - r;
-		bool draining = atomic_load_explicit(&s->draining, memory_order_relaxed);
-		if (!atomic_load_explicit(&s->started, memory_order_relaxed)) {
-			if (fill >= atomic_load_explicit(&s->prebuf, memory_order_relaxed) || draining)
-				atomic_store_explicit(&s->started, true, memory_order_release);
+		bool draining = atomic_load_explicit(&s->sh->draining, memory_order_relaxed);
+		if (!atomic_load_explicit(&s->sh->started, memory_order_relaxed)) {
+			if (fill >= atomic_load_explicit(&s->sh->prebuf, memory_order_relaxed) || draining)
+				atomic_store_explicit(&s->sh->started, true, memory_order_release);
 		}
-		if (atomic_load_explicit(&s->started, memory_order_relaxed)) {
+		if (atomic_load_explicit(&s->sh->started, memory_order_relaxed)) {
 			moved = (uint32_t)SHIM_MIN(fill, (uint64_t)n);
 			uint32_t idx = r & (RING_FRAMES - 1), first = SHIM_MIN(moved, RING_FRAMES - idx);
 			for (unsigned int ch = 0; ch < s->n_ports; ch++) {
-				float g = atomic_load_explicit(&s->gain[ch], memory_order_relaxed);
+				float g = atomic_load_explicit(&s->sh->gain[ch], memory_order_relaxed);
 				const float *a = s->ring[ch] + idx, *b = s->ring[ch];
 				for (uint32_t i = 0; i < first; i++)
 					port[ch][i] = a[i] * g;
@@ -307,24 +313,24 @@ static void stream_process(struct shim_member *m, const jackbus_cycle_t *c)
 					port[ch][i] = b[i - first] * g;
 			}
 			if (moved < n && !draining) {
-				atomic_fetch_add_explicit(&s->underflows, 1, memory_order_relaxed);
-				if (atomic_load_explicit(&s->prebuf, memory_order_relaxed) > 0)
-					atomic_store_explicit(&s->started, false, memory_order_relaxed);
+				atomic_fetch_add_explicit(&s->sh->underflows, 1, memory_order_relaxed);
+				if (atomic_load_explicit(&s->sh->prebuf, memory_order_relaxed) > 0)
+					atomic_store_explicit(&s->sh->started, false, memory_order_relaxed);
 			}
 		}
 		for (unsigned int ch = 0; ch < s->n_ports; ch++)
 			memset(port[ch] + moved, 0, (n - moved) * sizeof(float));
-		atomic_store_explicit(&s->r, r + moved, memory_order_release);
+		atomic_store_explicit(&s->sh->r, r + moved, memory_order_release);
 	} else {
-		uint64_t r = atomic_load_explicit(&s->r, memory_order_acquire);
-		uint64_t w = atomic_load_explicit(&s->w, memory_order_relaxed);
+		uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_acquire);
+		uint64_t w = atomic_load_explicit(&s->sh->w, memory_order_relaxed);
 		if (RING_FRAMES - (w - r) < n) {
-			atomic_fetch_add_explicit(&s->overflows, 1, memory_order_relaxed);
+			atomic_fetch_add_explicit(&s->sh->overflows, 1, memory_order_relaxed);
 			goto out;
 		}
 		uint32_t idx = w & (RING_FRAMES - 1), first = SHIM_MIN(n, RING_FRAMES - idx);
 		for (unsigned int ch = 0; ch < s->n_ports; ch++) {
-			float g = atomic_load_explicit(&s->gain[ch], memory_order_relaxed);
+			float g = atomic_load_explicit(&s->sh->gain[ch], memory_order_relaxed);
 			float *a = s->ring[ch] + idx, *b = s->ring[ch];
 			for (uint32_t i = 0; i < first; i++)
 				a[i] = port[ch][i] * g;
@@ -332,21 +338,22 @@ static void stream_process(struct shim_member *m, const jackbus_cycle_t *c)
 				b[i - first] = port[ch][i] * g;
 		}
 		moved = n;
-		atomic_store_explicit(&s->w, w + n, memory_order_release);
+		atomic_store_explicit(&s->sh->w, w + n, memory_order_release);
 	}
 out:
 	/* the cycle as it went, for interpolation */
 	{
-		unsigned int q = atomic_load_explicit(&s->tseq, memory_order_relaxed);
-		atomic_store_explicit(&s->tseq, q + 1, memory_order_relaxed);
+		unsigned int q = atomic_load_explicit(&s->sh->seq, memory_order_relaxed);
+		atomic_store_explicit(&s->sh->seq, q + 1, memory_order_relaxed);
 		atomic_thread_fence(memory_order_release);
-		s->t_before = before;
-		s->t_ns = c->time_ns;
-		s->t_period = c->period_ns ? c->period_ns : (uint64_t)n * 1000000000ull / SHIM_MAX(c->sample_rate, 1u);
-		s->t_n = moved;
-		atomic_store_explicit(&s->tseq, q + 2, memory_order_release);
+		atomic_store_explicit(&s->sh->last_moved, before, memory_order_relaxed);
+		atomic_store_explicit(&s->sh->time_ns, c->time_ns, memory_order_relaxed);
+		atomic_store_explicit(&s->sh->period_ns, c->period_ns ? c->period_ns :
+				(uint64_t)n * 1000000000ull / SHIM_MAX(c->sample_rate, 1u), memory_order_relaxed);
+		atomic_store_explicit(&s->sh->last_frames, moved, memory_order_relaxed);
+		atomic_store_explicit(&s->sh->seq, q + 2, memory_order_release);
 	}
-	atomic_store_explicit(&s->moved, before + moved, memory_order_release);
+	atomic_store_explicit(&s->sh->moved, before + moved, memory_order_release);
 }
 
 /* frames moved by now, interpolated within the last cycle */
@@ -355,15 +362,15 @@ static uint64_t moved_now(pa_stream *s, uint64_t *period_ns, uint64_t *cycle_ns)
 	uint64_t before = 0, t_ns = 0, period = 0;
 	uint32_t n = 0;
 	for (int i = 0; i < 100; i++) {
-		unsigned int a = atomic_load_explicit(&s->tseq, memory_order_acquire);
+		unsigned int a = atomic_load_explicit(&s->sh->seq, memory_order_acquire);
 		if (a & 1)
 			continue;
-		before = s->t_before;
-		t_ns = s->t_ns;
-		period = s->t_period;
-		n = s->t_n;
+		before = atomic_load_explicit(&s->sh->last_moved, memory_order_relaxed);
+		t_ns = atomic_load_explicit(&s->sh->time_ns, memory_order_relaxed);
+		period = atomic_load_explicit(&s->sh->period_ns, memory_order_relaxed);
+		n = atomic_load_explicit(&s->sh->last_frames, memory_order_relaxed);
 		atomic_thread_fence(memory_order_acquire);
-		if (atomic_load_explicit(&s->tseq, memory_order_relaxed) == a)
+		if (atomic_load_explicit(&s->sh->seq, memory_order_relaxed) == a)
 			break;
 	}
 	if (period_ns)
@@ -371,7 +378,7 @@ static uint64_t moved_now(pa_stream *s, uint64_t *period_ns, uint64_t *cycle_ns)
 	if (cycle_ns)
 		*cycle_ns = t_ns;
 	if (t_ns == 0 || period == 0)
-		return atomic_load(&s->moved);
+		return atomic_load(&s->sh->moved);
 	uint64_t now = shim_now_usec() * 1000ull;
 	uint64_t into = now > t_ns ? now - t_ns : 0;
 	uint64_t frames = into >= period ? n : (uint64_t)((double)n * (double)into / (double)period);
@@ -404,7 +411,7 @@ static pa_usec_t port_latency_usec(pa_stream *s)
 /* playback: application frames written and not yet played */
 static uint64_t queued_app(pa_stream *s)
 {
-	uint64_t played = app_frames(s, atomic_load_explicit(&s->moved, memory_order_acquire));
+	uint64_t played = app_frames(s, atomic_load_explicit(&s->sh->moved, memory_order_acquire));
 	return s->written > played ? s->written - played : 0;
 }
 
@@ -417,7 +424,7 @@ static size_t writable_bytes(pa_stream *s)
 
 static size_t readable_bytes(pa_stream *s)
 {
-	uint64_t fill = atomic_load_explicit(&s->w, memory_order_acquire) - atomic_load_explicit(&s->r, memory_order_relaxed);
+	uint64_t fill = atomic_load_explicit(&s->sh->w, memory_order_acquire) - atomic_load_explicit(&s->sh->r, memory_order_relaxed);
 	return (size_t)app_frames(s, fill) * pa_frame_size(&s->ss) + s->pbuf_len;
 }
 
@@ -447,13 +454,13 @@ static void update_timing(pa_stream *s)
 	t->synchronized_clocks = 1;
 	if (s->dir == PA_STREAM_PLAYBACK) {
 		t->sink_usec = port_latency_usec(s);
-		t->playing = atomic_load(&s->started) && !atomic_load(&s->corked);
+		t->playing = atomic_load(&s->sh->started) && !atomic_load(&s->corked);
 		t->write_index = (int64_t)(s->written * fs);
 		t->read_index = (int64_t)(app_frames(s, moved_now(s, NULL, NULL)) * fs);
 	} else {
 		t->source_usec = port_latency_usec(s);
 		t->playing = !atomic_load(&s->corked);
-		t->write_index = (int64_t)(app_frames(s, atomic_load(&s->moved)) * fs);
+		t->write_index = (int64_t)(app_frames(s, atomic_load(&s->sh->moved)) * fs);
 		t->read_index = (int64_t)(s->taken * fs);
 	}
 	t->configured_sink_usec = t->sink_usec;
@@ -473,22 +480,22 @@ static void on_timer(pa_mainloop_api *a, pa_time_event *e, const struct timeval 
 			s->first_request = false;
 			s->write_cb(s, wb, s->write_ud);
 		}
-		unsigned int u = atomic_load(&s->underflows);
+		unsigned int u = atomic_load(&s->sh->underflows);
 		if (u != s->seen_underflows && s->state == PA_STREAM_READY) {
 			s->seen_underflows = u;
 			s->started_told = false;
 			shim_log("%s: underflow (%u in all; written %llu, played %llu frames)", s->name, u,
-					(unsigned long long)s->written, (unsigned long long)app_frames(s, atomic_load(&s->moved)));
+					(unsigned long long)s->written, (unsigned long long)app_frames(s, atomic_load(&s->sh->moved)));
 			if (s->underflow_cb)
 				s->underflow_cb(s, s->underflow_ud);
 		}
-		if (!s->started_told && atomic_load(&s->started) && s->state == PA_STREAM_READY) {
+		if (!s->started_told && atomic_load(&s->sh->started) && s->state == PA_STREAM_READY) {
 			s->started_told = true;
 			if (s->started_cb)
 				s->started_cb(s, s->started_ud);
 		}
-		if (s->drain_op && atomic_load(&s->w) == atomic_load(&s->r)) {
-			atomic_store(&s->draining, false);
+		if (s->drain_op && atomic_load(&s->sh->w) == atomic_load(&s->sh->r)) {
+			atomic_store(&s->sh->draining, false);
 			pa_operation *o = s->drain_op;
 			s->drain_op = NULL;
 			shim_operation_finish(o, 1);
@@ -499,7 +506,7 @@ static void on_timer(pa_mainloop_api *a, pa_time_event *e, const struct timeval 
 		size_t frag = (size_t)app_frames(s, s->fragsize) * pa_frame_size(&s->ss);
 		if (s->read_cb && rb > 0 && rb >= SHIM_MIN(frag, (size_t)app_frames(s, RING_FRAMES / 2) * pa_frame_size(&s->ss)))
 			s->read_cb(s, rb, s->read_ud);
-		unsigned int ov = atomic_load(&s->overflows);
+		unsigned int ov = atomic_load(&s->sh->overflows);
 		if (ov != s->seen_overflows && s->state == PA_STREAM_READY) {
 			s->seen_overflows = ov;
 			if (s->overflow_cb)
@@ -532,6 +539,9 @@ static pa_stream *stream_new(pa_context *c, const char *name, const pa_sample_sp
 		return NULL;
 	s->refs = 1;
 	s->member.process = stream_process;
+	s->sh = &s->local;
+	s->local.size = sizeof(s->local);
+	s->local.ring_frames = RING_FRAMES;
 	s->context = c;
 	pa_context_ref(c);
 	s->name = strdup(name ? name : "stream");
@@ -548,7 +558,7 @@ static pa_stream *stream_new(pa_context *c, const char *name, const pa_sample_sp
 	s->device_index = PA_INVALID_INDEX;
 	pa_cvolume_set(&s->volume, ss->channels, PA_VOLUME_NORM);
 	for (unsigned int ch = 0; ch < PA_CHANNELS_MAX; ch++)
-		atomic_store(&s->gain[ch], 1.0f);
+		atomic_store(&s->sh->gain[ch], 1.0f);
 	return s;
 }
 
@@ -588,7 +598,13 @@ static void free_buffers(pa_stream *s)
 	}
 	s->mem = NULL;
 	s->mem_size = 0;
-	memset(s->ring, 0, sizeof(s->ring));
+	if (s->ring_mem) {
+		munlock(s->ring_mem, s->ring_size);
+		free(s->ring_mem);
+	}
+	s->ring_mem = NULL;
+	s->ring_size = 0;
+	memset(s->ring, 0, sizeof(s->ring));	/* an endpoint's: unmapped by its close */
 	memset(s->tmp, 0, sizeof(s->tmp));
 	memset(s->tmp2, 0, sizeof(s->tmp2));
 	free(s->wbuf);
@@ -601,9 +617,26 @@ static void free_buffers(pa_stream *s)
 	s->rs = NULL;
 }
 
-static int alloc_buffers(pa_stream *s)
+/* the ring, for a stream in the cycle */
+static int alloc_ring(pa_stream *s)
 {
-	size_t ring = (size_t)RING_FRAMES * sizeof(float);
+	s->ring_size = (size_t)s->ss.channels * RING_FRAMES * sizeof(float);
+	if (posix_memalign(&s->ring_mem, 64, s->ring_size) != 0) {
+		s->ring_mem = NULL;
+		return -1;
+	}
+	memset(s->ring_mem, 0, s->ring_size);
+	mlock(s->ring_mem, s->ring_size);
+	for (unsigned int ch = 0; ch < s->ss.channels; ch++)
+		s->ring[ch] = (float *)s->ring_mem + (size_t)ch * RING_FRAMES;
+	return 0;
+}
+
+static int alloc_buffers(pa_stream *s, bool with_ring)
+{
+	if (with_ring && alloc_ring(s) < 0)
+		return -1;
+	size_t ring = 0;
 	size_t tmp = (size_t)CHUNK * sizeof(float), tmp2 = (size_t)RS_OUT * sizeof(float);
 	unsigned int nc = s->ss.channels;
 	s->mem_size = nc * (ring + tmp + tmp2);
@@ -615,7 +648,7 @@ static int alloc_buffers(pa_stream *s)
 	mlock(s->mem, s->mem_size);
 	uint8_t *p = s->mem;
 	for (unsigned int ch = 0; ch < nc; ch++) {
-		s->ring[ch] = (float *)p; p += ring;
+		p += ring;
 		s->tmp[ch] = (float *)p; p += tmp;
 		s->tmp2[ch] = (float *)p; p += tmp2;
 	}
@@ -747,13 +780,13 @@ static void fill_attr(pa_stream *s, const pa_buffer_attr *attr)
 	/* resampling, the resampler holds back a few frames of what was written:
 	 * the ring alone never reaches tlength, so playback starts a cycle below */
 	uint32_t pb_max = s->rs ? (s->tlength > quantum ? s->tlength - quantum : 0) : s->tlength;
-	atomic_store(&s->prebuf, SHIM_MIN(pb, pb_max));
+	atomic_store(&s->sh->prebuf, SHIM_MIN(pb, pb_max));
 	s->fragsize = SHIM_MIN(SHIM_MAX(SHIM_MIN(jack_frames(s, bytes_to_frames(s, a.fragsize)), cap), quantum),
 			RING_FRAMES / 2);
 	size_t fs = pa_frame_size(&s->ss);
 	a.tlength = (uint32_t)(app_frames(s, s->tlength) * fs);
 	a.minreq = (uint32_t)(app_frames(s, s->minreq) * fs);
-	a.prebuf = (uint32_t)(app_frames(s, atomic_load(&s->prebuf)) * fs);
+	a.prebuf = (uint32_t)(app_frames(s, atomic_load(&s->sh->prebuf)) * fs);
 	a.fragsize = (uint32_t)(app_frames(s, s->fragsize) * fs);
 	a.maxlength = SHIM_MAX(a.maxlength, a.tlength);
 	s->attr = a;
@@ -822,7 +855,10 @@ static int stream_connect(pa_stream *s, pa_stream_direction_t dir, const char *d
 		shim_log("%s: resampled %u Hz <-> %u Hz (JackBus's)", s->name, s->ss.rate, s->jack_rate);
 	}
 	s->n_ports = s->ss.channels;
-	if (alloc_buffers(s) < 0) {
+	/* async (the settings' pa.async): JackBus moves the ring itself, the application's
+	 * process is never in the graph's cycle */
+	bool async = shim_node_async();
+	if (alloc_buffers(s, !async) < 0) {
 		snprintf(why, sizeof(why), "out of memory");
 		goto refuse;
 	}
@@ -846,21 +882,50 @@ static int stream_connect(pa_stream *s, pa_stream_direction_t dir, const char *d
 			goto refuse;
 		}
 	}
+	if (async) {
+		s->ep = jackbus_endpoint_open(s->node, s->ports, s->n_ports, RING_FRAMES);
+		if (s->ep && jackbus_endpoint_shared(s->ep)->ring_frames != RING_FRAMES) {
+			jackbus_endpoint_close(s->ep);
+			s->ep = NULL;
+		}
+		if (s->ep) {
+			s->sh = jackbus_endpoint_shared(s->ep);
+			for (unsigned int ch = 0; ch < s->n_ports; ch++)
+				s->ring[ch] = jackbus_endpoint_ring(s->ep, ch);
+		} else {
+			/* the server has no endpoints: in the cycle after all */
+			shim_warn("%s: no async endpoint (%s): in the graph's cycle", s->name, strerror(errno));
+			if (alloc_ring(s) < 0) {
+				for (unsigned int i = 0; i < s->n_ports; i++)
+					jackbus_port_remove(s->ports[i]);
+				memset(s->ports, 0, sizeof(s->ports));
+				snprintf(why, sizeof(why), "out of memory");
+				goto refuse;
+			}
+			async = false;
+		}
+	}
 	if (volume && volume->channels)
 		shim_stream_set_gain(s, volume, -1);
 	fill_attr(s, attr);
 	atomic_store(&s->corked, (flags & PA_STREAM_START_CORKED) != 0);
-	atomic_store(&s->started, false);
+	atomic_store(&s->sh->started, false);
 	s->first_request = true;
 	s->format = pa_format_info_from_sample_spec(&s->ss, &s->map);
 	s->timer = pa_context_rttime_new(c, PA_USEC_INVALID, on_timer, s);
 	atomic_store_explicit(&s->running, true, memory_order_release);
-	shim_node_attach(&s->member);
+	update_run(s);
+	if (async) {
+		shim_node_hold(true);			/* active, without a realtime thread */
+	} else {
+		shim_node_need_rt();
+		shim_node_attach(&s->member);
+	}
 	s->attached = true;
 	autoconnect(s, d);
 	shim_log("%s: %s, %s %u Hz %u ch, tlength %u frames (minreq %u, prebuf %u), to %s", s->name,
 			playback ? "playback" : "record", pa_sample_format_to_string(s->ss.format),
-			s->ss.rate, s->ss.channels, s->tlength, s->minreq, atomic_load(&s->prebuf),
+			s->ss.rate, s->ss.channels, s->tlength, s->minreq, atomic_load(&s->sh->prebuf),
 			d ? d->name : "nothing");
 
 	set_state(s, PA_STREAM_CREATING);
@@ -898,7 +963,19 @@ static void stream_close(pa_stream *s)
 {
 	if (s->attached) {
 		atomic_store(&s->running, false);
-		shim_node_detach(&s->member);		/* from here no cycle runs it */
+		update_run(s);
+		if (s->ep) {
+			/* JackBus stops moving it; its counts are kept for the log below */
+			s->local.underflows = atomic_load(&s->sh->underflows);
+			s->local.overflows = atomic_load(&s->sh->overflows);
+			jackbus_endpoint_close(s->ep);
+			s->ep = NULL;
+			s->sh = &s->local;
+			memset(s->ring, 0, sizeof(s->ring));
+			shim_node_hold(false);
+		} else {
+			shim_node_detach(&s->member);	/* from here no cycle runs it */
+		}
 		s->attached = false;
 	}
 	for (unsigned int ch = 0; ch < PA_CHANNELS_MAX; ch++) {
@@ -925,7 +1002,7 @@ static void stream_close(pa_stream *s)
 		s->node_ref = false;
 		shim_node_unref();
 	}
-	unsigned int u = atomic_load(&s->underflows), o = atomic_load(&s->overflows);
+	unsigned int u = atomic_load(&s->sh->underflows), o = atomic_load(&s->sh->overflows);
 	if (u || o)
 		shim_log("%s: %u underflows, %u overflows", s->name, u, o);
 }
@@ -1043,14 +1120,14 @@ static int write_frames(pa_stream *s, const uint8_t *data, uint64_t frames)
 			out = got > 0 ? (uint32_t)got : 0;
 			src = s->tmp2;
 		}
-		uint64_t w = atomic_load_explicit(&s->w, memory_order_relaxed);
-		uint64_t r = atomic_load_explicit(&s->r, memory_order_acquire);
+		uint64_t w = atomic_load_explicit(&s->sh->w, memory_order_relaxed);
+		uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_acquire);
 		uint32_t room = (uint32_t)(RING_FRAMES - (w - r));
 		if (out > room)
 			out = room;		/* beyond the ring: dropped (maxlength) */
 		if (out) {
 			ring_put(s, w, src, out);
-			atomic_store_explicit(&s->w, w + out, memory_order_release);
+			atomic_store_explicit(&s->sh->w, w + out, memory_order_release);
 		}
 		done += n;
 	}
@@ -1091,12 +1168,12 @@ SHIM_EXPORT int pa_stream_peek(pa_stream *s, const void **data, size_t *nbytes)
 		return -PA_ERR_BADSTATE;
 	}
 	if (s->pbuf_len == 0) {
-		uint64_t w = atomic_load_explicit(&s->w, memory_order_acquire);
-		uint64_t r = atomic_load_explicit(&s->r, memory_order_relaxed);
+		uint64_t w = atomic_load_explicit(&s->sh->w, memory_order_acquire);
+		uint64_t r = atomic_load_explicit(&s->sh->r, memory_order_relaxed);
 		uint32_t n = (uint32_t)SHIM_MIN(w - r, (uint64_t)CHUNK);
 		if (n) {
 			ring_get(s, r, s->tmp, n);
-			atomic_store_explicit(&s->r, r + n, memory_order_release);
+			atomic_store_explicit(&s->sh->r, r + n, memory_order_release);
 			float *const *src = s->tmp;
 			uint32_t out = n;
 			if (s->rs) {
@@ -1168,7 +1245,7 @@ SHIM_EXPORT pa_operation *pa_stream_drain(pa_stream *s, pa_stream_success_cb_t c
 		shim_operation_finish(s->drain_op, 0);
 		pa_operation_unref(s->drain_op);
 	}
-	atomic_store(&s->draining, true);
+	atomic_store(&s->sh->draining, true);
 	pa_operation *o = stream_op(s, cb, userdata, 1, true);
 	if (o)
 		s->drain_op = pa_operation_ref(o);
@@ -1182,14 +1259,14 @@ SHIM_EXPORT pa_operation *pa_stream_flush(pa_stream *s, pa_stream_success_cb_t c
 		return NULL;
 	}
 	if (s->dir == PA_STREAM_PLAYBACK) {
-		atomic_store(&s->flush_to, atomic_load(&s->w));
-		atomic_store(&s->started, false);
-		s->written = app_frames(s, atomic_load(&s->moved)) + 0;
+		atomic_store(&s->sh->skip_to, atomic_load(&s->sh->w));
+		atomic_store(&s->sh->started, false);
+		s->written = app_frames(s, atomic_load(&s->sh->moved)) + 0;
 		if (s->rs)
 			shim_resampler_reset(s->rs);
 		s->first_request = true;
 	} else {
-		atomic_store(&s->r, atomic_load(&s->w));
+		atomic_store(&s->sh->r, atomic_load(&s->sh->w));
 		s->pbuf_len = 0;
 	}
 	return stream_op(s, cb, userdata, 1, false);
@@ -1202,6 +1279,7 @@ SHIM_EXPORT pa_operation *pa_stream_cork(pa_stream *s, int b, pa_stream_success_
 		return NULL;
 	}
 	atomic_store(&s->corked, b != 0);
+	update_run(s);
 	return stream_op(s, cb, userdata, 1, false);
 }
 
@@ -1216,7 +1294,7 @@ SHIM_EXPORT pa_operation *pa_stream_trigger(pa_stream *s, pa_stream_success_cb_t
 		shim_context_set_errno(s->context, PA_ERR_BADSTATE);
 		return NULL;
 	}
-	atomic_store(&s->started, true);
+	atomic_store(&s->sh->started, true);
 	return stream_op(s, cb, userdata, 1, false);
 }
 
@@ -1226,7 +1304,7 @@ SHIM_EXPORT pa_operation *pa_stream_prebuf(pa_stream *s, pa_stream_success_cb_t 
 		shim_context_set_errno(s->context, PA_ERR_BADSTATE);
 		return NULL;
 	}
-	atomic_store(&s->started, false);
+	atomic_store(&s->sh->started, false);
 	return stream_op(s, cb, userdata, 1, false);
 }
 
@@ -1368,7 +1446,7 @@ void shim_stream_set_gain(pa_stream *s, const pa_cvolume *v, int mute)
 		s->mute = mute;
 	for (unsigned int ch = 0; ch < s->ss.channels && ch < PA_CHANNELS_MAX; ch++) {
 		float g = s->mute ? 0.0f : (float)pa_sw_volume_to_linear(s->volume.values[ch]);
-		atomic_store(&s->gain[ch], g);
+		atomic_store(&s->sh->gain[ch], g);
 	}
 }
 

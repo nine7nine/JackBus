@@ -61,6 +61,7 @@
 
 #define MAX_CHANNELS 64
 #define MIN_U(a, b) ((a) < (b) ? (a) : (b))
+#define SPA_MIN_U64(a, b) ((uint64_t)(a) < (uint64_t)(b) ? (uint64_t)(a) : (uint64_t)(b))
 #define N_ELEMENTS(a) (sizeof(a) / sizeof((a)[0]))
 
 struct jb {
@@ -89,6 +90,24 @@ struct jb {
 	_Atomic uint64_t hw;		/* the realtime side's position, modulo boundary */
 	_Atomic uint64_t next_ns, period_ns;
 	_Atomic uint64_t xruns;
+
+	/* async (the settings' alsa.async; JackBus's rate only, the direct route):
+	 * JackBus moves an endpoint's ring each cycle (jack/jackbus.h); the
+	 * application's side copies between alsa-lib's buffer and the ring when
+	 * the application calls in (pump). hw is what JackBus has taken (playback)
+	 * or what has come into alsa-lib's buffer (capture), so delay and drain
+	 * stay exact. Positions: JackBus frames since prepare, 64 bits. */
+	bool async_wanted;		/* the setting */
+	bool has_process;		/* jb_process set: the node runs a realtime thread */
+	jackbus_endpoint_t *ep;
+	jackbus_endpoint_shared_t *sh;
+	float *ring[MAX_CHANNELS];
+	uint32_t ring_frames;
+	uint64_t base;			/* the endpoint's position of frame 0 */
+	uint64_t pumped;		/* frames copied to (from) the ring since prepare */
+	uint64_t appl64;		/* the application's position, 64 bits */
+	snd_pcm_uframes_t last_appl;
+	uint32_t seen_underflows, seen_overflows;
 
 	/* the fallback: the application's rate isn't JackBus's (set up in
 	 * hw_params, used by the realtime side) */
@@ -242,8 +261,8 @@ static int jb_process(jackbus_node_t *node, const jackbus_cycle_t *c, void *arg)
 	atomic_fetch_add(&p->seq, 1);
 	atomic_store_explicit(&p->next_ns, c->next_ns, memory_order_relaxed);
 	atomic_store_explicit(&p->period_ns, c->period_ns, memory_order_relaxed);
-	if (!atomic_load(&p->ready))
-		goto out;
+	if (!atomic_load(&p->ready) || p->ep)
+		goto out;		/* an endpoint's ring is JackBus's to move */
 
 	uint32_t moved = 0;
 	if (atomic_load_explicit(&p->running, memory_order_acquire)) {
@@ -293,6 +312,127 @@ static void wait_idle(struct jb *p)
 		struct timespec ts = { 0, 50 * 1000 };
 		nanosleep(&ts, NULL);
 	}
+}
+
+/* ------------------------------------------------------------- async */
+
+/* the application's position as 64 bits (alsa-lib's wraps at the boundary) */
+static uint64_t appl_now(struct jb *p)
+{
+	snd_pcm_uframes_t appl = p->io.appl_ptr;
+	if (p->boundary)
+		p->appl64 += (appl + p->boundary - p->last_appl) % p->boundary;
+	p->last_appl = appl;
+	return p->appl64;
+}
+
+/* n frames between alsa-lib's buffer at position pos (frames since prepare)
+ * and the ring at endpoint position epos, in pieces where either wraps */
+static void ring_copy(struct jb *p, uint64_t pos, uint64_t epos, uint32_t n)
+{
+	while (n > 0) {
+		snd_pcm_uframes_t bpos = pos % p->buffer_size;
+		uint32_t rpos = (uint32_t)(epos & (p->ring_frames - 1));
+		uint32_t k = (uint32_t)MIN_U((snd_pcm_uframes_t)n, p->buffer_size - bpos);
+		k = MIN_U(k, p->ring_frames - rpos);
+		for (unsigned int ch = 0; ch < p->channels; ch++) {
+			if (p->playback)
+				ring_to_float(p, ch, bpos, p->ring[ch] + rpos, k);
+			else
+				float_to_ring(p, ch, bpos, p->ring[ch] + rpos, k);
+		}
+		pos += k;
+		epos += k;
+		n -= k;
+	}
+}
+
+/* move what can move between alsa-lib's buffer and the ring, publish hw;
+ * an underflow (overflow) JackBus counted while running is an xrun */
+static void pump(struct jb *p)
+{
+	jackbus_endpoint_shared_t *sh = p->sh;
+	if (!atomic_load(&p->ready))
+		return;
+	atomic_store_explicit(&p->next_ns, atomic_load_explicit(&sh->next_ns, memory_order_relaxed), memory_order_relaxed);
+	atomic_store_explicit(&p->period_ns, atomic_load_explicit(&sh->period_ns, memory_order_relaxed), memory_order_relaxed);
+	uint64_t appl = appl_now(p);
+	uint64_t hw;
+	if (p->playback) {
+		uint64_t r = atomic_load_explicit(&sh->r, memory_order_acquire);
+		uint64_t w = p->base + p->pumped;
+		uint64_t room = p->ring_frames - SPA_MIN_U64(w - SPA_MIN_U64(r, w), p->ring_frames);
+		uint32_t n = (uint32_t)SPA_MIN_U64(appl - SPA_MIN_U64(p->pumped, appl), room);
+		if (n) {
+			ring_copy(p, p->pumped, w, n);
+			p->pumped += n;
+			atomic_store_explicit(&sh->w, p->base + p->pumped, memory_order_release);
+		}
+		atomic_store_explicit(&sh->draining, p->io.state == SND_PCM_STATE_DRAINING ? 1u : 0u, memory_order_relaxed);
+		hw = r > p->base ? SPA_MIN_U64(r - p->base, p->pumped) : 0;
+		uint32_t u = atomic_load_explicit(&sh->underflows, memory_order_relaxed);
+		if (u != p->seen_underflows) {
+			p->seen_underflows = u;
+			if (atomic_load(&p->running) && p->io.state != SND_PCM_STATE_DRAINING) {
+				atomic_store_explicit(&sh->run, 0u, memory_order_release);
+				atomic_store(&p->running, false);
+				atomic_store(&p->xrun, true);
+				atomic_fetch_add(&p->xruns, 1);
+			}
+		}
+	} else {
+		uint64_t w = atomic_load_explicit(&sh->w, memory_order_acquire);
+		uint64_t pos = p->base + p->pumped;
+		uint64_t got = w > pos ? w - pos : 0;
+		uint64_t room = p->buffer_size - SPA_MIN_U64(p->pumped - SPA_MIN_U64(appl, p->pumped), p->buffer_size);
+		uint32_t n = (uint32_t)SPA_MIN_U64(got, room);
+		if (n) {
+			ring_copy(p, p->pumped, pos, n);
+			p->pumped += n;
+			atomic_store_explicit(&sh->r, p->base + p->pumped, memory_order_release);
+		}
+		hw = p->pumped;
+		uint32_t o = atomic_load_explicit(&sh->overflows, memory_order_relaxed);
+		if (o != p->seen_overflows) {
+			p->seen_overflows = o;
+			if (atomic_load(&p->running)) {
+				atomic_store_explicit(&sh->run, 0u, memory_order_release);
+				atomic_store(&p->running, false);
+				atomic_store(&p->xrun, true);
+				atomic_fetch_add(&p->xruns, 1);
+			}
+		}
+	}
+	atomic_store_explicit(&p->hw, p->boundary ? hw % p->boundary : hw, memory_order_release);
+}
+
+/* the endpoint over the ports, for a stream at JackBus's rate */
+static void close_endpoint(struct jb *p)
+{
+	if (p->ep == NULL)
+		return;
+	jackbus_endpoint_close(p->ep);
+	p->ep = NULL;
+	p->sh = NULL;
+	memset(p->ring, 0, sizeof(p->ring));
+}
+
+static int open_endpoint(struct jb *p, snd_pcm_uframes_t buffer_size)
+{
+	uint32_t want = 4096;
+	while (want < buffer_size + 8192)
+		want <<= 1;
+	if (p->ep && p->ring_frames >= want)
+		return 0;
+	close_endpoint(p);
+	p->ep = jackbus_endpoint_open(p->node, p->ports, p->n_ports, want);
+	if (p->ep == NULL)
+		return -errno;
+	p->sh = jackbus_endpoint_shared(p->ep);
+	p->ring_frames = p->sh->ring_frames;
+	for (unsigned int ch = 0; ch < p->n_ports; ch++)
+		p->ring[ch] = jackbus_endpoint_ring(p->ep, ch);
+	return 0;
 }
 
 static uint64_t now_ns(void)
@@ -381,6 +521,12 @@ static int jb_start(snd_pcm_ioplug_t *io)
 		return -ENODEV;
 	atomic_store(&p->xrun, false);
 	atomic_store_explicit(&p->running, true, memory_order_release);
+	if (p->ep) {
+		pump(p);		/* what was written before the start */
+		p->seen_underflows = atomic_load(&p->sh->underflows);
+		p->seen_overflows = atomic_load(&p->sh->overflows);
+		atomic_store_explicit(&p->sh->run, 1u, memory_order_release);
+	}
 	arm_timer(p, p->avail_min);
 	return 0;
 }
@@ -389,6 +535,8 @@ static int jb_stop(snd_pcm_ioplug_t *io)
 {
 	struct jb *p = io->private_data;
 	atomic_store(&p->running, false);
+	if (p->ep)
+		atomic_store_explicit(&p->sh->run, 0u, memory_order_release);
 	return 0;
 }
 
@@ -397,6 +545,8 @@ static snd_pcm_sframes_t jb_pointer(snd_pcm_ioplug_t *io)
 	struct jb *p = io->private_data;
 	if (atomic_load(&p->dead))
 		return -ENODEV;
+	if (p->ep)
+		pump(p);
 	if (atomic_load_explicit(&p->xrun, memory_order_acquire)) {
 		snd_pcm_ioplug_set_state(io, SND_PCM_STATE_XRUN);
 		return -EPIPE;
@@ -427,6 +577,8 @@ static int jb_hw_params(snd_pcm_ioplug_t *io, snd_pcm_hw_params_t *params)
 	wait_idle(p);
 	if (io->channels > MAX_CHANNELS)
 		return -EINVAL;
+	if (p->n_ports != io->channels)
+		close_endpoint(p);	/* before its ports change */
 	while (p->n_ports > io->channels)
 		jackbus_port_remove(p->ports[--p->n_ports]);
 	while (p->n_ports < io->channels) {
@@ -441,6 +593,19 @@ static int jb_hw_params(snd_pcm_ioplug_t *io, snd_pcm_hw_params_t *params)
 	p->format = io->format;
 	p->buffer_size = io->buffer_size;
 	free_resampler(p);
+	/* async at JackBus's rate (a resampled stream runs in the cycle) */
+	if (p->async_wanted && io->rate == p->rate) {
+		int err = open_endpoint(p, io->buffer_size);
+		if (err < 0 && getenv("JACKBUS_ALSA_VERBOSE"))
+			fprintf(stderr, "jackbus-alsa: no async endpoint (%s): in the graph's cycle\n", strerror(-err));
+	} else {
+		close_endpoint(p);
+	}
+	if (p->ep == NULL && !p->has_process) {
+		if (jackbus_node_set_process(p->node, jb_process, p) != 0)
+			return -EIO;
+		p->has_process = true;
+	}
 	if (io->rate != p->rate) {
 		/* the fallback: resampled at a fixed ratio (the application runs on
 		 * JackBus's clock) */
@@ -500,6 +665,22 @@ static int jb_prepare(snd_pcm_ioplug_t *io)
 		shim_resampler_reset(p->rs);	/* the stream starts again */
 	atomic_store(&p->hw, 0);
 	atomic_store(&p->xrun, false);
+	if (p->ep) {
+		/* from frame 0 again: what JackBus still holds of before is dropped */
+		atomic_store_explicit(&p->sh->run, 0u, memory_order_release);
+		if (p->playback) {
+			p->base = atomic_load(&p->sh->w);
+			atomic_store(&p->sh->skip_to, p->base);
+		} else {
+			p->base = atomic_load(&p->sh->w);
+			atomic_store(&p->sh->r, p->base);
+		}
+		p->pumped = 0;
+		p->appl64 = 0;
+		p->last_appl = io->appl_ptr;
+		p->seen_underflows = atomic_load(&p->sh->underflows);
+		p->seen_overflows = atomic_load(&p->sh->overflows);
+	}
 	if (p->areas == NULL || p->n_ports == 0)
 		return -EINVAL;
 	atomic_store(&p->ready, true);
@@ -541,6 +722,8 @@ static int jb_poll_revents(snd_pcm_ioplug_t *io, struct pollfd *pfd, unsigned in
 		*revents = POLLERR;
 		return 0;
 	}
+	if (p->ep)
+		pump(p);
 	if (atomic_load(&p->xrun)) {
 		*revents = p->playback ? POLLOUT : POLLIN;
 		return 0;
@@ -562,6 +745,8 @@ static int jb_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delayp)
 {
 	struct jb *p = io->private_data;
 	jack_latency_range_t range = { 0, 0 };
+	if (p->ep)
+		pump(p);
 	snd_pcm_uframes_t hw = atomic_load_explicit(&p->hw, memory_order_acquire);
 
 	if (p->n_ports)
@@ -574,6 +759,11 @@ static int jb_delay(snd_pcm_ioplug_t *io, snd_pcm_sframes_t *delayp)
 	 * the application's rate */
 	double held = p->rs ? shim_resampler_delay(p->rs) : 0.0;
 	double lat = p->rs ? (double)range.max * io->rate / p->rate : (double)range.max;
+	/* async capture: what JackBus has put in the ring, not yet in alsa-lib's buffer */
+	if (p->ep && !p->playback) {
+		uint64_t w = atomic_load(&p->sh->w), pos = p->base + p->pumped;
+		queued += w > pos ? (snd_pcm_uframes_t)(w - pos) : 0;
+	}
 	*delayp = (snd_pcm_sframes_t)(queued + (held > 0 ? held : 0) + lat);
 	return 0;
 }
@@ -584,6 +774,7 @@ static int jb_close(snd_pcm_ioplug_t *io)
 	uint64_t xruns = atomic_load(&p->xruns);
 	if (xruns && getenv("JACKBUS_ALSA_VERBOSE"))
 		fprintf(stderr, "jackbus-alsa: %llu xruns\n", (unsigned long long)xruns);
+	close_endpoint(p);
 	jackbus_node_close(p->node);	/* deactivates: no cycle runs process after this */
 	if (p->timer_fd >= 0)
 		close(p->timer_fd);
@@ -703,6 +894,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(jackbus)
 	p->autoconnect = connect >= 0 ? connect :
 		jackbus_compat_bool("autoconnect", "JACKBUS_ALSA_AUTOCONNECT", true);
 	p->resample = jackbus_compat_bool("resample", "JACKBUS_ALSA_RESAMPLE", true);
+	p->async_wanted = jackbus_compat_bool("async", "JACKBUS_ALSA_ASYNC", false);
 	p->timer_fd = -1;
 
 	const char *env = getenv("JACKBUS_ALSA_NAME");
@@ -720,10 +912,12 @@ SND_PCM_PLUGIN_DEFINE_FUNC(jackbus)
 	p->rate = jack_get_sample_rate(p->client);
 	p->event_fd = jackbus_node_event_fd(p->node);
 	p->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-	if (p->timer_fd < 0 || jackbus_node_set_process(p->node, jb_process, p) != 0) {
+	/* async: no realtime thread unless a stream needs one (hw_params) */
+	if (p->timer_fd < 0 || (!p->async_wanted && jackbus_node_set_process(p->node, jb_process, p) != 0)) {
 		err = errno ? -errno : -EIO;
 		goto error;
 	}
+	p->has_process = !p->async_wanted;
 
 	p->io.version = SND_PCM_IOPLUG_VERSION;
 	p->io.name = "JackBus (direct)";

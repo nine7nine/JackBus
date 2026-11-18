@@ -194,6 +194,9 @@ if command -v strace >/dev/null; then
         others=$(grep -vcE '^[0-9]+ +(futex\(|<\.\.\. futex resumed>)' "$logs/rt.loop")
         [ "$others" -eq 0 ] && pass "aplay's node realtime thread: no system call but futex ($calls)" \
             || flunk "system calls in the realtime thread ($calls)" "$logs/rt.loop"
+    elif [ "${JACKBUS_ALSA_ASYNC:-0}" = 1 ]; then
+        # async: JackBus moves the stream; the application has no realtime thread of JackBus's
+        pass "aplay async: no realtime thread in the application"
     else
         flunk "no realtime thread traced" "$logs/rt.strace"
     fi
