@@ -24,6 +24,9 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <assert.h>
 #include <stdlib.h>
 #include <algorithm>
+#include <atomic>
+#include <errno.h>
+#include <string.h>
 #ifdef HAVE_TRE_REGEX_H
 #include <tre/regex.h>
 #else
@@ -129,6 +132,71 @@ int JackGraphManager::ResumeRefNum(JackClientControl* control, JackSynchro* tabl
 {
     JackConnectionManager* manager = ReadCurrentState();
     return manager->ResumeRefNum(control, table, fClientTiming);
+}
+
+namespace
+{
+std::atomic<uint64_t> gNoEdge[(PORT_NUM_MAX + 63) / 64];
+std::atomic<uint64_t> gFirst[(CLIENT_NUM + 63) / 64];
+std::atomic<int> gFirstCount(0);
+}
+
+void JackGraphManager::SetNoEdge(jack_port_id_t port_index, bool on)
+{
+    if (port_index >= PORT_NUM_MAX) {
+        return;
+    }
+    const uint64_t bit = 1ULL << (port_index & 63);
+    if (on) {
+        gNoEdge[port_index >> 6].fetch_or(bit, std::memory_order_seq_cst);
+    } else {
+        gNoEdge[port_index >> 6].fetch_and(~bit, std::memory_order_seq_cst);
+    }
+}
+
+bool JackGraphManager::IsNoEdge(jack_port_id_t port_index)
+{
+    return port_index < PORT_NUM_MAX
+        && ((gNoEdge[port_index >> 6].load(std::memory_order_seq_cst) >> (port_index & 63)) & 1);
+}
+
+int JackGraphManager::CheckEndpointPort(jack_port_id_t port_index, int refnum, int* flags)
+{
+    if (port_index == NO_PORT || port_index >= fPortMax || port_index >= PORT_NUM_MAX) {
+        return -EINVAL;
+    }
+    JackPort* port = GetPort(port_index);
+    if (!port->fInUse || port->fRefNum != refnum || strcmp(port->GetType(), JACK_DEFAULT_AUDIO_TYPE) != 0) {
+        return -EINVAL;
+    }
+    *flags = port->fFlags;
+    return 0;
+}
+
+void JackGraphManager::SetFirst(int refnum, bool on)
+{
+    if (refnum < 0 || refnum >= CLIENT_NUM) {
+        return;
+    }
+    const uint64_t bit = 1ULL << (refnum & 63);
+    const uint64_t old = on ? gFirst[refnum >> 6].fetch_or(bit) : gFirst[refnum >> 6].fetch_and(~bit);
+    if (on && !(old & bit)) {
+        gFirstCount.fetch_add(1);
+    } else if (!on && (old & bit)) {
+        gFirstCount.fetch_sub(1);
+    }
+}
+
+// RT, the drivers
+int JackGraphManager::ResumeRefNumFirst(JackClientControl* control, JackSynchro* table)
+{
+    JackConnectionManager* manager = ReadCurrentState();
+    if (gFirstCount.load(std::memory_order_relaxed) == 0) {
+        return manager->ResumeRefNum(control, table, fClientTiming);
+    }
+    static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t), "atomic layout");
+    return manager->ResumeRefNumFirst(control, table, fClientTiming,
+                                      reinterpret_cast<const uint64_t*>(gFirst), (CLIENT_NUM + 63) / 64);
 }
 
 // RT
@@ -441,6 +509,7 @@ int JackGraphManager::ReleasePort(int refnum, jack_port_id_t port_index)
     }
 
     port->Release();
+    SetNoEdge(port_index, false);   // JackBus: its connections are gone, its edge-less ones too
     WriteNextStateStop();
     return res;
 }
@@ -654,7 +723,10 @@ int JackGraphManager::Connect(jack_port_id_t port_src, jack_port_id_t port_dst)
         goto end;
     }
 
-    if (manager->IsLoopPath(port_src, port_dst)) {
+    if (IsNoEdge(port_src) || IsNoEdge(port_dst)) {
+        // JackBus: an async endpoint's port: data, no activation edge
+        jack_log("JackGraphManager::Connect: endpoint port, no activation edge");
+    } else if (manager->IsLoopPath(port_src, port_dst)) {
         jack_log("JackGraphManager::Connect: LOOP detected");
         manager->IncFeedbackConnection(port_src, port_dst);
     } else {
@@ -700,7 +772,9 @@ int JackGraphManager::Disconnect(jack_port_id_t port_src, jack_port_id_t port_ds
         goto end;
     }
 
-    if (manager->IsFeedbackConnection(port_src, port_dst)) {
+    if (IsNoEdge(port_src) || IsNoEdge(port_dst)) {
+        // JackBus: an async endpoint's port: no activation edge was made
+    } else if (manager->IsFeedbackConnection(port_src, port_dst)) {
         jack_log("JackGraphManager::Disconnect: FEEDBACK removed");
         manager->DecFeedbackConnection(port_src, port_dst);
     } else {

@@ -75,6 +75,8 @@
 /* The JackBus socket ($XDG_RUNTIME_DIR/jackbus/<server>): its own version,
    negotiated by kBusHello. Protocol 9 above is not affected by it. */
 #define JACKBUS_API_VERSION 1
+/* kBusHello's feature bits (the server's): requests it takes after the open */
+#define JACKBUS_FEATURE_ENDPOINTS 0x1ULL    /* kBusEndpointOpen, kBusEndpointClose, kBusClientPriority */
 
 #define SOCKET_TIME_OUT 2               // in sec
 #define DRIVER_OPEN_TIMEOUT 5           // in sec

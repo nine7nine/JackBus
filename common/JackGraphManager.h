@@ -125,6 +125,21 @@ class SERVER_EXPORT JackGraphManager : public JackShmMem, public JackAtomicState
         void InitRefNum(int refnum);
         int ResumeRefNum(JackClientControl* control, JackSynchro* table);
         int SuspendRefNum(JackClientControl* control, JackSynchro* table, long usecs);
+
+        /*
+         JackBus, the server's (process-local, nothing in shared memory):
+         - ports whose connections make no activation edge: an async endpoint's
+           (JackBusEndpointSet), whose buffers the master driver moves itself at fixed points
+           of the cycle. Set before the port is connected, cleared once it is released;
+         - clients with priority (jackbus_node_set_priority): the drivers' resumes signal
+           them first (ResumeRefNumFirst; ResumeRefNum when there are none).
+        */
+        static void SetNoEdge(jack_port_id_t port_index, bool on);
+        // an async endpoint may take the port: refnum's, in use, audio. *flags: its flags
+        int CheckEndpointPort(jack_port_id_t port_index, int refnum, int* flags);
+        static bool IsNoEdge(jack_port_id_t port_index);
+        static void SetFirst(int refnum, bool on);
+        int ResumeRefNumFirst(JackClientControl* control, JackSynchro* table);
         void TopologicalSort(std::vector<jack_int_t>& sorted);
 
         JackClientTiming* GetClientTiming(int refnum)

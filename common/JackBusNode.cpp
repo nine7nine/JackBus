@@ -34,6 +34,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 */
 
 #include "JackClient.h"
+#include "JackBusLibClient.h"
 #include "JackGraphManager.h"
 #include "JackEngineControl.h"
 #include "JackGlobals.h"
@@ -57,6 +58,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 #include <unistd.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 namespace Jack
 {
@@ -81,7 +83,18 @@ struct jackbus_port
     jack_port_id_t index;
     int kind;
     bool input;
+    std::atomic<bool> endpoint;     // an async endpoint's: JackBus moves its buffer, not the node
     void* buffer;           // this cycle's: realtime thread only
+};
+
+struct jackbus_endpoint
+{
+    jackbus_node* node;
+    int id;
+    jackbus_endpoint_shared_t* shared;
+    size_t size;
+    unsigned int count;
+    jackbus_port* ports[JACKBUS_ENDPOINT_MAX_CHANNELS];
 };
 
 namespace
@@ -151,6 +164,8 @@ struct jackbus_node
     std::atomic<bool> first;
     std::atomic<uint32_t> process_latency;
     bool active;            // application threads (activate, set_process)
+    bool realtime;          // activated with a realtime thread (a process function)
+    bool priority;          // jackbus_node_set_priority
 
     // events
     std::mutex event_lock;
@@ -413,7 +428,9 @@ static int Process(jack_nframes_t nframes, void* arg)
     const float* zero = ZeroBuffer();
     for (size_t i = 0; t && i < t->count; i++) {
         jackbus_port* p = t->ports[i];
-        if (p->kind == JACKBUS_AUDIO && p->input && zero && graph->GetConnectionsNum(p->index) == 0) {
+        if (p->endpoint.load(std::memory_order_acquire)) {
+            p->buffer = NULL;           // JackBus's to fill or empty, not ours
+        } else if (p->kind == JACKBUS_AUDIO && p->input && zero && graph->GetConnectionsNum(p->index) == 0) {
             p->buffer = const_cast<float*>(zero);
         } else {
             p->buffer = graph->GetBuffer(p->index, nframes);
@@ -548,6 +565,19 @@ LIB_EXPORT int jackbus_node_set_process(jackbus_node_t* node, jackbus_process_t 
     if (!node) {
         return -EINVAL;
     }
+    if (node->active && !node->realtime && process) {
+        // active without a realtime thread: it gets one, the way JACK gives one to a client
+        // activated without (ActivateAux); the wrapper calls process from the first cycle on
+        node->arg = arg;
+        node->process = process;
+        node->first.store(true, std::memory_order_relaxed);
+        if (reinterpret_cast<JackClient*>(node->client)->SetProcessCallbackActive(Process, node) != 0) {
+            node->process = NULL;
+            return -EIO;
+        }
+        node->realtime = true;
+        return 0;
+    }
     if (node->active) {
         jack_error("jackbus_node_set_process: the node is active");
         return -EBUSY;
@@ -572,9 +602,16 @@ LIB_EXPORT int jackbus_node_activate(jackbus_node_t* node)
         return -EINVAL;
     }
     node->first.store(true, std::memory_order_relaxed);
+    // no process function: no realtime thread (JACK's client without a process callback); its
+    // ports carry audio only through async endpoints
+    const bool realtime = node->process != NULL;
+    if (jack_set_process_callback(node->client, realtime ? Process : NULL, node) != 0) {
+        return -EIO;
+    }
     int res = jack_activate(node->client);
     if (res == 0) {
         node->active = true;
+        node->realtime = realtime;
     }
     return res;
 }
@@ -669,6 +706,116 @@ LIB_EXPORT float* jackbus_port_audio(jackbus_port_t* port)
 LIB_EXPORT void* jackbus_port_midi(jackbus_port_t* port)
 {
     return (port && port->kind == JACKBUS_MIDI) ? port->buffer : NULL;
+}
+
+LIB_EXPORT int jackbus_node_set_priority(jackbus_node_t* node, int on)
+{
+    if (!node) {
+        return -EINVAL;
+    }
+    if (node->active) {
+        jack_error("jackbus_node_set_priority: the node is active");
+        return -EBUSY;
+    }
+    JackBusLibClient* client = dynamic_cast<JackBusLibClient*>(reinterpret_cast<JackClient*>(node->client));
+    if (!client || client->SetPriority(on != 0) != 0) {
+        return -EIO;
+    }
+    node->priority = (on != 0);
+    return 0;
+}
+
+LIB_EXPORT jackbus_endpoint_t* jackbus_endpoint_open(jackbus_node_t* node, jackbus_port_t* const* ports,
+                                                     unsigned int count, unsigned int ring_frames)
+{
+    if (!node || !ports || count < 1 || count > JACKBUS_ENDPOINT_MAX_CHANNELS || ring_frames < 1 || ring_frames > (1u << 20)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    JackBusLibClient* client = dynamic_cast<JackBusLibClient*>(reinterpret_cast<JackClient*>(node->client));
+    if (!client) {
+        errno = ENOTSUP;
+        return NULL;
+    }
+    jack_port_id_t ids[JACKBUS_ENDPOINT_MAX_CHANNELS];
+    for (unsigned int i = 0; i < count; i++) {
+        if (!ports[i] || ports[i]->node != node || ports[i]->kind != JACKBUS_AUDIO
+            || ports[i]->input != ports[0]->input || ports[i]->endpoint.load()) {
+            errno = EINVAL;
+            return NULL;
+        }
+        ids[i] = ports[i]->index;
+    }
+    jackbus_endpoint* e = new (std::nothrow) jackbus_endpoint();
+    if (!e) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    int id = -1, fd = -1;
+    int res = client->EndpointOpen((int)count, ids, (int)ring_frames, &id, &fd);
+    if (res != 0 || fd < 0) {
+        delete e;
+        errno = (res < 0 && res > -4096) ? -res : EIO;
+        return NULL;
+    }
+    struct stat st;
+    void* mem = MAP_FAILED;
+    if (fstat(fd, &st) == 0 && (size_t)st.st_size >= sizeof(jackbus_endpoint_shared_t)) {
+        mem = mmap(NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 0);
+    }
+    close(fd);
+    jackbus_endpoint_shared_t* sh = static_cast<jackbus_endpoint_shared_t*>(mem);
+    if (mem == MAP_FAILED || sh->size != sizeof(jackbus_endpoint_shared_t) || sh->channels != count
+        || sh->ring_offset + (uint64_t)count * sh->ring_frames * sizeof(float) > (uint64_t)st.st_size) {
+        if (mem != MAP_FAILED) {
+            munmap(mem, (size_t)st.st_size);
+        }
+        client->EndpointClose(id);
+        delete e;
+        errno = EPROTO;
+        return NULL;
+    }
+    mlock(mem, (size_t)st.st_size);     // best effort: the application's side touches it
+    e->node = node;
+    e->id = id;
+    e->shared = sh;
+    e->size = (size_t)st.st_size;
+    e->count = count;
+    for (unsigned int i = 0; i < count; i++) {
+        e->ports[i] = ports[i];
+        ports[i]->endpoint.store(true, std::memory_order_release);
+    }
+    return e;
+}
+
+LIB_EXPORT int jackbus_endpoint_close(jackbus_endpoint_t* e)
+{
+    if (!e) {
+        return -EINVAL;
+    }
+    JackBusLibClient* client = dynamic_cast<JackBusLibClient*>(reinterpret_cast<JackClient*>(e->node->client));
+    int res = client ? client->EndpointClose(e->id) : -EIO;
+    // once JackBus no longer serves it (the reply), the ports are the node's again
+    for (unsigned int i = 0; i < e->count; i++) {
+        e->ports[i]->endpoint.store(false, std::memory_order_release);
+    }
+    munmap(e->shared, e->size);
+    delete e;
+    return res;
+}
+
+LIB_EXPORT jackbus_endpoint_shared_t* jackbus_endpoint_shared(jackbus_endpoint_t* e)
+{
+    return e ? e->shared : NULL;
+}
+
+LIB_EXPORT float* jackbus_endpoint_ring(jackbus_endpoint_t* e, unsigned int channel)
+{
+    if (!e || channel >= e->shared->channels) {
+        return NULL;
+    }
+    return reinterpret_cast<float*>(reinterpret_cast<char*>(e->shared) + e->shared->ring_offset)
+        + (size_t)channel * e->shared->ring_frames;
 }
 
 LIB_EXPORT int jackbus_node_event_fd(jackbus_node_t* node)

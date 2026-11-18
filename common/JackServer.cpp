@@ -128,6 +128,7 @@ int JackServer::Open(jack_driver_desc_t* driver_desc, JSList* driver_params)
     fAudioDriver->SetMaster(true);
     fAudioDriver->AddSlave(fFreewheelDriver);
     fAudioDriver->SetBridges(&fBridges);
+    fAudioDriver->SetEndpoints(fEngine->GetEndpoints());
     InitTime();
     SetClockSource(fEngineControl->fClockSource);
     return 0;
@@ -363,6 +364,8 @@ int JackServer::SetFreewheel(bool onoff)
         if (onoff) {
             fFreewheel = true;
             fAudioDriver->Stop();
+            // JackBus: the master no longer runs the async endpoints: their outputs silent
+            fEngine->GetEndpoints()->Silence(fGraphManager, fEngineControl->fBufferSize);
             fGraphManager->Save(&fConnectionState);     // Save connection state
             // Disconnect all slaves
             std::list<JackDriverInterface*> slave_list = fAudioDriver->GetSlaves();
@@ -576,6 +579,7 @@ int JackServer::SwitchMaster(jack_driver_desc_t* driver_desc, JSList* driver_par
     // placed again, as after a master xrun)
     fAudioDriver->SetMaster(true);
     fAudioDriver->SetBridges(&fBridges);
+    fAudioDriver->SetEndpoints(fEngine->GetEndpoints());
     return fAudioDriver->Start();
 }
 

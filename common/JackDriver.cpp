@@ -615,7 +615,8 @@ void JackDriver::LoadConnections(int alias, bool full_name)
 
 int JackDriver::ResumeRefNum()
 {
-    return fGraphManager->ResumeRefNum(&fClientControl, fSynchroTable);
+    // JackBus: nodes with priority first, when there are any
+    return fGraphManager->ResumeRefNumFirst(&fClientControl, fSynchroTable);
 }
 
 int JackDriver::SuspendRefNum()

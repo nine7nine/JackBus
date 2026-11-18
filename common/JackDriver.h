@@ -32,6 +32,7 @@ namespace Jack
 {
 
 class JackBridgeSet;
+class JackBusEndpointSet;
 
 class JackLockedEngine;
 class JackGraphManager;
@@ -87,6 +88,7 @@ class SERVER_EXPORT JackDriverInterface
         // JackBus: the sound card bridges a master runs in its cycle (JackBridgeSet.h);
         // audio drivers take them, wrappers pass them on, others ignore them
         virtual void SetBridges(JackBridgeSet* bridges) { (void)bridges; }
+        virtual void SetEndpoints(JackBusEndpointSet* endpoints) { (void)endpoints; }
 
         virtual void AddSlave(JackDriverInterface* slave) = 0;
         virtual void RemoveSlave(JackDriverInterface* slave) = 0;

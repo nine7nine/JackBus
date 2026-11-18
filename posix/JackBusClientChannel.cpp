@@ -36,7 +36,7 @@ namespace Jack
 {
 
 JackBusClientChannel::JackBusClientChannel()
-    : JackGenericClientChannel(), fNotificationSocket(NULL), fPeerEnd(-1), fThread(this), fClient(NULL), fNotifyFd(-1)
+    : JackGenericClientChannel(), fNotificationSocket(NULL), fPeerEnd(-1), fFeatures(0), fThread(this), fClient(NULL), fNotifyFd(-1)
 {
     fBusRequest = new JackClientSocket();
     fRequest = fBusRequest;
@@ -81,6 +81,7 @@ int JackBusClientChannel::Open(const char* server_name, const char* name, jack_u
             jack_error("JackBus socket: the server speaks version %d, this libjack %d", res.fVersion, JACKBUS_API_VERSION);
             goto error;
         }
+        fFeatures = res.fFeatures;
     }
 
     // The name check, as on the protocol-9 socket (the open is kBusClientOpen)
@@ -180,6 +181,57 @@ void JackBusClientChannel::BusClientOpen(const char* name, int pid, jack_uuid_t 
     }
 
     fRequestLock.Unlock();
+}
+
+void JackBusClientChannel::BusEndpointOpen(int refnum, int count, const jack_port_id_t* ports, int ring_frames,
+                                           int* id, int* fd, int* result)
+{
+    *result = -1;
+    *id = -1;
+    *fd = -1;
+    if (JackGlobals::fNotificationThread) {
+        jack_error("Cannot callback the server in notification thread!");
+        return;
+    }
+    if (count < 1 || count > JACKBUS_BUS_ENDPOINT_PORTS) {
+        return;
+    }
+    if (!(fFeatures & JACKBUS_FEATURE_ENDPOINTS)) {
+        *result = -ENOTSUP;     // an older server would drop the client for an unknown request
+        return;
+    }
+    JackNoCancelScope no_cancel;
+    fRequestLock.Lock();
+    JackBusEndpointOpenRequest req(refnum, count, ring_frames);
+    for (int i = 0; i < count; i++) {
+        req.fPorts[i] = ports[i];
+    }
+    JackBusEndpointOpenResult res;
+    if (req.Write(fRequest) < 0) {
+        jack_error("Could not write request type = %ld", req.fType);
+    } else if (res.Read(fRequest) < 0) {
+        jack_error("Could not read result type = %ld", req.fType);
+    } else if (res.fResult < 0) {
+        *result = res.fResult;
+    } else if (JackRecvFds(fBusRequest->GetFd(), fd, 1) != 1) {
+        jack_error("JackBus socket: the endpoint's memory did not come");
+        *fd = -1;
+    } else {
+        *id = res.fId;
+        *result = 0;
+    }
+    fRequestLock.Unlock();
+}
+
+void JackBusClientChannel::BusRefNumCall(int type, int refnum, int value, int* result)
+{
+    if (!(fFeatures & JACKBUS_FEATURE_ENDPOINTS)) {
+        *result = -ENOTSUP;
+        return;
+    }
+    JackBusRefNumRequest req((JackRequest::RequestType)type, refnum, value);
+    JackResult res;
+    ServerSyncCall(&req, &res, result);
 }
 
 int JackBusClientChannel::TakeNotifyFd()

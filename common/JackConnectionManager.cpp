@@ -317,6 +317,42 @@ int JackConnectionManager::ResumeRefNum(JackClientControl* control, JackSynchro*
     return res;
 }
 
+/*!
+\brief JackBus: ResumeRefNum, the successors flagged in first[] (nodes with priority) signalled
+before the others. The same successors are signalled, each once; only the order differs. The
+drivers' resumes only (server): first[] is the server's (JackGraphManager::SetFirst).
+*/
+int JackConnectionManager::ResumeRefNumFirst(JackClientControl* control, JackSynchro* table, JackClientTiming* timing,
+                                             const uint64_t* first, int words)
+{
+    jack_time_t current_date = GetMicroSeconds();
+    const jack_int_t* output_ref = fConnectionRef.GetItems(control->fRefNum);
+    int res = 0;
+    uint64_t mask[(CLIENT_NUM + 63) / 64];
+
+    timing[control->fRefNum].SetStatus(Finished);
+    timing[control->fRefNum].SetFinishedAt(current_date);
+
+    for (int w = 0; w < (CLIENT_NUM + 63) / 64; w++) {
+        mask[w] = (w < words) ? __atomic_load_n(&first[w], __ATOMIC_RELAXED) : 0;
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < CLIENT_NUM; i++) {
+            const bool flagged = (mask[i >> 6] >> (i & 63)) & 1;
+            if (output_ref[i] <= 0 || flagged != (pass == 0)) {
+                continue;
+            }
+            timing[i].SetStatus(Triggered);
+            timing[i].SetSignaledAt(current_date);
+            if (!fInputCounter[i].Signal(table + i, control)) {
+                jack_log("JackConnectionManager::ResumeRefNumFirst error: ref = %ld output = %ld ", control->fRefNum, i);
+                res = -1;
+            }
+        }
+    }
+    return res;
+}
+
 static bool HasNoConnection(jack_int_t* table)
 {
     for (int ref = 0; ref < CLIENT_NUM; ref++) {

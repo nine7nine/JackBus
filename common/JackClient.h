@@ -132,6 +132,8 @@ class SERVER_EXPORT JackClient : public JackClientInterface, public JackRunnable
         void CallTimebaseCallback();
 
         virtual int ClientNotifyImp(int refnum, const char* name, int notify, int sync, const char* message, int value1, int value);
+        // the realtime thread's priority (JackBus: a node with priority runs a step above)
+        virtual int RealTimePriority();
 
         inline void DummyCycle();
         inline void ExecuteThread();
@@ -203,6 +205,9 @@ class SERVER_EXPORT JackClient : public JackClientInterface, public JackRunnable
         virtual void OnShutdown(JackShutdownCallback callback, void *arg);
         virtual void OnInfoShutdown(JackInfoShutdownCallback callback, void *arg);
         virtual int SetProcessCallback(JackProcessCallback callback, void* arg);
+        // JackBus (the node API): a process callback for a client activated without a realtime
+        // thread, which gets one (as when a sync callback is set on it: ActivateAux)
+        int SetProcessCallbackActive(JackProcessCallback callback, void* arg);
         virtual int SetXRunCallback(JackXRunCallback callback, void* arg);
         virtual int SetInitCallback(JackThreadInitCallback callback, void* arg);
         virtual int SetGraphOrderCallback(JackGraphOrderCallback callback, void* arg);

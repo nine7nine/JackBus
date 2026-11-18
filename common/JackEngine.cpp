@@ -1101,6 +1101,65 @@ int JackEngine::ClientBusFds(int refnum, int* fds)
 #endif
 }
 
+/*
+ JackBus: an async endpoint (JackBusEndpointSet) over count of the client's own ports: audio, all
+ outputs or all inputs, none already an endpoint's, unconnected (or connected as an endpoint's
+ before: their connections made no activation edge).
+*/
+int JackEngine::EndpointOpen(int refnum, const jack_port_id_t* ports, int count, int ring_frames, int* fd)
+{
+    *fd = -1;
+    if (refnum < 0 || refnum >= CLIENT_NUM || !fClientTable[refnum]
+        || count < 1 || count > JACKBUS_ENDPOINT_MAX_CHANNELS) {
+        return -EINVAL;
+    }
+    int direction = 0;
+    for (int i = 0; i < count; i++) {
+        int flags = 0;
+        if (fGraphManager->CheckEndpointPort(ports[i], refnum, &flags) < 0) {
+            jack_error("JackEngine::EndpointOpen: port %d is not an audio port of client %d", (int)ports[i], refnum);
+            return -EINVAL;
+        }
+        const int d = (flags & JackPortIsOutput) ? 1 : 2;
+        if (direction && d != direction) {
+            jack_error("JackEngine::EndpointOpen: inputs and outputs mixed");
+            return -EINVAL;
+        }
+        direction = d;
+        for (int k = 0; k < i; k++) {
+            if (ports[k] == ports[i]) {
+                return -EINVAL;
+            }
+        }
+        if (fEndpoints.HasPort(ports[i])) {
+            return -EBUSY;
+        }
+        if (fGraphManager->GetConnectionsNum(ports[i]) > 0 && !JackGraphManager::IsNoEdge(ports[i])) {
+            jack_error("JackEngine::EndpointOpen: port %d is already connected", (int)ports[i]);
+            return -EBUSY;
+        }
+    }
+    return fEndpoints.Open(refnum, ports, count, direction == 1, ring_frames, fGraphManager, fd);
+}
+
+int JackEngine::EndpointClose(int refnum, int id)
+{
+    if (refnum < 0 || refnum >= CLIENT_NUM || !fClientTable[refnum] || id < 0) {
+        return -EINVAL;
+    }
+    return fEndpoints.Close(refnum, id, fGraphManager);
+}
+
+int JackEngine::ClientPriority(int refnum, bool on)
+{
+    if (refnum < 0 || refnum >= CLIENT_NUM || !fClientTable[refnum]) {
+        return -EINVAL;
+    }
+    JackGraphManager::SetFirst(refnum, on);
+    jack_log("JackEngine::ClientPriority ref = %d %s", refnum, on ? "on" : "off");
+    return 0;
+}
+
 // Used for server driver clients
 int JackEngine::ClientInternalOpen(const char* name, int* ref, JackEngineControl** shared_engine, JackGraphManager** shared_manager, JackClientInterface* client, bool wait)
 {
@@ -1172,6 +1231,10 @@ int JackEngine::ClientCloseAux(int refnum, bool wait)
 
     JackClientInterface* client = fClientTable[refnum];
     fEngineControl->fTransport.ResetTimebase(refnum);
+
+    // JackBus: the master stops serving its endpoints, and waking it first
+    fEndpoints.CloseClient(refnum, fGraphManager);
+    JackGraphManager::SetFirst(refnum, false);
 
     jack_uuid_t uuid = JACK_UUID_EMPTY_INITIALIZER;
     jack_uuid_copy (&uuid, client->GetClientControl()->fSessionID);
@@ -1804,6 +1867,9 @@ int JackEngine::PortUnRegister(int refnum, jack_port_id_t port_index)
     jack_log("JackEngine::PortUnRegister ref = %ld port_index = %ld", refnum, port_index);
     JackClientInterface* client = fClientTable[refnum];
     assert(client);
+
+    // JackBus: an endpoint's port: the master stops serving the endpoint first
+    fEndpoints.ClosePort(port_index, fGraphManager);
 
     // Disconnect port ==> notification is sent
     PortDisconnect(-1, port_index, ALL_PORTS);

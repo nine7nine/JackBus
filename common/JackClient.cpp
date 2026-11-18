@@ -255,7 +255,7 @@ int JackClient::ClientNotify(int refnum, const char* name, int notify, int sync,
                 }
                 // Acquire RT only when the RT thread is actually running
                 if (GetEngineControl()->fRealTime && fThread.GetStatus() == JackThread::kRunning) {
-                    if (fThread.AcquireRealTime(GetEngineControl()->fClientPriority) < 0) {
+                    if (fThread.AcquireRealTime(RealTimePriority()) < 0) {
                         jack_error("JackClient::AcquireRealTime error");
                     }
                 }
@@ -590,7 +590,7 @@ void JackClient::SetupRealTime()
     // Will do "something" on OSX only...
     fThread.SetParams(GetEngineControl()->fPeriod, GetEngineControl()->fComputation, GetEngineControl()->fConstraint);
 
-    if (fThread.AcquireSelfRealTime(GetEngineControl()->fClientPriority) < 0) {
+    if (fThread.AcquireSelfRealTime(RealTimePriority()) < 0) {
         jack_error("JackClient::AcquireSelfRealTime error");
     }
 }
@@ -1137,6 +1137,25 @@ void JackClient::OnInfoShutdown(JackInfoShutdownCallback callback, void *arg)
         fInfoShutdownArg = arg;
         fInfoShutdown = callback;
     }
+}
+
+int JackClient::RealTimePriority()
+{
+    return GetEngineControl()->fClientPriority;
+}
+
+int JackClient::SetProcessCallbackActive(JackProcessCallback callback, void* arg)
+{
+    if (!IsActive()) {
+        return SetProcessCallback(callback, arg);
+    }
+    if (fThreadFun || fThread.GetStatus() == JackThread::kRunning) {
+        jack_error("SetProcessCallbackActive: the client has a realtime thread already");
+        return -1;
+    }
+    fProcessArg = arg;
+    fProcess = callback;
+    return ActivateAux();
 }
 
 int JackClient::SetProcessCallback(JackProcessCallback callback, void *arg)

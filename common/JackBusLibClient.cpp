@@ -18,6 +18,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 */
 
 #include "JackBusLibClient.h"
+#include "JackEngineControl.h"
 #include "JackBusClientChannel.h"
 #include "JackLibGlobals.h"
 #include "JackGlobals.h"
@@ -31,7 +32,7 @@ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 namespace Jack
 {
 
-JackBusLibClient::JackBusLibClient(JackSynchro* table): JackLibClient(table)
+JackBusLibClient::JackBusLibClient(JackSynchro* table): JackLibClient(table), fPriority(false)
 {
     jack_log("JackBusLibClient::JackBusLibClient table = %x", table);
     delete fChannel;    // JackLibClient's protocol-9 channel
@@ -171,6 +172,41 @@ int JackBusLibClient::ClientNotifyImp(int refnum, const char* name, int notify, 
         jack_error("JackBus socket: cannot connect the futex of client %s", name);
     }
     return res;
+}
+
+int JackBusLibClient::EndpointOpen(int count, const jack_port_id_t* ports, int ring_frames, int* id, int* fd)
+{
+    int result = -1;
+    fBusChannel->BusEndpointOpen(GetClientControl()->fRefNum, count, ports, ring_frames, id, fd, &result);
+    return result;
+}
+
+int JackBusLibClient::EndpointClose(int id)
+{
+    int result = -1;
+    fBusChannel->BusRefNumCall(JackRequest::kBusEndpointClose, GetClientControl()->fRefNum, id, &result);
+    return result;
+}
+
+int JackBusLibClient::SetPriority(bool on)
+{
+    int result = -1;
+    fBusChannel->BusRefNumCall(JackRequest::kBusClientPriority, GetClientControl()->fRefNum, on ? 1 : 0, &result);
+    if (result == 0) {
+        fPriority = on;
+    }
+    return result;
+}
+
+// one step above the other clients, never the server's own priority
+int JackBusLibClient::RealTimePriority()
+{
+    JackEngineControl* control = GetEngineControl();
+    int priority = control->fClientPriority;
+    if (fPriority && priority > 0 && priority + 1 <= control->fMaxClientPriority) {
+        priority++;
+    }
+    return priority;
 }
 
 } // end of namespace

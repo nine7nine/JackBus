@@ -77,6 +77,7 @@ class SERVER_EXPORT JackThreadedDriver : public JackDriverClientInterface, publi
 
         virtual void SetMaster(bool onoff);
         virtual void SetBridges(JackBridgeSet* bridges) { fDriver->SetBridges(bridges); }
+        virtual void SetEndpoints(JackBusEndpointSet* endpoints) { fDriver->SetEndpoints(endpoints); }
         virtual bool GetMaster();
 
         virtual void AddSlave(JackDriverInterface* slave);

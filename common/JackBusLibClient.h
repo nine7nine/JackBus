@@ -51,6 +51,15 @@ class JackBusLibClient : public JackLibClient
 
         int Open(const char* server_name, const char* name, jack_uuid_t uuid, jack_options_t options, jack_status_t* status);
         int ClientNotifyImp(int refnum, const char* name, int notify, int sync, const char* message, int value1, int value2);
+
+        // JackBus requests (jack/jackbus.h): async endpoints, priority
+        int EndpointOpen(int count, const jack_port_id_t* ports, int ring_frames, int* id, int* fd);
+        int EndpointClose(int id);
+        int SetPriority(bool on);
+        int RealTimePriority();
+
+    private:
+        bool fPriority;
 };
 
 } // end of namespace

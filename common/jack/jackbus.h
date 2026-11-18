@@ -24,6 +24,15 @@
 #include <jack/jack.h>
 #include <jack/transport.h>
 
+/* the endpoints' shared memory (below): atomics both C and C++ lay out alike */
+#ifdef __cplusplus
+#include <atomic>
+#define JACKBUS_ATOMIC(type) std::atomic<type>
+#else
+#include <stdatomic.h>
+#define JACKBUS_ATOMIC(type) _Atomic type
+#endif
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -164,6 +173,105 @@ typedef struct jackbus_event {
 int jackbus_node_event_fd (jackbus_node_t *node) JACK_OPTIONAL_WEAK_EXPORT;
 /* From any thread but the process callback. 1: an event in *event; 0: none. */
 int jackbus_node_next_event (jackbus_node_t *node, jackbus_event_t *event) JACK_OPTIONAL_WEAK_EXPORT;
+
+/* ------------------------------------------------------------------------
+ * Priority. EXPERIMENTAL.
+ *
+ * A node with priority starts first: at each cycle's start the drivers wake
+ * it before other clients, and its realtime thread runs one step above
+ * theirs (still below the server's own threads). Neither changes what JACK
+ * computes or in which order data flows. Before activation.
+ * ------------------------------------------------------------------------ */
+int jackbus_node_set_priority (jackbus_node_t *node, int on) JACK_OPTIONAL_WEAK_EXPORT;
+
+/* ------------------------------------------------------------------------
+ * Async endpoints. EXPERIMENTAL.
+ *
+ * An endpoint is a group of a node's audio ports, all outputs or all
+ * inputs, whose buffers JackBus itself fills (outputs) or empties (inputs)
+ * once per cycle, from or into a ring the application shares with it. The
+ * application's side is never part of the graph's cycle: nothing waits for
+ * it, and if it falls behind, only its own stream runs short (silence, or
+ * frames dropped), counted here. The price: what a graph client sends to an
+ * endpoint arrives a cycle later than it would at a client's port.
+ *
+ * Connections to and from an endpoint's ports carry audio as any others do
+ * but never make a client wait for another.
+ *
+ * A node with no process function (jackbus_node_set_process() not called,
+ * or called with NULL) activates without a realtime thread: with only
+ * endpoints, it is outside the cycle entirely. Setting a process function on
+ * such a node while it is active gives it one (JACK's own path for a client
+ * activated without a realtime thread).
+ *
+ * Ports: added with jackbus_port_add(), not connected yet; the endpoint is
+ * opened before they are, and closed before they are removed. A process
+ * function, if the node has one, sees no buffer for them (NULL).
+ * ------------------------------------------------------------------------ */
+
+#define JACKBUS_ENDPOINT_MAX_CHANNELS 64
+
+/* The memory an endpoint shares with JackBus. Positions are frames since the
+ * endpoint was opened (64 bits: they never wrap); channel c's ring is
+ * ring_frames floats at (char *)shared + ring_offset + c * ring_frames *
+ * sizeof(float) (jackbus_endpoint_ring()), at JackBus's rate. Fields marked
+ * "app" are the application's to write, the others JackBus's. JackBus never
+ * trusts the application's: a position beyond the ring is clamped. */
+typedef struct jackbus_endpoint_shared {
+    uint32_t size;                  /* sizeof(jackbus_endpoint_shared_t) */
+    uint32_t channels;
+    uint32_t ring_frames;           /* per channel, a power of two */
+    uint32_t playback;              /* 1: the application's audio to the graph (output ports) */
+    uint64_t ring_offset;
+    uint8_t pad0[40];
+
+    /* playback: the application's (app) / capture: JackBus's */
+    JACKBUS_ATOMIC(uint64_t) w;
+    uint8_t pad1[56];
+    /* playback: JackBus's / capture: the application's (app) */
+    JACKBUS_ATOMIC(uint64_t) r;
+    uint8_t pad2[56];
+
+    /* app: read by JackBus each cycle */
+    JACKBUS_ATOMIC(uint32_t) run;       /* 0: paused: nothing moves; playback ports silent */
+    JACKBUS_ATOMIC(uint32_t) prebuf;    /* playback: frames queued before it starts, and
+                                           after an underflow restarts (0: at once) */
+    JACKBUS_ATOMIC(uint32_t) draining;  /* playback: running out is the end, not an underflow */
+    uint32_t pad3;
+    JACKBUS_ATOMIC(uint64_t) skip_to;   /* playback: what is queued before it is dropped */
+    uint8_t pad4[40];
+    JACKBUS_ATOMIC(float) gain[JACKBUS_ENDPOINT_MAX_CHANNELS];  /* per channel, 1 at first */
+
+    /* JackBus's */
+    JACKBUS_ATOMIC(uint32_t) started;   /* playback: prebuffering done */
+    JACKBUS_ATOMIC(uint32_t) underflows;
+    JACKBUS_ATOMIC(uint32_t) overflows;
+    uint32_t pad5;
+    JACKBUS_ATOMIC(uint64_t) moved;     /* frames moved in all */
+    /* the last cycle, a seqlock: seq is odd while it is written */
+    JACKBUS_ATOMIC(uint32_t) seq;
+    JACKBUS_ATOMIC(uint32_t) last_frames;   /* frames moved in it */
+    JACKBUS_ATOMIC(uint64_t) last_moved;    /* moved before it */
+    JACKBUS_ATOMIC(uint64_t) time_ns;       /* its start (CLOCK_MONOTONIC) */
+    JACKBUS_ATOMIC(uint64_t) raw_ns;        /* the same on CLOCK_MONOTONIC_RAW */
+    JACKBUS_ATOMIC(uint64_t) next_ns;       /* the next cycle's (CLOCK_MONOTONIC) */
+    JACKBUS_ATOMIC(uint64_t) period_ns;     /* the measured period */
+    JACKBUS_ATOMIC(uint64_t) frame;         /* its first frame (64 bits) */
+    JACKBUS_ATOMIC(uint32_t) nframes;
+    JACKBUS_ATOMIC(uint32_t) sample_rate;
+} jackbus_endpoint_shared_t;
+
+typedef struct jackbus_endpoint jackbus_endpoint_t;
+
+/* count ports of the node (1 to JACKBUS_ENDPOINT_MAX_CHANNELS, audio, all
+ * outputs or all inputs, unconnected); ring_frames: rounded up to a power of
+ * two (at most 1 << 20). NULL on failure (errno). */
+jackbus_endpoint_t * jackbus_endpoint_open (jackbus_node_t *node, jackbus_port_t *const *ports,
+                                            unsigned int count, unsigned int ring_frames) JACK_OPTIONAL_WEAK_EXPORT;
+/* JackBus stops using it, then it is unmapped */
+int jackbus_endpoint_close (jackbus_endpoint_t *endpoint) JACK_OPTIONAL_WEAK_EXPORT;
+jackbus_endpoint_shared_t * jackbus_endpoint_shared (jackbus_endpoint_t *endpoint) JACK_OPTIONAL_WEAK_EXPORT;
+float * jackbus_endpoint_ring (jackbus_endpoint_t *endpoint, unsigned int channel) JACK_OPTIONAL_WEAK_EXPORT;
 
 #ifdef __cplusplus
 }

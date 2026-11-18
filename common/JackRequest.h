@@ -117,7 +117,10 @@ struct JackRequest
 
         // JackBus socket only (never accepted on the protocol-9 socket)
         kBusHello = 100,
-        kBusClientOpen = 101
+        kBusClientOpen = 101,
+        kBusEndpointOpen = 102,     // after the open
+        kBusEndpointClose = 103,
+        kBusClientPriority = 104
     };
 
     RequestType fType;
@@ -1945,6 +1948,97 @@ struct JackBusClientOpenResult : public JackResult
         CheckRes(trans->Write(&fSharedClient, sizeof(int)));
         CheckRes(trans->Write(&fSharedGraph, sizeof(int)));
         return trans->Write(&fRefNum, sizeof(int));
+    }
+};
+
+/*!
+\brief JackBus socket, after the open: an async endpoint over some of the client's own audio
+ ports (all outputs or all inputs, unconnected). If fResult is 0, an fd trailer follows the
+ result: the endpoint's memory (jackbus_endpoint_shared_t and its rings).
+*/
+
+#define JACKBUS_BUS_ENDPOINT_PORTS 64     // = JACKBUS_ENDPOINT_MAX_CHANNELS
+
+struct JackBusEndpointOpenRequest : public JackRequestImpl<sizeof(int) * 3 + sizeof(uint32_t) * JACKBUS_BUS_ENDPOINT_PORTS>
+{
+    int fRefNum;
+    int fCount;
+    int fRingFrames;
+    uint32_t fPorts[JACKBUS_BUS_ENDPOINT_PORTS];
+
+    JackBusEndpointOpenRequest(int refnum = -1, int count = 0, int ring_frames = 0)
+        : JackRequestImpl(kBusEndpointOpen), fRefNum(refnum), fCount(count), fRingFrames(ring_frames)
+    {
+        memset(fPorts, 0, sizeof(fPorts));
+    }
+
+    int Read(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckSize();
+        CheckRes(trans->Read(&fRefNum, sizeof(int)));
+        CheckRes(trans->Read(&fCount, sizeof(int)));
+        CheckRes(trans->Read(&fRingFrames, sizeof(int)));
+        return trans->Read(&fPorts, sizeof(fPorts));
+    }
+
+    int Write(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(WritePacketInit());
+        CheckRes(WritePacket(&fRefNum, sizeof(int)));
+        CheckRes(WritePacket(&fCount, sizeof(int)));
+        CheckRes(WritePacket(&fRingFrames, sizeof(int)));
+        CheckRes(WritePacket(&fPorts, sizeof(fPorts)));
+        return JackRequestImpl::Write(trans);
+    }
+};
+
+struct JackBusEndpointOpenResult : public JackResult
+{
+    int fId;
+
+    JackBusEndpointOpenResult(): JackResult(), fId(-1)
+    {}
+
+    int Read(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(JackResult::Read(trans));
+        return trans->Read(&fId, sizeof(int));
+    }
+
+    int Write(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(JackResult::Write(trans));
+        return trans->Write(&fId, sizeof(int));
+    }
+};
+
+/*!
+\brief JackBus socket: two ints for the client's own refnum (kBusEndpointClose: an endpoint's
+ id; kBusClientPriority: on or off). The result is a JackResult.
+*/
+
+struct JackBusRefNumRequest : public JackRequestImpl<sizeof(int) * 2>
+{
+    int fRefNum;
+    int fValue;
+
+    JackBusRefNumRequest(RequestType type = kBusEndpointClose, int refnum = -1, int value = 0)
+        : JackRequestImpl(type), fRefNum(refnum), fValue(value)
+    {}
+
+    int Read(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckSize();
+        CheckRes(trans->Read(&fRefNum, sizeof(int)));
+        return trans->Read(&fValue, sizeof(int));
+    }
+
+    int Write(detail::JackChannelTransactionInterface* trans) override
+    {
+        CheckRes(WritePacketInit());
+        CheckRes(WritePacket(&fRefNum, sizeof(int)));
+        CheckRes(WritePacket(&fValue, sizeof(int)));
+        return JackRequestImpl::Write(trans);
     }
 };
 

@@ -32,6 +32,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackCycleSignal.h"
 #ifdef __linux__
 #include "JackAliveTable.h"
+#include "JackBusEndpoint.h"
 #endif
 #include <utility>
 #include <vector>
@@ -198,6 +199,8 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         // gone, or their socket closes; back in the graph if they activate again.
         bool fDetached[CLIENT_NUM];
         jack_time_t fDetachedSince[CLIENT_NUM];
+        // JackBus: async endpoints (jack/jackbus.h), served by the master driver
+        JackBusEndpointSet fEndpoints;
         void WatchClient(int refnum, bool on);
         bool IsWatched(int refnum) const;
 
@@ -285,6 +288,12 @@ class SERVER_EXPORT JackEngine : public JackLockAble
         // A JackBus socket client just opened: new fds for what its libjack maps
         // (kBusFd* order). Returns the count (kBusOpenFds), or -1 (none left open).
         int ClientBusFds(int refnum, int* fds);
+        // JackBus socket, the client's own refnum: an async endpoint over count of its ports
+        // (returns the id, *fd the memory to send then close; or -errno), its end, priority
+        int EndpointOpen(int refnum, const jack_port_id_t* ports, int count, int ring_frames, int* fd);
+        int EndpointClose(int refnum, int id);
+        int ClientPriority(int refnum, bool on);
+        JackBusEndpointSet* GetEndpoints() { return &fEndpoints; }
         int ClientInternalOpen(const char* name, int* ref, JackEngineControl** shared_engine, JackGraphManager** shared_manager, JackClientInterface* client, bool wait);
 
         int ClientExternalClose(int refnum);

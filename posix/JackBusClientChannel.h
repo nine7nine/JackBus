@@ -52,6 +52,7 @@ class JackBusClientChannel : public JackGenericClientChannel, public JackRunnabl
         JackClientSocket* fBusRequest;          // = fRequest
         JackClientSocket* fNotificationSocket;  // this end of the pair
         int fPeerEnd;                           // the server's end, until the open sends it
+        uint64_t fFeatures;                     // the server's (kBusHello)
         JackThread fThread;                     // notifications
         JackClient* fClient;
         int fNotifyFd;                          // notification thread: the fd of the kAddClient being handled
@@ -72,6 +73,12 @@ class JackBusClientChannel : public JackGenericClientChannel, public JackRunnabl
         void BusClientOpen(const char* name, int pid, jack_uuid_t uuid, int* shared_engine, int* shared_client,
                            int* shared_graph, int* refnum, int* fds, int* result);
 
+        // after the open (JackBus requests): an async endpoint over count of the client's ports
+        // (*fd: its memory, the caller's to close), the end of one, the client's priority
+        void BusEndpointOpen(int refnum, int count, const jack_port_id_t* ports, int ring_frames,
+                             int* id, int* fd, int* result);
+        void BusRefNumCall(int type, int refnum, int value, int* result);
+        uint64_t Features() const { return fFeatures; }
         // notification thread, while handling kAddClient: the peer's futex file
         // (the caller owns it), -1 if none came
         int TakeNotifyFd();

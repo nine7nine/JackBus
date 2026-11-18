@@ -130,6 +130,31 @@ class SERVER_EXPORT JackLockedEngine
             return fEngine.ClientBusFds(refnum, fds);
             CATCH_EXCEPTION_RETURN
         }
+        int EndpointOpen(int refnum, const jack_port_id_t* ports, int count, int ring_frames, int* fd)
+        {
+            TRY_CALL
+            JackLock lock(&fEngine);
+            return fEngine.EndpointOpen(refnum, ports, count, ring_frames, fd);
+            CATCH_EXCEPTION_RETURN
+        }
+        int EndpointClose(int refnum, int id)
+        {
+            TRY_CALL
+            JackLock lock(&fEngine);
+            return fEngine.EndpointClose(refnum, id);
+            CATCH_EXCEPTION_RETURN
+        }
+        int ClientPriority(int refnum, bool on)
+        {
+            TRY_CALL
+            JackLock lock(&fEngine);
+            return fEngine.ClientPriority(refnum, on);
+            CATCH_EXCEPTION_RETURN
+        }
+        JackBusEndpointSet* GetEndpoints()
+        {
+            return fEngine.GetEndpoints();
+        }
         int ClientInternalOpen(const char* name, int* ref, JackEngineControl** shared_engine, JackGraphManager** shared_manager, JackClientInterface* client, bool wait)
         {
             TRY_CALL

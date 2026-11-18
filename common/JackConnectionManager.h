@@ -533,6 +533,9 @@ class SERVER_EXPORT JackConnectionManager
         // Graph
         void ResetGraph(JackClientTiming* timing, int refnum_bound = CLIENT_NUM);
         int ResumeRefNum(JackClientControl* control, JackSynchro* table, JackClientTiming* timing);
+        // JackBus: the same, the successors whose bit is set in first[words] signalled before the others
+        int ResumeRefNumFirst(JackClientControl* control, JackSynchro* table, JackClientTiming* timing,
+                              const uint64_t* first, int words);
         int SuspendRefNum(JackClientControl* control, JackSynchro* table, JackClientTiming* timing, long time_out_usec);
         void TopologicalSort(std::vector<jack_int_t>& sorted);
 

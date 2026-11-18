@@ -28,6 +28,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #include "JackLockedEngine.h"
 #include "JackException.h"
 #include "JackCycleTrace.h"
+#include "JackBusEndpoint.h"
 #include <assert.h>
 #include <time.h>
 
@@ -37,7 +38,7 @@ namespace Jack
 {
 
 JackAudioDriver::JackAudioDriver(const char* name, const char* alias, JackLockedEngine* engine, JackSynchro* table)
-        : JackDriver(name, alias, engine, table), fBridges(NULL), fBridgeList(NULL), fBridgeTime(0),
+        : JackDriver(name, alias, engine, table), fBridges(NULL), fEndpoints(NULL), fBridgeList(NULL), fBridgeTime(0),
           fBridgeFramePeriod(0.0)
 {}
 
@@ -93,6 +94,18 @@ void JackAudioDriver::RunBridgesBefore()
 
 // capture: false when the graph does not run this cycle (sync mode, the last one not finished);
 // the bridges' playback still plays what was taken
+/*
+ JackBus: the async endpoints (JackBusEndpoint.h), master only, after the engine's Process and
+ before the first resume: their outputs are filled before any client that reads them is woken,
+ their inputs taken while the clients that feed them are not running.
+*/
+void JackAudioDriver::RunEndpoints()
+{
+    if (fEndpoints && fIsMaster) {
+        fEndpoints->Run(fGraphManager, fEngineControl, fEngineControl->fBufferSize);
+    }
+}
+
 void JackAudioDriver::RunBridgesAfter(bool capture)
 {
     if (!fBridges || !fIsMaster) {
@@ -363,6 +376,7 @@ void JackAudioDriver::ProcessGraphAsyncMaster()
         }
     }
     JackTraceMark(kTraceProcess);
+    RunEndpoints();
 
     if (ResumeRefNum() < 0) {
         jack_error("JackAudioDriver::ProcessGraphAsyncMaster: ResumeRefNum error");
@@ -456,7 +470,9 @@ Used when the driver works in master mode.
 void JackAudioDriver::ProcessGraphSyncMaster()
 {
     // fBeginDateUst is set in the "low level" layer, fEndDateUst is from previous cycle
-    if (fEngine->Process(fBeginDateUst, fEndDateUst)) {
+    const bool processed = fEngine->Process(fBeginDateUst, fEndDateUst);
+    RunEndpoints();     // every cycle, before any client is woken
+    if (processed) {
         JackTraceMark(kTraceProcess);
 
         if (ResumeRefNum() < 0) {

@@ -66,11 +66,13 @@ class SERVER_EXPORT JackAudioDriver : public JackDriver
         // JackBus: the sound card bridges this master runs (NULL: none); the cycle's list and
         // timing for them, taken once per cycle (RunBridgesBefore, then RunBridgesAfter)
         JackBridgeSet* fBridges;
+        JackBusEndpointSet* fEndpoints;    // JackBus: async endpoints, run by the master
         JackBridgeList* fBridgeList;
         int64_t fBridgeTime;
         double fBridgeFramePeriod;
         void RunBridgesBefore();
         void RunBridgesAfter(bool capture);
+        void RunEndpoints();
 
         int ProcessAsync();
         void ProcessGraphAsync();
@@ -113,6 +115,7 @@ class SERVER_EXPORT JackAudioDriver : public JackDriver
         virtual int SetBufferSize(jack_nframes_t buffer_size);
 
         virtual void SetBridges(JackBridgeSet* bridges) { fBridges = bridges; }
+        virtual void SetEndpoints(JackBusEndpointSet* endpoints) { fEndpoints = endpoints; }
         virtual int SetSampleRate(jack_nframes_t sample_rate);
 
         virtual int ClientNotify(int refnum, const char* name, int notify, int sync, const char* message, int value1, int value2);

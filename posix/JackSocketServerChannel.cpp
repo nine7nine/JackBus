@@ -180,7 +180,11 @@ int JackSocketServerChannel::HandleBusRequest(JackClientSocket* socket, int fd, 
                 return -1;
             }
             res.fVersion = JACKBUS_API_VERSION;
+#ifdef __linux__
+            res.fFeatures = JACKBUS_FEATURE_ENDPOINTS;
+#else
             res.fFeatures = 0;
+#endif
             res.fResult = (req.fVersion == JACKBUS_API_VERSION) ? 0 : -1;
             if (res.Write(socket) < 0) {
                 return -1;
@@ -205,6 +209,49 @@ int JackSocketServerChannel::HandleBusRequest(JackClientSocket* socket, int fd, 
                 return -1;
             }
             return BusClientOpen(socket, fd);
+#ifdef __linux__
+        case JackRequest::kBusEndpointOpen: {
+            // after the open, for the client's own refnum only
+            JackBusEndpointOpenRequest req;
+            JackBusEndpointOpenResult res;
+            if (state != -1 || req.Read(socket) < 0 || req.fRefNum != fSocketTable[fd].first) {
+                return -1;
+            }
+            static_assert(JACKBUS_BUS_ENDPOINT_PORTS == JACKBUS_ENDPOINT_MAX_CHANNELS, "endpoint ports");
+            int mem = -1;
+            jack_port_id_t ports[JACKBUS_BUS_ENDPOINT_PORTS];
+            int count = (req.fCount >= 1 && req.fCount <= JACKBUS_BUS_ENDPOINT_PORTS) ? req.fCount : 0;
+            for (int i = 0; i < count; i++) {
+                ports[i] = (jack_port_id_t)req.fPorts[i];
+            }
+            int id = count ? fServer->GetEngine()->EndpointOpen(req.fRefNum, ports, count, req.fRingFrames, &mem) : -EINVAL;
+            res.fResult = (id >= 0) ? 0 : id;
+            res.fId = id;
+            int err = res.Write(socket);
+            if (err == 0 && mem >= 0) {
+                err = JackSendFds(fd, &mem, 1);
+            }
+            if (mem >= 0) {
+                close(mem);
+            }
+            if (err < 0 && id >= 0) {
+                fServer->GetEngine()->EndpointClose(req.fRefNum, id);
+            }
+            return (err < 0) ? -1 : 0;
+        }
+        case JackRequest::kBusEndpointClose:
+        case JackRequest::kBusClientPriority: {
+            JackBusRefNumRequest req((JackRequest::RequestType)type);
+            JackResult res;
+            if (state != -1 || req.Read(socket) < 0 || req.fRefNum != fSocketTable[fd].first) {
+                return -1;
+            }
+            res.fResult = (type == JackRequest::kBusEndpointClose)
+                ? fServer->GetEngine()->EndpointClose(req.fRefNum, req.fValue)
+                : fServer->GetEngine()->ClientPriority(req.fRefNum, req.fValue != 0);
+            return (res.Write(socket) < 0) ? -1 : 0;
+        }
+#endif
         default:
             jack_error("JackBus socket: unknown request %d", type);
             return -1;
