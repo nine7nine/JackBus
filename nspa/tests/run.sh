@@ -542,6 +542,8 @@ else
         "$root/nspa/pa-shim/test/real-apps.sh" || fail=1
         # the server restarted under a process holding two contexts: it reconnects
         "$root/nspa/pa-shim/test/reconnect.sh" || fail=1
+        # a card's mixer state: saved, put back by jackbus-mixer and by the driver's open
+        "$here/mixer-state.sh" || fail=1
     else
         echo "SKIP jackbus-pa (the shim is not built)"
     fi

@@ -3,6 +3,8 @@
 */
 
 #include "JackBridgeAlsa.h"
+#include "../linux/alsa/jackbus_mixer_state.h"
+#include "JackError.h"
 
 #include <errno.h>
 #include <math.h>
@@ -275,6 +277,21 @@ bool JackBridgeAlsa::Open(const JackBridgeAlsaParams& params)
     }
     if (fCap && fPlay && params.fLink) {
         fLinked = (snd_pcm_link(fCap, fPlay) == 0);   // one card: start and stop together
+    }
+    // JackBus: the user's saved mixer state of the card, put back (jackbus_mixer_state.h):
+    // when the bridge is added, and each time the card comes back
+    char done[64] = "";
+    const char* devices[2] = { fParams.fPlayback, fParams.fCapture };
+    for (int i = 0; i < 2; i++) {
+        char id[64];
+        if (!devices[i] || jackbus_mixer_card_id(devices[i], id, sizeof(id)) < 0 || strcmp(id, done) == 0) {
+            continue;
+        }
+        snprintf(done, sizeof(done), "%s", id);
+        const int n = jackbus_mixer_restore(devices[i]);
+        if (n > 0) {
+            jack_info("JackBus: card %s's mixer as saved (%d controls)", id, n);
+        }
     }
     const int ch = (fCapChannels > fPlayChannels) ? fCapChannels : fPlayChannels;
     fConv = (float*)calloc(size_t(fBufferSize > fPeriod * 8 ? fBufferSize : fPeriod * 8) * ch, sizeof(float));

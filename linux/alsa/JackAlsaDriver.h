@@ -56,6 +56,8 @@ class JackAlsaDriver : public JackAudioDriver
         virtual ~JackAlsaDriver()
         {}
 
+        void RestoreMixers(const char* playback, const char* capture);
+
         int Open(jack_nframes_t buffer_size,
                  jack_nframes_t user_nperiods,
                  jack_nframes_t samplerate,

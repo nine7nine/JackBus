@@ -672,6 +672,7 @@ def build_drivers(bld):
         'linux/alsa/hdsp.c',
         'linux/alsa/alsa_driver.c',
         'linux/alsa/hammerfall.c',
+        'linux/alsa/jackbus_mixer_state.c',
         'linux/alsa/ice1712.c'
     ]
 
@@ -791,8 +792,15 @@ def build_drivers(bld):
                 'common/JackBridgeCore.cpp',
                 'common/JackBridgeStream.cpp',
                 'common/JackBridgeResampler.cpp',
-                'common/JackBridgeAlsa.cpp'],
+                'common/JackBridgeAlsa.cpp',
+                'linux/alsa/jackbus_mixer_state.c'],
             use=['ALSA'])
+        # JackBus: a card's mixer state, the user's own (save, restore)
+        bld(features='c cprogram',
+            source=['linux/alsa/jackbus_mixer.c', 'linux/alsa/jackbus_mixer_state.c'],
+            target='jackbus-mixer',
+            use=['ALSA'],
+            install_path='${BINDIR}')
 
     if bld.env['BUILD_DRIVER_FFADO']:
         create_driver_obj(

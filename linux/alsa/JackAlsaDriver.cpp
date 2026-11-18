@@ -47,6 +47,7 @@ Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #endif
 #include "JackCompilerDeps.h"
 #include "JackServerGlobals.h"
+#include "jackbus_mixer_state.h"
 
 static struct jack_constraint_enum_str_descriptor midi_constraint_descr_array[] =
 {
@@ -284,6 +285,30 @@ fail:
     return i;
 }
 
+/*
+ JackBus: the user's saved mixer state of the card(s) this driver opened, put back
+ (jackbus_mixer_state.h): what touched the card while JackBus didn't have it is
+ undone. Nothing saved, nothing done.
+*/
+void JackAlsaDriver::RestoreMixers(const char* playback, const char* capture)
+{
+    char done[64] = "";
+    const char* devices[2] = { playback, capture };
+    for (int i = 0; i < 2; i++) {
+        char id[64];
+        if (!devices[i] || jackbus_mixer_card_id(devices[i], id, sizeof(id)) < 0 || strcmp(id, done) == 0) {
+            continue;
+        }
+        snprintf(done, sizeof(done), "%s", id);
+        const int n = jackbus_mixer_restore(devices[i]);
+        if (n > 0) {
+            jack_info("JackBus: card %s's mixer as saved (%d controls)", id, n);
+        } else if (n < 0) {
+            jack_error("JackBus: card %s's saved mixer not put back: %s", id, strerror(-n));
+        }
+    }
+}
+
 int JackAlsaDriver::Open(jack_nframes_t nframes,
                          jack_nframes_t user_nperiods,
                          jack_nframes_t samplerate,
@@ -368,6 +393,7 @@ int JackAlsaDriver::Open(jack_nframes_t nframes,
         Close();
         return -1;
     }
+    RestoreMixers(playing ? playback_driver_name : NULL, capturing ? capture_driver_name : NULL);
 
     // ALSA driver may have changed the in/out values
     fCaptureChannels = ((alsa_driver_t *)fDriver)->capture_nchannels;
