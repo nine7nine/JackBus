@@ -397,7 +397,7 @@ pre.code .s { color: var(--amber); }
   <ul class="stats">
     <li><b>1.9.22</b><span>the JACK2 release it builds on</span></li>
     <li><b>3</b><span>shims · PipeWire, PulseAudio and ALSA applications as JACK clients (§13)</span></li>
-    <li><b>203</b><span>commits · 19 cherry-picked from develop</span></li>
+    <li><b>206</b><span>commits · 19 cherry-picked from develop</span></li>
     <li><b>0</b><span>changes to the existing API · ABI · protocol</span></li>
     <li><b>0</b><span>xruns when a 1 GB client is killed · was 346–402 / 6</span></li>
     <li><b>0.4 ms</b><span>others' wait behind a slow client · was 2.9 s</span></li>
@@ -3365,6 +3365,13 @@ pre.code .s { color: var(--amber); }
       setting; the realtime thread traced.</li>
   </ul>
 
+  <p>
+    <b>A server restart.</b> The shims' node dies with the server, not the application: a dead node is never handed
+    out again, the next connection opens a new one, and the dead one is closed once its last holder lets go. A
+    desktop shell (a volume applet and libcanberra's event sounds in one process) comes back by itself
+    (<code>pa-shim/test/reconnect.sh</code>).
+  </p>
+
   <h3 style="margin-top:34px">Limits</h3>
   <ul>
     <li>PulseAudio's monitor sources (a recording of what a sink plays: OBS's "Desktop Audio") aren't there; a JACK
@@ -3693,6 +3700,17 @@ pre.code .s { color: var(--amber); }
     index; jackdbus lists, adds and removes bridges (<code>bridges</code>, <code>AddBridge</code>,
     <code>RemoveBridge</code>, <code>GetBridges</code>), and its <code>/dev/snd</code> watch bridges a listed card the
     moment it is plugged in.
+  </p>
+
+  <h3 style="margin-top:34px">The card's mixer, the user's own</h3>
+  <p>
+    While JackBus has let go of a card (a restart, an update), the desktop's sound server may take it and apply its
+    own card profile: outputs switched, levels moved. <code>jackbus-mixer save &lt;card&gt;</code> (PatchBox's Mixer
+    tab: <i>Save as my settings</i>) keeps the card's simple-mixer controls, raw values per channel, in
+    <code>~/.config/jackbus/mixer/&lt;card id&gt;.state</code>, and JackBus puts them back whenever it opens the card:
+    the ALSA driver's open and a bridge's, the card plugged back in too. Nothing saved, nothing restored
+    (<code>linux/alsa/jackbus_mixer_state.c</code>; <code>nspa/tests/mixer-state.sh</code> on the test control
+    plugin, the driver's open with a null PCM).
   </p>
 </section>
 
@@ -5768,6 +5786,8 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>common/JackBusNode.cpp</code>, <code>jack/jackbus.h</code></td><td>nodes: the cycle record, buffers resolved once, the zero buffer, events and their fd, the port table</td><td><span class="k">ace74aae</span></td></tr>
       <tr><td><code>common/JackBusEndpoint.*</code>, <code>JackGraphManager.cpp</code>, <code>JackEngine.cpp</code>, <code>JackAudioDriver.cpp</code></td><td>async endpoints: the memfd ring, the master's copy before any wake, edge-less connections (<code>SetNoEdge</code>) · priority: <code>ResumeRefNumFirst</code>, <code>RealTimePriority</code></td><td><span class="k">3cfbb4a1</span></td></tr>
       <tr><td><code>nspa/pa-shim/</code>, <code>nspa/pw-shim/</code>, <code>nspa/jackbus-alsa/</code></td><td>async streams: <code>pa.async</code>, <code>pw.async</code>, <code>alsa.async</code></td><td><span class="k">69afcb08</span></td></tr>
+      <tr><td><code>linux/alsa/jackbus_mixer_state.*</code>, <code>jackbus_mixer.c</code>, <code>JackAlsaDriver.cpp</code>, <code>common/JackBridgeAlsa.cpp</code></td><td>a card's mixer state saved (<code>jackbus-mixer</code>) and put back when the card is opened</td><td><span class="k">88a43b86</span></td></tr>
+      <tr><td><code>nspa/pa-shim/node.c</code>, <code>nspa/pw-shim/app.c</code></td><td>the node per server: a dead one never handed out again</td><td><span class="k">9775a9de</span></td></tr>
       <tr><td><code>nspa/tests/async-stall.sh</code>, <code>priority.sh</code></td><td>a frozen application beside a client counting xruns · nodes with priority</td><td><span class="k">910007da</span></td></tr>
       <tr><td><code>example-clients/</code></td><td><code>jackbus_simple</code> · <code>jackbus_tone</code>, <code>jackbus_events</code></td><td><span class="k">9d1376ca</span> · <span class="k">78048d12</span></td></tr>
       <tr><td><code>common/JackLibClient.cpp</code></td><td>C27 no cancellation while the synchro mutex is held</td><td><span class="k">c056a332</span></td></tr>
@@ -5795,7 +5815,7 @@ pre.code .s { color: var(--amber); }
 </section>
 
 <footer>
-  JackBus · architecture, fourth edition · JACK2 1.9.22 + 203 commits (github.com/nine7nine/JackBus) · protocol 9 ·
+  JackBus · architecture, fourth edition · JACK2 1.9.22 + 206 commits (github.com/nine7nine/JackBus) · protocol 9 ·
   Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274, ZOOM U-44, a USB headset · updated 16 November 2026
 </footer>
 

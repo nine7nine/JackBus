@@ -151,8 +151,11 @@ The desktop's own sound goes the same way: its volume applet, volume keys,
 settings pages and event sounds (libcanberra) get `jackbus-pa`. A device's
 volume and mute are the card's own mixer (Master, Capture: alsamixer's
 scale, a capture control's 100 % at 0 dB), so every process and alsamixer
-show one value. For the desktop's processes to start on JackBus, JackBus has
-to start first: `jackbus.service` does that at login (below).
+show one value. `jackbus-mixer save <card>` (PatchBox: "Save as my settings")
+keeps a card's mixer as yours: JackBus puts it back whenever it opens the
+card, undoing what another sound server changed meanwhile. For the desktop's
+processes to start on JackBus, JackBus has to start first: `jackbus.service`
+does that at login (below).
 
 ### The native API
 
