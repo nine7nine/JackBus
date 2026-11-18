@@ -397,7 +397,7 @@ pre.code .s { color: var(--amber); }
   <ul class="stats">
     <li><b>1.9.22</b><span>the JACK2 release it builds on</span></li>
     <li><b>3</b><span>shims · PipeWire, PulseAudio and ALSA applications as JACK clients (§13)</span></li>
-    <li><b>197</b><span>commits · 19 cherry-picked from develop</span></li>
+    <li><b>203</b><span>commits · 19 cherry-picked from develop</span></li>
     <li><b>0</b><span>changes to the existing API · ABI · protocol</span></li>
     <li><b>0</b><span>xruns when a 1 GB client is killed · was 346–402 / 6</span></li>
     <li><b>0.4 ms</b><span>others' wait behind a slow client · was 2.9 s</span></li>
@@ -2711,7 +2711,11 @@ pre.code .s { color: var(--amber); }
 <span class="k">jackbus_port_audio</span>(port) → float * · <span class="k">jackbus_port_midi</span>(port) → void *  <span class="c"># in the process function only</span>
 <span class="k">jackbus_node_event_fd</span>(node)                              → int   <span class="c"># poll it; owned by the node</span>
 <span class="k">jackbus_node_next_event</span>(node, &amp;event)                    → 1 · 0  <span class="c"># any thread but the process function</span>
-<span class="c"># process(node, const jackbus_cycle_t *, arg): non-zero takes the node out of the graph, as with jack_set_process_callback</span></pre>
+<span class="k">jackbus_node_set_priority</span>(node, 1)                         <span class="c"># before activation: woken first, RT priority one step up</span>
+<span class="k">jackbus_endpoint_open</span>(node, ports, n, ring_frames)        → jackbus_endpoint_t *   <span class="c"># §13: JackBus moves these ports</span>
+<span class="k">jackbus_endpoint_shared</span>(ep) · <span class="k">jackbus_endpoint_ring</span>(ep, ch) · <span class="k">jackbus_endpoint_close</span>(ep)
+<span class="c"># process(node, const jackbus_cycle_t *, arg): non-zero takes the node out of the graph, as with jack_set_process_callback</span>
+<span class="c"># no process function: activated without a realtime thread (JACK's non-RT client); setting one later starts it</span></pre>
 
   <div class="tablebox" style="margin-top:18px">
     <table>
@@ -2736,6 +2740,7 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>jackbus_tone</code> recorded through the graph · <code>jackbus_events</code> beside the other examples</td><td>a continuous sine (<code>tools/sine_check.py</code>) · their clients' lives among its events</td></tr>
       <tr><td>Ardour 9 headless (<code>hardour</code>) over the JackBus socket: its master bus to <code>system:playback</code>, a node's tone fed through it, buffer-size changes</td><td><span class="better">a clean, continuous sine of the same frequency · a clean exit</span> · Ardour's own configuration untouched (a scratch home)</td></tr>
       <tr><td><code>bus.sh</code> under ASan · under TSan</td><td>24 checks, <span class="better">0 reports</span> · <span class="better">0 reports</span> (its failures are TSan's abort at <code>jack_client_close</code>, §22)</td></tr>
+      <tr><td><code>priority.sh</code>: eight nodes woken at the cycle's start, the last one opened with priority or without (three runs each: CPU placement moves a start as much as the wake order)</td><td>against the last ordinary node it starts <span class="better">14–20 µs earlier</span> with priority, 2–3 µs later without · realtime priority 66 against 65 · every node every cycle</td></tr>
     </table>
   </div>
   <p class="caption" style="margin-top:12px">
@@ -2898,6 +2903,50 @@ pre.code .s { color: var(--amber); }
       it is woken when the ring will have room (or, recording, data), computed from the cycle clock the node publishes,
       so it wakes once per need, phase-locked to the cycle, not on a free-running timer. A resampler, when one is
       needed, runs at a fixed ratio: the application runs on JackBus's clock, so nothing drifts.
+    </p>
+  </div>
+
+  <h3 style="margin-top:34px">Async: outside the cycle</h3>
+  <p>
+    The copy above runs on a realtime thread inside the application's process, so a frozen or starved application
+    (Teams paging, a browser stalled) makes the whole cycle late and every client is told of xruns. With
+    <code>async = yes</code> for a family (<code>pa.</code>, <code>pw.</code>, <code>alsa.</code>), each stream is an
+    <b>async endpoint</b> instead: its ring lives in a sealed memfd shared with JackBus
+    (<code>common/JackBusEndpoint.cpp</code>), and the master driver copies it to (from) the ports itself, after the
+    engine's Process and before any client is woken. Connections to an endpoint's ports make no activation edge, and
+    a node with only endpoints has no realtime thread. The application's own audio threads (rtkit ones too) are
+    untouched. The cost: what another client sends to an endpoint arrives one cycle later.
+    PipeWire filters, <code>RT_PROCESS</code> and MIDI streams, and resampled ALSA streams stay in the cycle.
+  </p>
+
+  <div class="figure">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 250" role="img" aria-label="A stream in the cycle and an async stream: who copies the ring">
+<rect x="20" y="20" width="1160" height="210" rx="18" fill="url(#g-band)" stroke="#3a3f72"/>
+<text x="40" y="48" class="t-tiny">IN THE CYCLE · async = no</text>
+<rect x="40" y="58" width="250" height="52" rx="10" fill="#151a3a" stroke="#8b8ff5"/>
+<text x="54" y="80" class="t-chip">driver wakes the node</text>
+<text x="54" y="98" class="t-chipsub">a futex wake into the app</text>
+<path class="flow ctrl" d="M 294 84 H 346"/>
+<rect x="350" y="58" width="330" height="52" rx="10" fill="#1b2246" stroke="#8b8ff5"/>
+<text x="364" y="80" class="t-chip">the app's RT thread: ring → ports</text>
+<text x="364" y="98" class="t-chipsub">inside Teams, the browser, aplay</text>
+<text x="700" y="80" class="t-bad">app frozen: the cycle is late,</text>
+<text x="700" y="98" class="t-bad">every client told of xruns</text>
+<text x="40" y="140" class="t-tiny">ASYNC · async = yes</text>
+<rect x="40" y="150" width="330" height="52" rx="10" fill="#1b2246" stroke="#2dd4bf"/>
+<text x="54" y="172" class="t-chip">JackBus's driver: ring → ports</text>
+<text x="54" y="190" class="t-chipsub">before any wake · no edge, no wait</text>
+<path class="flow audio" d="M 450 176 H 374"/>
+<rect x="454" y="150" width="226" height="52" rx="10" fill="rgba(45,212,191,0.06)" stroke="#2dd4bf"/>
+<text x="468" y="172" class="t-chip">ring · sealed memfd</text>
+<text x="468" y="190" class="t-chipsub">the app fills it, not RT</text>
+<text x="700" y="172" class="t-sub">app frozen: its ring runs dry, its own ports</text>
+<text x="700" y="190" class="t-sub">go silent; the others see nothing</text>
+</svg>
+    <p class="caption">
+      <b>Who copies.</b> Measured (<code>nspa/tests/async-stall.sh</code>): paplay, aplay and pw-play frozen for 2 s
+      beside another client. In the cycle it is told of about 230 xruns; async, of none, it runs every cycle, and
+      the application plays on to its end.
     </p>
   </div>
 
@@ -3226,6 +3275,7 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>output</code>, <code>input</code></td><td>the first card (<code>system</code>)</td><td>the JACK client new streams go to: <code>system</code> or a bridged card; PulseAudio's and PipeWire's default devices</td></tr>
       <tr><td><code>pa.max-latency</code></td><td>0</td><td>ms: the most a PulseAudio stream queues in the shim beyond the device's latency, never below two cycles; 0: what it asks for</td></tr>
       <tr><td><code>pulse</code></td><td>no</td><td>yes: PulseAudio applications use JackBus while it runs (the dispatcher)</td></tr>
+      <tr><td><code>async</code></td><td>no</td><td>yes: streams are async endpoints, outside the cycle (below); from each application's next start</td></tr>
     </table>
   </div>
 
@@ -5606,9 +5656,9 @@ pre.code .s { color: var(--amber); }
         <li><b>The scheduler.</b> What remains per cycle is wake-up latency and cache-line transfers: IRQ and CPU
           isolation, <code>sched_ext</code> policies, proxy execution &mdash; kernel and system work rather than JACK
           code.</li>
-        <li><b>An opt-in isolation mode.</b> A client chosen by the user runs one cycle behind, with its outputs
-          double-buffered by the server: its lateness can never hold up anyone else, at the start of a session or
-          when it adds tracks (PipeWire's <code>node.async</code>). It costs that client one period of latency.</li>
+        <li><b>An opt-in isolation mode.</b> Done for the shims' streams: async endpoints (§13), the switch per
+          family. Still open for any JACK client: one chosen by the user running a cycle behind, its outputs
+          double-buffered by the server (PipeWire's <code>node.async</code>), at a period of latency.</li>
         <li><b>What a late client's output should sound like.</b> Repeat, silence or a short fade (PipeWire plays
           silence, and fades on link removal): a matter of taste, parked.</li>
       </ul>
@@ -5716,6 +5766,9 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>common/shm.c</code>, <code>JackShmMem.h</code>, <code>linux/JackLinuxFutex.*</code>, <code>JackAliveTable.*</code></td><td>the shared objects to and from fds: <code>jack_shm_open_fd</code>, <code>SetShmFd</code>, <code>ConnectFd</code>, <code>DupFd</code>, <code>OpenNamedFd</code></td><td><span class="k">7f2e2151</span></td></tr>
       <tr><td><code>common/JackBusLibClient.*</code>, <code>posix/JackBusClientChannel.*</code>, <code>common/JackLibAPI.cpp</code>, <code>JackLibGlobals.h</code>, <code>jack/jackbus.h</code></td><td>the JackBus socket, client side: <code>jackbus_client_open</code>, <code>JACKBUS_TRANSPORT=1</code></td><td><span class="k">7f2e2151</span></td></tr>
       <tr><td><code>common/JackBusNode.cpp</code>, <code>jack/jackbus.h</code></td><td>nodes: the cycle record, buffers resolved once, the zero buffer, events and their fd, the port table</td><td><span class="k">ace74aae</span></td></tr>
+      <tr><td><code>common/JackBusEndpoint.*</code>, <code>JackGraphManager.cpp</code>, <code>JackEngine.cpp</code>, <code>JackAudioDriver.cpp</code></td><td>async endpoints: the memfd ring, the master's copy before any wake, edge-less connections (<code>SetNoEdge</code>) · priority: <code>ResumeRefNumFirst</code>, <code>RealTimePriority</code></td><td><span class="k">3cfbb4a1</span></td></tr>
+      <tr><td><code>nspa/pa-shim/</code>, <code>nspa/pw-shim/</code>, <code>nspa/jackbus-alsa/</code></td><td>async streams: <code>pa.async</code>, <code>pw.async</code>, <code>alsa.async</code></td><td><span class="k">69afcb08</span></td></tr>
+      <tr><td><code>nspa/tests/async-stall.sh</code>, <code>priority.sh</code></td><td>a frozen application beside a client counting xruns · nodes with priority</td><td><span class="k">910007da</span></td></tr>
       <tr><td><code>example-clients/</code></td><td><code>jackbus_simple</code> · <code>jackbus_tone</code>, <code>jackbus_events</code></td><td><span class="k">9d1376ca</span> · <span class="k">78048d12</span></td></tr>
       <tr><td><code>common/JackLibClient.cpp</code></td><td>C27 no cancellation while the synchro mutex is held</td><td><span class="k">c056a332</span></td></tr>
       <tr><td><code>common/JackActivationCount.cpp</code>, <code>linux/JackLinuxFutex.cpp</code></td><td>TSan builds: a release before every activation-counter decrement</td><td><span class="k">46d67d32</span></td></tr>
@@ -5723,7 +5776,7 @@ pre.code .s { color: var(--amber); }
       <tr><td><code>common/JackAudioDriver.*</code>, <code>JackBridgeSet.h</code>, <code>linux/bridge/JackBridgeDriver.*</code></td><td>the bridges' resampling while the clients run</td><td><span class="k">b7cc6cde</span></td></tr>
       <tr><td><code>dbus/controller.c</code>, <code>linux/alsa/JackAlsaDriver.cpp</code></td><td>a card with MIDI only: not bridged, not offered as a device</td><td><span class="k">02b3c80a</span></td></tr>
       <tr><td><code>nspa/tests/bus*.sh</code>, <code>bus_*.c</code>, <code>fd_trailer.cpp</code>, <code>tools/sine_check.py</code></td><td>the JackBus socket and nodes: protocol and node tests, real programs, Ardour, a dying server, sanitizer runs</td><td><span class="k">9fb1e4fa</span> · <span class="k">86156571</span> · <span class="k">8fbe0cb3</span></td></tr>
-      <tr><td><code>nspa/tests/perf/</code>, <code>nspa/tests/bridge/</code>, <code>nspa/run-isolated.sh</code></td><td>the perf harness · <code>start-race.sh</code>, <code>sync-late.sh</code> · a private runtime directory</td><td><span class="k">b5dc89bf</span> · <span class="k">c056a332</span> · <span class="k">b7cc6cde</span> · <span class="k">d4b0e405</span></td></tr>
+      <tr><td><code>nspa/tests/perf/</code>, <code>nspa/tests/bridge/</code>, <code>nspa/run-isolated.sh</code></td><td>the perf harness · <code>start-race.sh</code>, <code>sync-late.sh</code> · a private runtime directory and PID namespace</td><td><span class="k">b5dc89bf</span> · <span class="k">c056a332</span> · <span class="k">b7cc6cde</span> · <span class="k">d4b0e405</span></td></tr>
       <tr><td><code>nspa/</code></td><td>build script, isolation wrapper, 97-check suite, bridge tests, perf harness, hardware harness, package (<code>jackbus</code>)</td><td>commits of their own; tests land with their fixes</td></tr>
       <tr><td><code>Archlinux/jack2/</code></td><td>Arch's 1.9.22-2 packaging, for reference</td><td><span class="k">6989d6b0</span></td></tr>
       <tr><td><code>README.md</code></td><td>overview, changes and measurements</td><td><span class="k">5aff7602</span></td></tr>
@@ -5742,7 +5795,7 @@ pre.code .s { color: var(--amber); }
 </section>
 
 <footer>
-  JackBus · architecture, fourth edition · JACK2 1.9.22 + 197 commits (github.com/nine7nine/JackBus) · protocol 9 ·
+  JackBus · architecture, fourth edition · JACK2 1.9.22 + 203 commits (github.com/nine7nine/JackBus) · protocol 9 ·
   Linux-NSPA 7.3.3-rt2 · Intel HDA ALC274, ZOOM U-44, a USB headset · updated 16 November 2026
 </footer>
 

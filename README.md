@@ -140,7 +140,10 @@ that can be switched off.
 Settings live in `~/.config/jackbus/compat.conf`, a section per shim
 (`pa.output = U44`, `alsa.resample = no`): resampling and its quality, connecting
 new streams, the output and input device (`system` or a bridged card), and a cap
-on how much a PulseAudio stream buffers. With PatchBox's "PipeWire leaves audio
+on how much a PulseAudio stream buffers, and **async** (`pa.async = yes`): the
+family's streams leave the cycle, JackBus copies their rings itself, so an
+application that stalls (Teams, a browser) only drops out on its own stream and
+can't give other clients xruns. With PatchBox's "PipeWire leaves audio
 to JackBus", PipeWire's JACK bridge isn't loaded: while JackBus runs PipeWire
 has no audio work, and video and screen sharing are untouched.
 
@@ -160,7 +163,10 @@ objects as file descriptors. Its process callback gets a cycle record (frame,
 time in ns, the next cycle's time, the period, the rate), its ports are added
 and removed at any time, and graph changes (clients, ports, connections,
 renames, buffer size, the server going away) arrive on an event file
-descriptor for the application's own loop. The shims are built on it.
+descriptor for the application's own loop. A node can ask for **priority**
+(`jackbus_node_set_priority`: woken first each cycle, its realtime thread a
+step above other clients), and open **async endpoints**, ports JackBus moves
+itself from a shared ring. The shims are built on it.
 
 ### jackdbus calls
 
