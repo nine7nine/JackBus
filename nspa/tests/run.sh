@@ -519,6 +519,11 @@ if [ -n "$san" ]; then
     echo "SKIP bus-apps (sanitizer run)"
 else
     "$here/bus-apps.sh" || fail=1
+    # nodes with priority: woken first, a step above (prio_node)
+    "$here/priority.sh" || fail=1
+    # async endpoints: an application frozen in the shims' async mode costs the others nothing
+    # (paplay, aplay, pw-play through the shims; each skipped when not there)
+    "$here/async-stall.sh" || fail=1
     # a real DAW: Ardour headless (hardour), skipped without Ardour 9
     "$here/bus-ardour.sh" || fail=1
     # PipeWire applications through jackbus-pw (the libpipewire shim on JackBus nodes):

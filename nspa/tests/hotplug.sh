@@ -25,10 +25,13 @@ work=$(mktemp -d /tmp/nspa-hotplug.XXXXXX)
 fail=0
 result() { if [ "$2" = 0 ]; then echo "PASS $1: $3"; else echo "FAIL $1: $3"; fail=1; fi; }
 
-# The card to unplug: given, or the last card ALSA has (not the first: keep one card listed).
+# The card to unplug: given, or the last card ALSA has with audio (jackdbus lists PCM devices: a
+# MIDI-only card, as a USB keyboard, is never in its list); not the first: keep one card listed.
 card=${2:-}
 if [ -z "$card" ]; then
-    card=$(sed -n 's/^ *\([0-9]*\) \[\([^ ]*\) *\].*/\2/p' /proc/asound/cards | tail -1)
+    for c in $(sed -n 's/^ *\([0-9]*\) \[\([^ ]*\) *\].*/\2/p' /proc/asound/cards); do
+        ls -d "/proc/asound/$c"/pcm* >/dev/null 2>&1 && card=$c
+    done
 fi
 idx=$(readlink "/proc/asound/$card" 2>/dev/null | sed 's/^card//')
 if [ -z "$idx" ] || [ "$(grep -c '^ *[0-9]* \[' /proc/asound/cards)" -lt 2 ]; then
