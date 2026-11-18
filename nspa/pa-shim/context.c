@@ -65,6 +65,7 @@ struct pa_context {
 	pa_defer_event *connect_defer;
 	pa_time_event *retry;
 	bool node_ref;
+	jackbus_node_t *node;		/* the node it holds (the server's it connected to) */
 	int efd;
 	pa_io_event *efd_io;
 	struct shim_device devices[MAX_DEVICES];
@@ -532,7 +533,7 @@ static void on_node_event(pa_mainloop_api *a, pa_io_event *e, int fd, pa_io_even
 	(void)r;
 	if (c->state != PA_CONTEXT_READY)
 		return;
-	if (shim_node_dead()) {
+	if (shim_node_dead(c->node)) {
 		pa_context_ref(c);
 		for (int i = c->n_streams - 1; i >= 0; i--)
 			shim_stream_fail(c->streams[i], PA_ERR_CONNECTIONTERMINATED);
@@ -635,7 +636,8 @@ static void teardown(pa_context *c)
 	}
 	if (c->node_ref) {
 		c->node_ref = false;
-		shim_node_unref();
+		shim_node_unref(c->node);
+		c->node = NULL;
 	}
 }
 
@@ -692,7 +694,7 @@ static void on_retry(pa_mainloop_api *a, pa_time_event *e, const struct timeval 
 
 static void try_connect(pa_context *c)
 {
-	if (shim_node_ref(shim_context_app_name(c)) == NULL) {
+	if ((c->node = shim_node_ref(shim_context_app_name(c))) == NULL) {
 		if (c->flags & PA_CONTEXT_NOFAIL) {
 			struct timeval tv;
 			if (c->retry == NULL)

@@ -75,19 +75,21 @@ struct shim_member {
 	jack_nframes_t (*latency)(struct shim_member *m);	/* its process latency */
 };
 
-/* the application's JACK client (app.c): one JackBus node per process */
+/* the application's JACK client (app.c): one JackBus node per process, the
+ * live one (a dead one is never handed out again); each holder releases the
+ * node it got */
 jackbus_node_t *shim_app_ref(const char *name);
-void shim_app_unref(void);
+void shim_app_unref(jackbus_node_t *n);
 const char *shim_app_client_name(void);		/* the name asked for */
-jack_client_t *shim_app_client(void);		/* NULL while not open */
-void shim_app_attach(struct shim_member *m);	/* it runs from the next cycle */
-void shim_app_detach(struct shim_member *m);	/* returns once no cycle runs it */
-void shim_app_update_latency(void);
-void shim_app_retire(void *old);		/* free once no cycle can read it */
+jack_client_t *shim_app_client(void);		/* the live node's; NULL while none */
+void shim_app_attach(jackbus_node_t *n, struct shim_member *m);	/* it runs from the next cycle */
+void shim_app_detach(jackbus_node_t *n, struct shim_member *m);	/* returns once no cycle runs it */
+void shim_app_update_latency(jackbus_node_t *n);
+void shim_app_retire(jackbus_node_t *n, void *old);	/* free once no cycle of n can read it */
 /* the settings' pw.async (read when the node opened): async audio streams are async
  * endpoints; the node runs a realtime thread only for what needs one */
-bool shim_app_async(void);
-void shim_app_need_rt(void);
+bool shim_app_async(jackbus_node_t *n);
+void shim_app_need_rt(jackbus_node_t *n);
 /* spa_io_position (filter and stream) from the cycle record, realtime thread */
 void shim_fill_position(struct spa_io_position *pos, const jackbus_cycle_t *cycle, jack_client_t *client);
 /* the JACK port name for a port of node node_name: "<node>/<port>", or the

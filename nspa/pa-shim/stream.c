@@ -857,7 +857,7 @@ static int stream_connect(pa_stream *s, pa_stream_direction_t dir, const char *d
 	s->n_ports = s->ss.channels;
 	/* async (the settings' pa.async): JackBus moves the ring itself, the application's
 	 * process is never in the graph's cycle */
-	bool async = shim_node_async();
+	bool async = shim_node_async(s->node);
 	if (alloc_buffers(s, !async) < 0) {
 		snprintf(why, sizeof(why), "out of memory");
 		goto refuse;
@@ -916,10 +916,10 @@ static int stream_connect(pa_stream *s, pa_stream_direction_t dir, const char *d
 	atomic_store_explicit(&s->running, true, memory_order_release);
 	update_run(s);
 	if (async) {
-		shim_node_hold(true);			/* active, without a realtime thread */
+		shim_node_hold(s->node, true);			/* active, without a realtime thread */
 	} else {
-		shim_node_need_rt();
-		shim_node_attach(&s->member);
+		shim_node_need_rt(s->node);
+		shim_node_attach(s->node, &s->member);
 	}
 	s->attached = true;
 	autoconnect(s, d);
@@ -939,7 +939,7 @@ refuse:
 	free_buffers(s);
 	if (s->node_ref) {
 		s->node_ref = false;
-		shim_node_unref();
+		shim_node_unref(s->node);
 	}
 	shim_context_set_errno(c, PA_ERR_NOTSUPPORTED);
 	set_state(s, PA_STREAM_FAILED);
@@ -972,9 +972,9 @@ static void stream_close(pa_stream *s)
 			s->ep = NULL;
 			s->sh = &s->local;
 			memset(s->ring, 0, sizeof(s->ring));
-			shim_node_hold(false);
+			shim_node_hold(s->node, false);
 		} else {
-			shim_node_detach(&s->member);	/* from here no cycle runs it */
+			shim_node_detach(s->node, &s->member);	/* from here no cycle runs it */
 		}
 		s->attached = false;
 	}
@@ -1000,7 +1000,7 @@ static void stream_close(pa_stream *s)
 	free_buffers(s);
 	if (s->node_ref) {
 		s->node_ref = false;
-		shim_node_unref();
+		shim_node_unref(s->node);
 	}
 	unsigned int u = atomic_load(&s->sh->underflows), o = atomic_load(&s->sh->overflows);
 	if (u || o)

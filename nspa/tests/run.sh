@@ -540,6 +540,8 @@ else
     # needs make -C nspa/pw-shim test-apps)
     if [ -e "$JACK_BUILD/pa-shim/lib/libpulse.so.0" ]; then
         "$root/nspa/pa-shim/test/real-apps.sh" || fail=1
+        # the server restarted under a process holding two contexts: it reconnects
+        "$root/nspa/pa-shim/test/reconnect.sh" || fail=1
     else
         echo "SKIP jackbus-pa (the shim is not built)"
     fi

@@ -163,7 +163,7 @@ static void publish_ports(struct pw_filter *f)
 	spa_list_for_each(p, &f->ports, link)
 		if (p->bport)
 			a->ports[a->count++] = p;
-	shim_app_retire(atomic_exchange(&f->rt_ports, a));
+	shim_app_retire(f->node, atomic_exchange(&f->rt_ports, a));
 }
 
 /* ------------------------------------------------ the realtime side */
@@ -584,9 +584,9 @@ SHIM_EXPORT int pw_filter_connect(struct pw_filter *f, enum pw_filter_flags flag
 	pthread_mutex_unlock(&f->ports_lock);
 
 	log_forced_settings(f);
-	shim_app_need_rt();			/* a filter runs in the cycle */
-	shim_app_attach(&f->member);
-	shim_app_update_latency();
+	shim_app_need_rt(f->node);			/* a filter runs in the cycle */
+	shim_app_attach(f->node, &f->member);
+	shim_app_update_latency(f->node);
 	atomic_fetch_or(&f->pending, NOTIFY_START);
 	pw_loop_signal_event(f->core->context->main_loop, f->notify);
 	return 0;
@@ -599,9 +599,9 @@ SHIM_EXPORT int pw_filter_disconnect(struct pw_filter *f)
 	if (f->node == NULL)
 		return 0;
 	atomic_store(&f->streaming, false);
-	shim_app_detach(&f->member);		/* from here no cycle runs the filter */
+	shim_app_detach(f->node, &f->member);		/* from here no cycle runs the filter */
 	pthread_mutex_lock(&f->ports_lock);
-	shim_app_retire(atomic_exchange(&f->rt_ports, NULL));
+	shim_app_retire(f->node, atomic_exchange(&f->rt_ports, NULL));
 	spa_list_for_each(p, &f->ports, link) {
 		if (p->bport) {
 			shim_own_port_gone(jackbus_port_jack(p->bport));
@@ -611,10 +611,11 @@ SHIM_EXPORT int pw_filter_disconnect(struct pw_filter *f)
 	}
 	pthread_mutex_unlock(&f->ports_lock);
 	shim_own_node_gone(f->node_id);
+	jackbus_node_t *n = f->node;
 	f->node = NULL;
 	f->client = NULL;
-	shim_app_update_latency();
-	shim_app_unref();
+	shim_app_update_latency(n);
+	shim_app_unref(n);
 	set_state(f, PW_FILTER_STATE_UNCONNECTED, 0, NULL);
 	return 0;
 }
@@ -677,7 +678,7 @@ SHIM_EXPORT int pw_filter_update_params(struct pw_filter *f, void *port_data,
 	if (port_data == NULL) {
 		parse_node_params(f, params, n_params);
 		if (f->node)
-			shim_app_update_latency();
+			shim_app_update_latency(f->node);
 	}
 	return 0;
 }

@@ -40,19 +40,21 @@ struct shim_member {
 	void (*process)(struct shim_member *m, const jackbus_cycle_t *cycle);	/* realtime */
 	struct shim_member *next;
 };
+/* the node: the live one (a dead one is never handed out again); each holder
+ * releases the node it got */
 jackbus_node_t *shim_node_ref(const char *name);
-void shim_node_unref(void);
-jack_client_t *shim_node_client(void);
-void shim_node_attach(struct shim_member *m);	/* runs from the next cycle */
-void shim_node_detach(struct shim_member *m);	/* returns once no cycle runs it */
-/* the settings' pa.async (read when the node opened): streams are async endpoints, the
- * node has no realtime thread unless one is needed (shim_node_need_rt) */
-bool shim_node_async(void);
-void shim_node_need_rt(void);
-void shim_node_hold(bool on);			/* an async stream: the node active while any */
+void shim_node_unref(jackbus_node_t *n);
+jack_client_t *shim_node_client(void);		/* the live node's */
+void shim_node_attach(jackbus_node_t *n, struct shim_member *m);	/* runs from the next cycle */
+void shim_node_detach(jackbus_node_t *n, struct shim_member *m);	/* returns once no cycle runs it */
 /* the node's events (graph changes, shutdown) wake these eventfds */
 void shim_node_watch(int efd, bool add);
-bool shim_node_dead(void);
+bool shim_node_dead(jackbus_node_t *n);		/* the server it was on went away */
+/* the settings' pa.async (read when the node opened): streams are async endpoints, the
+ * node has no realtime thread unless one is needed (shim_node_need_rt) */
+bool shim_node_async(jackbus_node_t *n);
+void shim_node_need_rt(jackbus_node_t *n);
+void shim_node_hold(jackbus_node_t *n, bool on);	/* an async stream: the node active while any */
 
 /* context.c */
 struct shim_device {

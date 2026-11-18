@@ -1296,9 +1296,10 @@ static void connect_failed(struct pw_stream *s, int res, const char *why)
 {
 	free_buffers(s);
 	if (s->node) {
+		jackbus_node_t *n = s->node;
 		s->node = NULL;
 		s->client = NULL;
-		shim_app_unref();
+		shim_app_unref(n);
 	}
 	set_state(s, PW_STREAM_STATE_ERROR, res, why);
 }
@@ -1416,7 +1417,7 @@ SHIM_EXPORT int pw_stream_connect(struct pw_stream *s, enum pw_direction directi
 	/* async audio with the settings' pw.async: JackBus moves the ring itself, nothing of the
 	 * application's in the graph's cycle; else (or without endpoints) the node's realtime
 	 * thread runs the stream */
-	if (s->async && !s->midi && shim_app_async()) {
+	if (s->async && !s->midi && shim_app_async(s->node)) {
 		s->ep = jackbus_endpoint_open(s->node, s->ports, s->n_ports, RING_FRAMES);
 		if (s->ep && jackbus_endpoint_shared(s->ep)->ring_frames != RING_FRAMES) {
 			jackbus_endpoint_close(s->ep);
@@ -1433,10 +1434,10 @@ SHIM_EXPORT int pw_stream_connect(struct pw_stream *s, enum pw_direction directi
 		}
 	}
 	if (s->ep == NULL)
-		shim_app_need_rt();
+		shim_app_need_rt(s->node);
 	log_forced_settings(s);
 
-	shim_app_attach(&s->member);
+	shim_app_attach(s->node, &s->member);
 	atomic_fetch_or(&s->pending, NOTIFY_START);
 	pw_loop_signal_event(s->core->context->main_loop, s->notify);
 	return 0;
@@ -1448,7 +1449,7 @@ SHIM_EXPORT int pw_stream_disconnect(struct pw_stream *s)
 		return 0;
 	atomic_store(&s->streaming, false);
 	update_run(s);
-	shim_app_detach(&s->member);		/* from here no cycle runs the stream */
+	shim_app_detach(s->node, &s->member);		/* from here no cycle runs the stream */
 	if (s->ep) {
 		/* JackBus stops moving it, before its ports go */
 		s->underruns += atomic_load(&s->sh->underflows);
@@ -1485,9 +1486,10 @@ SHIM_EXPORT int pw_stream_disconnect(struct pw_stream *s)
 	s->n_left = 0;
 	s->draining = false;
 	s->quantum = 0;
+	jackbus_node_t *n = s->node;
 	s->node = NULL;
 	s->client = NULL;
-	shim_app_unref();
+	shim_app_unref(n);
 	set_state(s, PW_STREAM_STATE_UNCONNECTED, 0, NULL);
 	return 0;
 }

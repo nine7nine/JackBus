@@ -86,6 +86,7 @@ struct shim_proxy {
 	bool removed;
 	bool bound_sent;
 	bool app_ref;				/* a registry holds the application's client */
+	jackbus_node_t *app_node;		/* the one it holds */
 	/* a link made through link-factory: its JACK connections */
 	char (*pairs)[2][PORT_NAME_MAX];
 	uint32_t n_pairs;
@@ -868,7 +869,7 @@ static void proxy_free(struct shim_proxy *p)
 		free(p->pairs);
 	}
 	if (p->app_ref)
-		shim_app_unref();
+		shim_app_unref(p->app_node);
 	free(p);
 }
 
@@ -1396,7 +1397,7 @@ static struct pw_registry *core_get_registry(void *object, uint32_t version,
 	if (r == NULL)
 		return NULL;
 	/* the application's client, to read JACK's graph (not in the cycle) */
-	if (shim_app_ref(app_name_of(core)) != NULL)
+	if ((r->app_node = shim_app_ref(app_name_of(core))) != NULL)
 		r->app_ref = true;
 	rescan(core);
 	defer(core, emit_globals, r, 0, 0, 0);
