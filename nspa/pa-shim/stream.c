@@ -24,7 +24,13 @@
  * unless the settings say no (compat.conf "resample = no", or
  * JACKBUS_PA_RESAMPLE=0), when it is refused with the reason. With autoconnect (on
  * unless JACKBUS_PA_AUTOCONNECT=0) the ports go to the chosen device's (the
- * default's) physical ports in order, a mono stream to the first two.
+ * default's) physical ports in order, a mono playback stream to the first two,
+ * a mono record stream from the first.
+ *
+ * A record stream with PA_STREAM_PEAK_DETECT (a level meter's: pavucontrol's,
+ * the desktop's) is not resampled: at its rate (25 Hz as a rule) it gets each
+ * channel's largest magnitude in that time, over the ports connected to it
+ * averaged (a port sums them, PulseAudio's downmix averages).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -80,6 +86,13 @@ struct pa_stream {
 	jackbus_port_t *ports[PA_CHANNELS_MAX];
 	struct shim_resampler *rs;
 	double ratio;			/* application frames per JackBus frame */
+	/* a peak-detect stream (PA_STREAM_PEAK_DETECT, a level meter's): one value per
+	 * peak_step JackBus frames, each channel's largest magnitude over the ports
+	 * connected to it (their average: a port sums them, PulseAudio's downmix
+	 * averages) */
+	bool peak;
+	uint32_t peak_step, peak_count;
+	float peak_acc[PA_CHANNELS_MAX];
 	void *mem;
 	size_t mem_size;
 	void *ring_mem;			/* the ring in the cycle (an async stream's is JackBus's) */
@@ -244,12 +257,12 @@ static void ring_get(pa_stream *s, uint64_t pos, float *const *dst, uint32_t n)
 
 static uint64_t app_frames(const pa_stream *s, uint64_t jack_frames)
 {
-	return s->rs ? (uint64_t)llround((double)jack_frames * s->ratio) : jack_frames;
+	return s->rs || s->peak ? (uint64_t)llround((double)jack_frames * s->ratio) : jack_frames;
 }
 
 static uint32_t jack_frames(const pa_stream *s, uint64_t app)
 {
-	return (uint32_t)(s->rs ? llround((double)app / s->ratio) : (long long)app);
+	return (uint32_t)(s->rs || s->peak ? llround((double)app / s->ratio) : (long long)app);
 }
 
 static uint64_t bytes_to_frames(const pa_stream *s, uint64_t bytes)
@@ -840,7 +853,13 @@ static int stream_connect(pa_stream *s, pa_stream_direction_t dir, const char *d
 				pa_sample_format_to_string(s->ss.format));
 		goto refuse;
 	}
-	if (s->ss.rate != s->jack_rate) {
+	if (!playback && (flags & PA_STREAM_PEAK_DETECT)) {
+		/* peaks at the stream's rate (a meter's 25 Hz), no resampling */
+		s->peak = true;
+		s->peak_step = s->ss.rate < s->jack_rate ? (uint32_t)lrint((double)s->jack_rate / s->ss.rate) : 1;
+		s->ratio = 1.0 / s->peak_step;
+		shim_log("%s: peak detect, %u Hz", s->name, s->ss.rate);
+	} else if (s->ss.rate != s->jack_rate) {
 		if (!resampling_allowed()) {
 			snprintf(why, sizeof(why), "rate %u Hz asked, JackBus runs at %u Hz (resampling is off: "
 					"resample = no in compat.conf, or JACKBUS_PA_RESAMPLE=0)", s->ss.rate, s->jack_rate);
@@ -1161,6 +1180,33 @@ SHIM_EXPORT int pa_stream_write(pa_stream *s, const void *data, size_t nbytes, p
 	return pa_stream_write_ext_free(s, data, nbytes, free_cb, (void *)data, offset, seek);
 }
 
+/* a peak-detect stream's values from n frames in tmp, into tmp2: how many */
+static uint32_t peaks(pa_stream *s, uint32_t n)
+{
+	uint32_t out = 0;
+	float div[PA_CHANNELS_MAX];
+	for (unsigned int ch = 0; ch < s->n_ports; ch++) {
+		int k = jack_port_connected(jackbus_port_jack(s->ports[ch]));
+		div[ch] = 1.0f / (float)(k > 1 ? k : 1);
+	}
+	for (uint32_t i = 0; i < n; i++) {
+		for (unsigned int ch = 0; ch < s->n_ports; ch++) {
+			float v = fabsf(s->tmp[ch][i]);
+			if (v > s->peak_acc[ch])
+				s->peak_acc[ch] = v;
+		}
+		if (++s->peak_count >= s->peak_step) {
+			for (unsigned int ch = 0; ch < s->n_ports; ch++) {
+				s->tmp2[ch][out] = s->peak_acc[ch] * div[ch];
+				s->peak_acc[ch] = 0.0f;
+			}
+			s->peak_count = 0;
+			out++;
+		}
+	}
+	return out;
+}
+
 SHIM_EXPORT int pa_stream_peek(pa_stream *s, const void **data, size_t *nbytes)
 {
 	if (s->state != PA_STREAM_READY || s->dir != PA_STREAM_RECORD) {
@@ -1176,7 +1222,10 @@ SHIM_EXPORT int pa_stream_peek(pa_stream *s, const void **data, size_t *nbytes)
 			atomic_store_explicit(&s->sh->r, r + n, memory_order_release);
 			float *const *src = s->tmp;
 			uint32_t out = n;
-			if (s->rs) {
+			if (s->peak) {
+				out = peaks(s, n);
+				src = s->tmp2;
+			} else if (s->rs) {
 				shim_resampler_push(s->rs, (const float *const *)s->tmp, (int)n);
 				int got = shim_resampler_pull_available(s->rs, s->tmp2, RS_OUT);
 				out = got > 0 ? (uint32_t)got : 0;
