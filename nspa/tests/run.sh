@@ -544,6 +544,8 @@ else
         "$root/nspa/pa-shim/test/reconnect.sh" || fail=1
         # a level meter (pavucontrol's, KDE's): a peak-detect stream
         "$root/nspa/pa-shim/test/peak.sh" || fail=1
+        # several contexts in one process (Chromium's way): every stream on ports of its own
+        "$root/nspa/pa-shim/test/contexts.sh" || fail=1
         # capture through jackbus-pa and jackbus-pw arrives at the level it was sent at
         "$here/capture-level.sh" || fail=1
         # a card's mixer state: saved, put back by jackbus-mixer and by the driver's open

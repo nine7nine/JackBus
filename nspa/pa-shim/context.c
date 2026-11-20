@@ -73,7 +73,6 @@ struct pa_context {
 	pa_operation *ops;
 	pa_stream **streams;
 	int n_streams, cap_streams;
-	uint32_t next_stream_index;
 	struct shim_mixer *mixers;	/* the cards' mixers, opened on first use */
 	/* subscription events, delivered from the main loop as a server's are */
 	struct { pa_subscription_event_type_t t; uint32_t idx; } *sub_q;
@@ -305,9 +304,13 @@ const char *shim_context_app_name(pa_context *c)
 	return n && n[0] ? n : c->name;
 }
 
+/* process-wide, as a server's are: a process is one JackBus node, whatever its contexts
+ * (Chromium opens one per stream), and the index names a second stream's ports */
 uint32_t shim_context_new_stream_index(pa_context *c)
 {
-	return c->next_stream_index++;
+	static atomic_uint next;
+	(void)c;
+	return atomic_fetch_add(&next, 1);
 }
 
 /* ---------------------------------------------------------------- devices */

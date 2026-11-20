@@ -3,7 +3,8 @@
  *
  * A stream is a group of ports on the application's JACK client (node.c), one
  * per channel, named by channel position (FL, FR, ... for playback, in_FL ...
- * for recording; a second stream of the same kind prefixes its index). Its
+ * for recording; a second stream of the same kind, on any of the process's
+ * contexts, prefixes its index, unique in the process). Its
  * samples pass through a ring at JackBus's rate:
  *  - the realtime side, once per cycle, copies one cycle between the ring and
  *    the ports, applying the stream's volume; it honours cork, prebuffering,
@@ -942,14 +943,26 @@ static int stream_connect(pa_stream *s, pa_stream_direction_t dir, const char *d
 		goto refuse;
 	}
 
-	/* the ports */
+	/* the ports, by channel position; when the node has them already (another stream of the
+	 * kind, on any context of the process), prefixed with this stream's index, unique in the
+	 * process: the server is never asked for a name that exists */
 	unsigned long jflags = playback ? JackPortIsOutput : JackPortIsInput;
+	bool prefixed = false;
+	for (unsigned int ch = 0; ch < s->n_ports && !prefixed; ch++) {
+		char pos[16], full[320];
+		position_short(s->map.map[ch], pos, sizeof(pos));
+		snprintf(full, sizeof(full), "%s:%s%s", jack_get_client_name(jackbus_node_client(s->node)),
+				playback ? "" : "in_", pos);
+		prefixed = jack_port_by_name(jackbus_node_client(s->node), full) != NULL;
+	}
 	for (unsigned int ch = 0; ch < s->n_ports; ch++) {
 		char pos[16], name[64];
 		position_short(s->map.map[ch], pos, sizeof(pos));
 		snprintf(name, sizeof(name), "%s%s", playback ? "" : "in_", pos);
+		if (prefixed)
+			snprintf(name, sizeof(name), "%u.%s%s", s->index, playback ? "" : "in_", pos);
 		s->ports[ch] = jackbus_port_add(s->node, name, JACKBUS_AUDIO, jflags);
-		if (s->ports[ch] == NULL) {
+		if (s->ports[ch] == NULL && !prefixed) {
 			snprintf(name, sizeof(name), "%u.%s%s", s->index, playback ? "" : "in_", pos);
 			s->ports[ch] = jackbus_port_add(s->node, name, JACKBUS_AUDIO, jflags);
 		}
