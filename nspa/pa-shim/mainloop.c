@@ -66,8 +66,26 @@ uint64_t shim_now_usec(void)
 	return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000;
 }
 
-struct timeval *shim_rttime(struct timeval *tv, uint64_t usec)
+static pa_io_event *io_new(pa_mainloop_api *a, int fd, pa_io_event_flags_t events,
+		pa_io_event_cb_t cb, void *userdata);
+
+/* As libpulse's pa_context_rttime_new: this library's own main loops take the
+ * monotonic time, marked PA_TIMEVAL_RTCLOCK; any other (libpulse-mainloop-glib's,
+ * an application's own) compares a time with the wall clock and ignores the mark,
+ * so it gets the wall clock's time of the moment (a monotonic one would be long
+ * past to it: every timer due at once, the loop never sleeping) */
+struct timeval *shim_rttime(pa_mainloop_api *a, struct timeval *tv, uint64_t usec)
 {
+	if (a && a->io_new != io_new) {
+		struct timeval now;
+		gettimeofday(&now, NULL);
+		int64_t wall = (int64_t)now.tv_sec * 1000000 + now.tv_usec + ((int64_t)usec - (int64_t)shim_now_usec());
+		if (wall < 0)
+			wall = 0;
+		tv->tv_sec = (time_t)(wall / 1000000);
+		tv->tv_usec = (suseconds_t)(wall % 1000000);
+		return tv;
+	}
 	tv->tv_sec = (time_t)(usec / 1000000ull);
 	tv->tv_usec = (suseconds_t)((usec % 1000000ull) | RTCLOCK_BIT);
 	return tv;

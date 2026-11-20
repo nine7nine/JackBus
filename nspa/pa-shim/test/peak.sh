@@ -3,7 +3,11 @@
 # with PA_STREAM_PEAK_DETECT at 25 Hz gets 25 values a second, each the
 # largest magnitude of the signal in its 1/25 s: a tone of peak 0.2 reads
 # 0.2; two (in phase) into its one port read their average, 0.2, as
-# PulseAudio's downmix. On an isolated JackBus (dummy driver).
+# PulseAudio's downmix. The same on PulseAudio's GLib main loop
+# (libpulse-mainloop-glib, pavucontrol's and Plasma's), whose timers are the
+# wall clock's: the meter takes a few % of a CPU, not all of one (a timer
+# given a monotonic time is due at once, the loop never sleeping). On an
+# isolated JackBus (dummy driver).
 #
 #   make -C nspa/pa-shim && nspa/pa-shim/test/peak.sh
 set -u
@@ -14,7 +18,7 @@ if [ "${NSPA_ISOLATED:-0}" != 1 ]; then
 fi
 L=$here/../jackbus-pa
 logs=$(mktemp -d /tmp/jbpa-peak.XXXXXX)
-cc -O2 -o "$logs/pa-peak" "$here/pa-peak.c" $(pkg-config --cflags --libs libpulse) ||
+cc -O2 -o "$logs/pa-peak" "$here/pa-peak.c" $(pkg-config --cflags --libs libpulse libpulse-mainloop-glib glib-2.0) ||
     { echo "can't build pa-peak"; exit 2; }
 export PULSE_SERVER=unix:/jackbus-pa-test/no-server JACK_DEFAULT_SERVER=jbpeak JACKBUS_COMPAT_CONF=$logs/compat.conf
 export JACKBUS_PA_AUTOCONNECT=0
@@ -44,6 +48,22 @@ if check "$one" && check "$two"; then
 else
     echo "FAIL peak detect: one '$one', two '$two' ($(head -1 "$logs/meter.out"))"
     tail -5 "$logs/meter.err" | sed 's/^/    /'
+    fail=1
+fi
+
+# on the GLib main loop: the values, and the CPU it takes
+"$L" "$logs/pa-peak" 3 glib >"$logs/glib.out" 2>"$logs/glib.err" &
+mp=$!
+i=0; while [ $i -lt 100 ] && ! grep -q '^ready' "$logs/glib.out"; do sleep 0.1; i=$((i + 1)); done
+port=$(jack_lsp 2>/dev/null | grep ':in_MONO$' | head -1)
+jack_connect tone:out "$port"
+wait $mp
+last=$(grep '^peaks' "$logs/glib.out" | tail -1); cpu=$(sed -n 's/^cpu //p' "$logs/glib.out")
+if check "$last" && [ -n "$cpu" ] && [ "$cpu" -lt 30 ]; then
+    echo "PASS on PulseAudio's GLib main loop: '$last', $cpu % of a CPU"
+else
+    echo "FAIL on the GLib main loop: '$last', cpu '$cpu' %"
+    tail -5 "$logs/glib.err" | sed 's/^/    /'
     fail=1
 fi
 kill $(jobs -p) 2>/dev/null; wait 2>/dev/null

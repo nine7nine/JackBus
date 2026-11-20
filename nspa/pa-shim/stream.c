@@ -39,7 +39,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/timerfd.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "shim.h"
 #include "../compat/compat_conf.h"
@@ -115,7 +117,10 @@ struct pa_stream {
 	jackbus_endpoint_t *ep;
 	atomic_bool corked, running;	/* the application's: sh->run is running && !corked */
 
-	/* the application's side */
+	/* the application's side: woken by a timerfd on its main loop (an io event: no timer
+	 * of the loop's, whose resolution may be a millisecond), else a time event */
+	int tfd;
+	pa_io_event *tfd_io;
 	pa_time_event *timer;
 	uint64_t written;		/* application frames written */
 	uint64_t taken;			/* application frames read */
@@ -441,6 +446,46 @@ static size_t readable_bytes(pa_stream *s)
 	return (size_t)app_frames(s, fill) * pa_frame_size(&s->ss) + s->pbuf_len;
 }
 
+/* cycles (of period_ns) until the application has something to do: a record stream's
+ * fragment there, a playback stream's minreq free; 1 while it waits on the application
+ * (data not taken, not written), corked, prebuffering or draining */
+static uint64_t cycles_to_work(pa_stream *s, uint64_t period_ns)
+{
+	uint64_t q = (period_ns * s->jack_rate + 500000000ull) / 1000000000ull;
+	if (q == 0 || atomic_load(&s->corked) || s->drain_op)
+		return 1;
+	if (s->dir == PA_STREAM_RECORD) {
+		uint64_t fill = atomic_load_explicit(&s->sh->w, memory_order_acquire) -
+				atomic_load_explicit(&s->sh->r, memory_order_relaxed);
+		uint64_t frag = SHIM_MIN((uint64_t)s->fragsize, (uint64_t)RING_FRAMES / 2);
+		if (s->pbuf_len || fill >= frag)
+			return 1;
+		return (frag - fill + q - 1) / q;
+	}
+	if (!atomic_load(&s->sh->started))
+		return 1;
+	uint64_t queued = jack_frames(s, queued_app(s));
+	uint64_t low = s->tlength > s->minreq ? s->tlength - s->minreq : 0;
+	if (queued <= low)
+		return 1;
+	return (queued - low + q - 1) / q;
+}
+
+static void set_wake(pa_stream *s, uint64_t usec)
+{
+	if (s->tfd >= 0) {
+		struct itimerspec it;
+		memset(&it, 0, sizeof(it));
+		it.it_value.tv_sec = (time_t)(usec / 1000000ull);
+		it.it_value.tv_nsec = (long)(usec % 1000000ull) * 1000;
+		timerfd_settime(s->tfd, TFD_TIMER_ABSTIME, &it, NULL);
+	} else if (s->timer) {
+		pa_context_rttime_restart(s->context, s->timer, usec);
+	}
+}
+
+/* the application's side wakes when it has something to do, a quarter period after the
+ * cycle that brings it; at most 100 ms apart (50 with automatic timing updates) */
 static void arm_timer(pa_stream *s)
 {
 	uint64_t period, cycle;
@@ -451,11 +496,13 @@ static void arm_timer(pa_stream *s)
 		next = now + 2000;
 	} else {
 		uint64_t period_us = SHIM_MAX(period / 1000, 500ull);
-		next = cycle / 1000 + period_us + period_us / 4;
+		next = cycle / 1000 + cycles_to_work(s, period) * period_us + period_us / 4;
 		while (next <= now)
 			next += period_us;
+		uint64_t cap = now + ((s->flags & PA_STREAM_AUTO_TIMING_UPDATE) && s->latency_cb ? 50000 : 100000);
+		next = SHIM_MIN(next, cap);
 	}
-	pa_context_rttime_restart(s->context, s->timer, next);
+	set_wake(s, next);
 }
 
 static void update_timing(pa_stream *s)
@@ -480,9 +527,8 @@ static void update_timing(pa_stream *s)
 	t->configured_source_usec = t->source_usec;
 }
 
-static void on_timer(pa_mainloop_api *a, pa_time_event *e, const struct timeval *tv, void *userdata)
+static void stream_tick(pa_stream *s)
 {
-	pa_stream *s = userdata;
 	if (s->state != PA_STREAM_READY)
 		return;
 	pa_stream_ref(s);
@@ -533,9 +579,22 @@ static void on_timer(pa_mainloop_api *a, pa_time_event *e, const struct timeval 
 		update_timing(s);
 		s->latency_cb(s, s->latency_ud);
 	}
-	if (s->state == PA_STREAM_READY && s->timer)
+	if (s->state == PA_STREAM_READY && (s->tfd >= 0 || s->timer))
 		arm_timer(s);
 	pa_stream_unref(s);
+}
+
+static void on_timer(pa_mainloop_api *a, pa_time_event *e, const struct timeval *tv, void *userdata)
+{
+	stream_tick(userdata);
+}
+
+static void on_tfd(pa_mainloop_api *a, pa_io_event *e, int fd, pa_io_event_flags_t f, void *userdata)
+{
+	uint64_t n;
+	ssize_t r = read(fd, &n, sizeof(n));
+	(void)r;
+	stream_tick(userdata);
 }
 
 /* --------------------------------------------------------------- creation */
@@ -567,6 +626,7 @@ static pa_stream *stream_new(pa_context *c, const char *name, const pa_sample_sp
 	else if (!pa_channel_map_init_auto(&s->map, ss->channels, PA_CHANNEL_MAP_DEFAULT))
 		pa_channel_map_init_extend(&s->map, ss->channels, PA_CHANNEL_MAP_DEFAULT);
 	s->state = PA_STREAM_UNCONNECTED;
+	s->tfd = -1;
 	s->index = shim_context_new_stream_index(c);
 	s->device_index = PA_INVALID_INDEX;
 	pa_cvolume_set(&s->volume, ss->channels, PA_VOLUME_NORM);
@@ -751,7 +811,7 @@ static void on_ready(pa_mainloop_api *a, pa_defer_event *e, void *userdata)
 	}
 	set_state(s, PA_STREAM_READY);
 	if (s->state == PA_STREAM_READY)
-		on_timer(a, s->timer, NULL, s);		/* the first request at once */
+		stream_tick(s);		/* the first request at once */
 	pa_stream_unref(s);
 }
 
@@ -931,7 +991,14 @@ static int stream_connect(pa_stream *s, pa_stream_direction_t dir, const char *d
 	atomic_store(&s->sh->started, false);
 	s->first_request = true;
 	s->format = pa_format_info_from_sample_spec(&s->ss, &s->map);
-	s->timer = pa_context_rttime_new(c, PA_USEC_INVALID, on_timer, s);
+	pa_mainloop_api *api = shim_context_api(c);
+	s->tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+	if (s->tfd >= 0 && (s->tfd_io = api->io_new(api, s->tfd, PA_IO_EVENT_INPUT, on_tfd, s)) == NULL) {
+		close(s->tfd);
+		s->tfd = -1;
+	}
+	if (s->tfd < 0)
+		s->timer = pa_context_rttime_new(c, PA_USEC_INVALID, on_timer, s);
 	atomic_store_explicit(&s->running, true, memory_order_release);
 	update_run(s);
 	if (async) {
@@ -1002,6 +1069,14 @@ static void stream_close(pa_stream *s)
 			jackbus_port_remove(s->ports[ch]);
 			s->ports[ch] = NULL;
 		}
+	}
+	if (s->tfd_io) {
+		shim_context_api(s->context)->io_free(s->tfd_io);
+		s->tfd_io = NULL;
+	}
+	if (s->tfd >= 0) {
+		close(s->tfd);
+		s->tfd = -1;
 	}
 	if (s->timer) {
 		shim_context_api(s->context)->time_free(s->timer);

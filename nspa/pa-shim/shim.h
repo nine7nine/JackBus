@@ -31,8 +31,9 @@ void shim_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void shim_warn(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 uint64_t shim_now_usec(void);			/* CLOCK_MONOTONIC */
-/* a struct timeval for the main loop API from a monotonic time */
-struct timeval *shim_rttime(struct timeval *tv, uint64_t usec);
+/* a struct timeval for main loop API a from a monotonic time (a's clock: monotonic for
+ * this library's loops, the wall clock for any other, as libpulse's) */
+struct timeval *shim_rttime(pa_mainloop_api *a, struct timeval *tv, uint64_t usec);
 
 /* node.c: the application's JackBus node, one per process (a JACK client
  * named after it), in the cycle while a stream is connected */

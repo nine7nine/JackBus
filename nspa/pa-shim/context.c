@@ -698,9 +698,9 @@ static void try_connect(pa_context *c)
 		if (c->flags & PA_CONTEXT_NOFAIL) {
 			struct timeval tv;
 			if (c->retry == NULL)
-				c->retry = c->api->time_new(c->api, shim_rttime(&tv, shim_now_usec() + 1000000), on_retry, c);
+				c->retry = c->api->time_new(c->api, shim_rttime(c->api, &tv, shim_now_usec() + 1000000), on_retry, c);
 			else
-				c->api->time_restart(c->retry, shim_rttime(&tv, shim_now_usec() + 1000000));
+				c->api->time_restart(c->retry, shim_rttime(c->api, &tv, shim_now_usec() + 1000000));
 			return;
 		}
 		static bool warned;		/* once: an application may retry for ever */
@@ -855,13 +855,13 @@ SHIM_EXPORT pa_time_event *pa_context_rttime_new(const pa_context *c, pa_usec_t 
 		pa_time_event_cb_t cb, void *userdata)
 {
 	struct timeval tv;
-	return c->api->time_new(c->api, usec == PA_USEC_INVALID ? NULL : shim_rttime(&tv, usec), cb, userdata);
+	return c->api->time_new(c->api, usec == PA_USEC_INVALID ? NULL : shim_rttime(c->api, &tv, usec), cb, userdata);
 }
 
 SHIM_EXPORT void pa_context_rttime_restart(const pa_context *c, pa_time_event *e, pa_usec_t usec)
 {
 	struct timeval tv;
-	c->api->time_restart(e, usec == PA_USEC_INVALID ? NULL : shim_rttime(&tv, usec));
+	c->api->time_restart(e, usec == PA_USEC_INVALID ? NULL : shim_rttime(c->api, &tv, usec));
 }
 
 SHIM_EXPORT size_t pa_context_get_tile_size(const pa_context *c, const pa_sample_spec *ss)
