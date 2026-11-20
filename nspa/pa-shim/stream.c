@@ -1009,10 +1009,12 @@ static int stream_connect(pa_stream *s, pa_stream_direction_t dir, const char *d
 	}
 	s->attached = true;
 	autoconnect(s, d);
-	shim_log("%s: %s, %s %u Hz %u ch, tlength %u frames (minreq %u, prebuf %u), to %s", s->name,
+	shim_log("%s: %s, %s %u Hz %u ch, tlength %u frames (minreq %u, prebuf %u, fragsize %u; asked %d %d %d %d), "
+			"flags 0x%x, to %s", s->name,
 			playback ? "playback" : "record", pa_sample_format_to_string(s->ss.format),
-			s->ss.rate, s->ss.channels, s->tlength, s->minreq, atomic_load(&s->sh->prebuf),
-			d ? d->name : "nothing");
+			s->ss.rate, s->ss.channels, s->tlength, s->minreq, atomic_load(&s->sh->prebuf), s->fragsize,
+			attr ? (int)attr->tlength : -2, attr ? (int)attr->minreq : -2, attr ? (int)attr->prebuf : -2,
+			attr ? (int)attr->fragsize : -2, (unsigned)flags, d ? d->name : "nothing");
 
 	set_state(s, PA_STREAM_CREATING);
 	shim_context_stream_add(c, s);
@@ -1393,6 +1395,7 @@ SHIM_EXPORT pa_operation *pa_stream_flush(pa_stream *s, pa_stream_success_cb_t c
 		atomic_store(&s->sh->r, atomic_load(&s->sh->w));
 		s->pbuf_len = 0;
 	}
+	shim_log("%s: flush", s->name);
 	return stream_op(s, cb, userdata, 1, false);
 }
 
@@ -1404,6 +1407,7 @@ SHIM_EXPORT pa_operation *pa_stream_cork(pa_stream *s, int b, pa_stream_success_
 	}
 	atomic_store(&s->corked, b != 0);
 	update_run(s);
+	shim_log("%s: %s", s->name, b ? "cork" : "uncork");
 	return stream_op(s, cb, userdata, 1, false);
 }
 
@@ -1448,6 +1452,8 @@ SHIM_EXPORT pa_operation *pa_stream_set_buffer_attr(pa_stream *s, const pa_buffe
 		return NULL;
 	}
 	fill_attr(s, attr);
+	shim_log("%s: buffer attr: tlength %u minreq %u fragsize %u (asked %d %d %d)", s->name, s->tlength, s->minreq,
+			s->fragsize, attr ? (int)attr->tlength : -2, attr ? (int)attr->minreq : -2, attr ? (int)attr->fragsize : -2);
 	return stream_op(s, cb, userdata, 1, false);
 }
 

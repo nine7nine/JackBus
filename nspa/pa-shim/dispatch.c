@@ -6,7 +6,8 @@
  * library loads, before the application calls any of it, with one
  * implementation's functions for the life of the process:
  *
- *  - JackBus's (libjackbus-pa.so, beside this library): with
+ *  - JackBus's (libjackbus-pa.so, beside this library, or the build named by
+ *    JACKBUS_PA_IMPL, for testing): with
  *    JACKBUS_PA_MODE=jackbus (the jackbus-pa launcher), or when the user's
  *    setting says so ("pulse = yes" in ~/.config/jackbus/compat.conf,
  *    PatchBox's switch) and JackBus runs (its socket is there);
@@ -182,6 +183,16 @@ static bool pipewire_daemon(void)
 
 static void *open_jackbus(const char *self, char *used, size_t len)
 {
+	/* a build of JackBus's library to try instead of the installed one (testing:
+	 * it reaches processes whose launcher sets its own preloads and library path) */
+	const char *impl = getenv("JACKBUS_PA_IMPL");
+	if (impl && impl[0] == '/') {
+		snprintf(used, len, "%s", impl);
+		void *h = dlopen(used, RTLD_NOW | RTLD_LOCAL);
+		if (h)
+			return h;
+		say(true, "JACKBUS_PA_IMPL=%s doesn't load (%s): the installed library", impl, dlerror());
+	}
 	const char *slash = self ? strrchr(self, '/') : NULL;
 	if (slash == NULL)
 		return NULL;

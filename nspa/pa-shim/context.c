@@ -1122,6 +1122,13 @@ static pa_operation *device_volume_op(pa_context *c, bool playback, bool by_name
 	const struct shim_device *d = shim_context_device(c, playback, by_name ? name : NULL, idx);
 	if (d == NULL)
 		return shim_context_success_op(c, cb, userdata, 0, PA_ERR_NOENTITY);
+	if (shim_verbose) {
+		char vs[PA_CVOLUME_SNPRINT_VERBOSE_MAX] = "";
+		if (v)
+			pa_cvolume_snprint_verbose(vs, sizeof(vs), v, NULL, false);
+		shim_log("%s %s %s: %s", playback ? "sink" : "source", d->name, v ? "volume" : "mute",
+				v ? vs : (mute ? "on" : "off"));
+	}
 	int r = v ? shim_mixer_set_volume(c, d, v) : shim_mixer_set_mute(c, d, mute);
 	if (r == -PA_ERR_NOTSUPPORTED) {
 		/* no such control on the device: a fixed volume, as before */
@@ -1457,6 +1464,12 @@ static pa_operation *stream_volume_op(pa_context *c, bool playback, uint32_t idx
 		int mute, pa_context_success_cb_t cb, void *userdata)
 {
 	pa_stream *s = shim_context_find_stream(c, playback, idx);
+	if (s && shim_verbose) {
+		char vs[PA_CVOLUME_SNPRINT_VERBOSE_MAX] = "";
+		if (v)
+			pa_cvolume_snprint_verbose(vs, sizeof(vs), v, NULL, false);
+		shim_log("%s: stream %s: %s", shim_stream_name(s), v ? "volume" : "mute", v ? vs : (mute ? "on" : "off"));
+	}
 	if (s) {
 		shim_stream_set_gain(s, v, mute);
 		notify_sub(c, (playback ? PA_SUBSCRIPTION_EVENT_SINK_INPUT : PA_SUBSCRIPTION_EVENT_SOURCE_OUTPUT) |
