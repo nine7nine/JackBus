@@ -1007,6 +1007,22 @@ int JackEngine::ClientExternalOpen(const char* name, int pid, jack_uuid_t uuid, 
 
     jack_log("JackEngine::ClientExternalOpen: uuid = %d, name = %s", uuid, real_name);
 
+    /*
+     The name was found free by kClientCheck, a request of its own: another client
+     may have opened with it since (two processes reconnecting at once after a server
+     restart, both asking for the same name). Two clients of one name share one futex
+     name: the second's Allocate removes the first's file, its close removes its own,
+     and from then on every client that opens fails (it cannot connect the first's
+     futex). Refused; the client checks the name again.
+     */
+    if (GetClientRefNum(real_name) >= 0) {
+        jack_error("Client name \"%s\" was taken after it was checked: refused", real_name);
+        if (notify_fd >= 0) {
+            close(notify_fd);
+        }
+        return -1;
+    }
+
     int refnum = AllocateRefnum();
     if (refnum < 0) {
         jack_error("No more refnum available");

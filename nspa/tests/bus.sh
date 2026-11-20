@@ -140,6 +140,13 @@ else
     flunk "spoof" "$out/proto-spoof"
 fi
 kill $vp 2>/dev/null; wait $vp 2>/dev/null
+# two clients told one name is free both open with it (two processes reconnecting at
+# once after a server restart): the second is refused, and the first stays reachable
+if timeout 20 "$out/bus_proto" jbbus samename >"$out/proto-samename" 2>&1; then
+    pass "a name taken since its check: the second open refused, the first reachable"
+else
+    flunk "samename" "$out/proto-samename"
+fi
 # a silent connection doesn't hold anyone up
 timeout 20 "$out/bus_proto" jbbus silent >"$out/proto-silent" 2>&1 & pp=$!
 sleep 0.5

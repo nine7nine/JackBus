@@ -15,6 +15,10 @@
    spoof <victim>  a full open by hand, then kRegisterPort on behalf of the
               client named <victim> (refused: result -1), then for itself (0)
               (other clients are served meanwhile; checked by the caller)
+   samename   two clients check the name "dup" (both told it is free), then
+              both open with it: the second is refused (the name was taken
+              since its check); it goes away, and a third client opens (the
+              first's futex is still there for the server to hand it)
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -164,12 +168,14 @@ static void* notify_thread(void* arg)
         memcpy(&refnum, ev + 4 + NAME1, 4);
         memcpy(&notify, ev + 4 + NAME1 + 4, 4);
         memcpy(&sync, ev + 4 + NAME1 + 16, 4);
+        int ok = 0;
         if (notify == 0) {          /* kAddClient: its futex trailer */
-            if (recv_trailer(fd) < 0) break;
+            int n = recv_trailer(fd);
+            if (n < 0) break;
+            ok = n == 1 ? 0 : -1;   /* no futex file: refused, as a JackBus client does */
             if (victim_name && strcmp(name, victim_name) == 0) atomic_store(&victim_ref, refnum);
         }
         if (sync) {
-            int ok = 0;
             if (write_all(fd, &ok, 4) < 0) break;
         }
     }
@@ -254,6 +260,107 @@ static int spoof(int fd, const char* victim)
     return foreign == -1 && mine == 0;
 }
 
+/* a hello on a new connection: the connection, -1 */
+static int hello(const char* server)
+{
+    int fd = connect_bus(server), result = -1, version = 0;
+    if (fd < 0) return -1;
+    if (send_hello(fd, 1) < 0 || read_hello(fd, &result, &version) < 0 || result != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* kClientCheck of name: the server's result, the name it gives in out */
+static int check_name(int fd, const char* name, char* out)
+{
+    unsigned char chk[8 + NAME1 + 4 + 4 + 8 + 4];
+    int type = kClientCheck, size = sizeof(chk) - 8, protocol = 9, options = 0x01, open = 0, result = -1;
+    uint64_t uuid = 0;
+    memset(chk, 0, sizeof(chk));
+    memcpy(chk, &type, 4);
+    memcpy(chk + 4, &size, 4);
+    strncpy((char*)chk + 8, name, NAME1 - 1);
+    memcpy(chk + 8 + NAME1, &protocol, 4);
+    memcpy(chk + 8 + NAME1 + 4, &options, 4);
+    memcpy(chk + 8 + NAME1 + 8, &uuid, 8);
+    memcpy(chk + 8 + NAME1 + 16, &open, 4);
+    unsigned char res[4 + NAME1 + 4];
+    if (write_all(fd, chk, sizeof(chk)) < 0 || read_all(fd, res, sizeof(res)) < 0) return -1;
+    memcpy(&result, res, 4);
+    memcpy(out, res + 4, NAME1);
+    out[NAME1 - 1] = 0;
+    return result;
+}
+
+/* kBusClientOpen as name, its notifications answered by a thread: the server's
+ * result (0 opened); *notify the client's end of the notification socket */
+static int open_as(int fd, const char* name, int* notify, pthread_t* t)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) return -1;
+    int* mine = malloc(sizeof(int));
+    *mine = sv[0];
+    pthread_create(t, NULL, notify_thread, mine);
+    unsigned char op[8 + 4 + 8 + NAME1];
+    int type = kBusClientOpen, size = sizeof(op) - 8, pid = getpid();
+    uint64_t uuid = 0;
+    memset(op, 0, sizeof(op));
+    memcpy(op, &type, 4);
+    memcpy(op + 4, &size, 4);
+    memcpy(op + 8, &pid, 4);
+    memcpy(op + 12, &uuid, 8);
+    strncpy((char*)op + 20, name, NAME1 - 1);
+    int opres[5];
+    if (write_all(fd, op, sizeof(op)) < 0 || send_trailer(fd, sv[1]) < 0) return -1;
+    close(sv[1]);
+    if (read_all(fd, opres, sizeof(opres)) < 0) return -1;
+    if (opres[0] == 0 && recv_trailer(fd) != 5) return -1;
+    *notify = sv[0];
+    return opres[0];
+}
+
+static int samename(const char* server)
+{
+    char a_name[NAME1], b_name[NAME1], c_name[NAME1];
+    int a = hello(server), b = hello(server);
+    if (a < 0 || b < 0) return 0;
+    int ca = check_name(a, "dup", a_name), cb = check_name(b, "dup", b_name);
+    printf("samename: both checked: %d \"%s\", %d \"%s\"\n", ca, a_name, cb, b_name);
+    if (ca != 0 || cb != 0 || strcmp(a_name, "dup") || strcmp(b_name, "dup")) return 0;
+    int na = -1, nb = -1, nc = -1;
+    pthread_t ta, tb, tc;
+    int ra = open_as(a, a_name, &na, &ta);
+    int rb = open_as(b, b_name, &nb, &tb);
+    printf("samename: the first opens: %d; the second, as the same name: %d\n", ra, rb);
+    /* the second goes away (refused, or opened: its process killed) */
+    close(b);
+    if (nb >= 0) {
+        shutdown(nb, SHUT_RDWR);
+        pthread_join(tb, NULL);
+        close(nb);
+    }
+    usleep(500 * 1000);
+    int c = hello(server);
+    int cc = c < 0 ? -1 : check_name(c, "probe", c_name);
+    int rc = cc == 0 ? open_as(c, c_name, &nc, &tc) : -1;
+    printf("samename: then a third client opens: %d\n", rc);
+    if (c >= 0) close(c);
+    if (nc >= 0) {
+        shutdown(nc, SHUT_RDWR);
+        pthread_join(tc, NULL);
+        close(nc);
+    }
+    close(a);
+    if (na >= 0) {
+        shutdown(na, SHUT_RDWR);
+        pthread_join(ta, NULL);
+        close(na);
+    }
+    return ra == 0 && rb != 0 && rc == 0;
+}
+
 int main(int argc, char* argv[])
 {
     if (argc < 3) {
@@ -307,6 +414,8 @@ int main(int argc, char* argv[])
         ok = write(fd, pkt, sizeof(pkt)) == (ssize_t)sizeof(pkt) && dropped(fd, 8000);
     } else if (strcmp(what, "spoof") == 0) {
         ok = argc > 3 && spoof(fd, argv[3]);
+    } else if (strcmp(what, "samename") == 0) {
+        ok = samename(argv[1]);
     } else if (strcmp(what, "silent") == 0) {
         sleep(3);
         ok = !dropped(fd, 0);
